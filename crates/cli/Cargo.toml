@@ -1,0 +1,14 @@
+[package]
+name = "tea"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gtk = { version = "0.11.4", package = "gtk4", features = ["v4_12"] }
+tea-core = { path = "../core" }
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.4"
+toml_edit = "0.25.13"
+zbus = { version = "5.19.0", features = ["blocking-api"] }
+libc = "0.2.189"

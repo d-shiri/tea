@@ -1,0 +1,16 @@
+[Unit]
+Description=tea — take a break, whether you like it or not
+# Needs the graphical session for the overlay; without this it can start
+# before the compositor exists and find no monitors.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/tea
+# Break debt is persisted, so a restart resumes rather than resets.
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
