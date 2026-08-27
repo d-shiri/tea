@@ -411,7 +411,7 @@ pub struct Dial {
 /// The mark shown on the break page. Embedded rather than read from disk: it is
 /// part of the application, and a logo loaded by path is a logo that eventually
 /// goes missing on someone else's machine.
-const LOGO: &[u8] = include_bytes!("../assets/tea.png");
+const LOGO: &[u8] = include_bytes!("../../../assets/tea.png");
 
 fn logo(height: i32) -> Option<gtk::Image> {
     let texture = gtk::gdk::Texture::from_bytes(&glib::Bytes::from_static(LOGO)).ok()?;

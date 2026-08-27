@@ -1,10 +1,30 @@
 # tea
 
-Stops you working every N minutes and makes you rest for M.
+![The break page: a countdown ring that drains as the break runs](assets/break-page.png)
 
-Target: Ubuntu GNOME / Wayland. Soft enforcement — a fullscreen overlay that
-re-raises when you switch away. Dodgeable if you're determined; annoying enough
-to work.
+You mean to take breaks. You don't.
+
+tea waits in the background while you work, and every so often it takes the
+screen for a few minutes. There's a countdown. When it runs out you get your
+desk back.
+
+It tries not to be daft about it:
+
+- If you've already been away from the keyboard, that counted as your break —
+  it won't ambush you the second you sit back down.
+- If you're in a call or watching something, it waits until you're done rather
+  than dropping a black screen over your face.
+- If you genuinely can't stop right now, there's a button for that. Twice an
+  hour, so it stays a reprieve and not a habit.
+
+It can't physically hold you there — you can still switch away if you're
+determined. The aim is for stopping to be easier than dodging.
+
+Built for Ubuntu GNOME on Wayland.
+
+    ./dist/install.sh     # build it, install it, start it running
+    tea status            # see what it is up to
+    tea set-work 30m      # change your mind
 
 ## Config
 
@@ -22,7 +42,7 @@ matching flag that overrides the file (`tea --help`).
     pause = "1m"
 
     [postpone]
-    duration = "3m"
+    duration = "1m"
     budget = 2
     window = "1h"
 
