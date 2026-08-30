@@ -7,9 +7,11 @@
 //! determined can still escape; the goal is to make ignoring it deliberate.
 
 use gtk::gdk;
+use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
 use crate::config::Dur;
+use crate::session::Session;
 use tea_core::{Blocker, Snooze};
 use serde::Deserialize;
 use std::cell::{Cell, RefCell};
@@ -47,14 +49,33 @@ pub struct GtkBlocker {
     /// One fullscreen window per monitor. Index 0 is the one that fights for
     /// focus; see `engage`.
     anim: Anim,
-    windows: Vec<gtk::ApplicationWindow>,
-    counters: Vec<gtk::Label>,
-    dials: Vec<Rc<RefCell<Dial>>>,
+    hold: Hold,
+    /// One page per monitor. Shared, because insisting replaces them: see
+    /// `insist`, which builds a fresh window rather than re-showing a hidden
+    /// one, and has to put the new one somewhere `update` will find it.
+    pages: Rc<RefCell<Vec<Page>>>,
     warning: Option<gtk::ApplicationWindow>,
+    /// True for as long as the current break's windows are meant to be on
+    /// screen. The insisting below runs on timers that outlive a single tick,
+    /// and a timer that re-shows a window after the break has ended would leave
+    /// the screen covered with no way back.
+    live: Rc<Cell<bool>>,
+    /// Asked whether the user has touched anything lately. Insisting is gated
+    /// on input, not on focus: see `insist` for why focus alone lies.
+    session: Rc<RefCell<Session>>,
+    /// Watches the monitor list while a break is up, so a screen plugged in or
+    /// unplugged mid-break gets its page added or dropped rather than either an
+    /// uncovered monitor or a window with nowhere to go.
+    monitors_watch: Option<(gio::ListModel, glib::SignalHandlerId)>,
 }
 
 impl GtkBlocker {
-    pub fn new(app: &gtk::Application, postpone: Rc<Cell<bool>>, anim: Anim) -> Self {
+    pub fn new(
+        app: &gtk::Application,
+        postpone: Rc<Cell<bool>>,
+        anim: Anim,
+        hold: Hold,
+    ) -> Self {
         if let Some(display) = gdk::Display::default() {
             let provider = gtk::CssProvider::new();
             provider.load_from_string(CSS);
@@ -68,180 +89,124 @@ impl GtkBlocker {
             app: app.clone(),
             postpone,
             anim,
-            windows: Vec::new(),
-            counters: Vec::new(),
-            dials: Vec::new(),
+            hold,
+            pages: Rc::new(RefCell::new(Vec::new())),
             warning: None,
+            live: Rc::new(Cell::new(false)),
+            session: Rc::new(RefCell::new(Session::connect())),
+            monitors_watch: None,
         }
     }
+}
 
-    fn monitors() -> Vec<gdk::Monitor> {
-        let Some(display) = gdk::Display::default() else {
-            return Vec::new();
-        };
-        let list = display.monitors();
-        (0..list.n_items())
-            .filter_map(|i| list.item(i).and_then(|o| o.downcast::<gdk::Monitor>().ok()))
-            .collect()
-    }
+fn monitors_in(list: &gio::ListModel) -> Vec<gdk::Monitor> {
+    (0..list.n_items())
+        .filter_map(|i| list.item(i).and_then(|o| o.downcast::<gdk::Monitor>().ok()))
+        .collect()
 }
 
 impl Blocker for GtkBlocker {
     fn engage(&mut self, total: Duration) {
         self.release();
         println!("\n[BREAK] stop. {} of rest.", clock(total));
+        self.live = Rc::new(Cell::new(true));
 
-        let arrival = self.anim.seconds();
-        let monitors = Self::monitors();
-        for (index, monitor) in monitors.iter().enumerate() {
-            let win = gtk::ApplicationWindow::builder()
-                .application(&self.app)
-                .decorated(false)
-                .title("tea")
-                .build();
-            win.add_css_class("tea-overlay");
+        let Some(display) = gdk::Display::default() else {
+            eprintln!("tea: no display — overlay not shown");
+            return;
+        };
+        let monitors = display.monitors();
+        let built: Vec<Page> = monitors_in(&monitors)
+            .iter()
+            .map(|monitor| build_page(&self.app, monitor, total, total, &self.anim, Entrance::Full))
+            .collect();
 
-            // One drawing surface covering the whole window. It has to be the
-            // full page: cairo clips to the widget, so a blast drawn inside a
-            // small dial can never reach the edges of the screen.
-            let (stage, state) = build_stage(total, &self.anim);
-
-            // Sized from the screen, not fixed: a slot generous enough to clear
-            // the dial on a large display would not fit on a laptop panel at
-            // all, and the column would be clipped.
-            let geometry = monitor.geometry();
-            let slot = slot_height(geometry.width(), geometry.height());
-            let mark = logo_height(ring_radius(geometry.width(), geometry.height()));
-
-            // The countdown must land on the exact centre of the screen, where
-            // the dial is drawn. Rather than offsetting the other two from the
-            // centre -- which left the subtitle sitting on top of the numbers --
-            // the title and subtitle are given equal fixed heights above and
-            // below. Equal slots put the middle child in the middle by
-            // construction, whatever the text in them turns out to be.
-            let count = gtk::Label::new(Some(&clock(total)));
-            count.add_css_class("tea-count");
-
-            let title = gtk::Label::new(Some("Time to stop"));
-            title.add_css_class("tea-title");
-
-            // The mark and the title share the upper slot. They are grouped and
-            // centred inside it rather than packed from its top edge, so they
-            // stay balanced against the subtitle below.
-            let group = gtk::Box::new(gtk::Orientation::Vertical, 16);
-            group.set_halign(gtk::Align::Center);
-            group.set_valign(gtk::Align::Center);
-            group.set_vexpand(true);
-            if let Some(mark) = logo(mark) {
-                group.append(&mark);
-            }
-            group.append(&title);
-
-            let head = gtk::Box::new(gtk::Orientation::Vertical, 0);
-            head.set_size_request(-1, slot);
-            head.append(&group);
-
-            let sub = gtk::Label::new(Some("Look away from the screen. Stand up."));
-            sub.add_css_class("tea-sub");
-            sub.set_size_request(-1, slot);
-
-            let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
-            column.append(&head);
-            column.append(&count);
-            column.append(&sub);
-            column.set_halign(gtk::Align::Center);
-            column.set_valign(gtk::Align::Center);
-
-            let layers = gtk::Overlay::new();
-            layers.set_child(Some(&stage));
-            layers.add_overlay(&column);
-            win.set_child(Some(&layers));
-
-            // The words arrive after the blast has passed over them. Every
-            // timing is a share of the configured entrance, so turning that one
-            // number changes the whole sequence in proportion.
-            //
-            // Fades only, no sliding: these three share a box, so animating a
-            // margin would resize it every frame and the centred column -- the
-            // countdown with it -- would twitch for the whole entrance.
-            animate_in(&count, arrival * 0.34, 0, arrival * 0.30);
-            animate_in(&head, arrival * 0.34, 0, arrival * 0.46);
-            animate_in(&sub, arrival * 0.34, 0, arrival * 0.58);
-
-            // Insurance: if the frame clock never delivers -- a stalled
-            // compositor, a machine thrashing on resume -- an overlay stuck
-            // part-way through would be an invisible break. Force the finished
-            // state once the animation has had more than long enough.
-            let settled: Vec<gtk::Widget> = vec![
-                count.clone().upcast(),
-                head.clone().upcast(),
-                sub.clone().upcast(),
-            ];
-            let finish = Rc::clone(&state);
-            let redraw = stage.clone();
-            glib::timeout_add_local_once(
-                Duration::from_secs_f64((arrival * 1.6).max(1.0)),
-                move || {
-                    for w in &settled {
-                        w.set_opacity(1.0);
-                    }
-                    finish.borrow_mut().entrance = 1.0;
-                    redraw.queue_draw();
-                },
-            );
-
-            // Escape, Alt-F4 and the rest go nowhere. The break ends when the
-            // break ends.
-            let keys = gtk::EventControllerKey::new();
-            keys.connect_key_pressed(|_, _, _, _| glib::Propagation::Stop);
-            win.add_controller(keys);
-            win.connect_close_request(|_| glib::Propagation::Stop);
-
-            // Only one window chases focus. If every monitor's window did, they
-            // would each steal it from the next and spin forever.
-            if index == 0 {
-                win.connect_is_active_notify(|w| {
-                    if !w.is_active() && w.is_visible() {
-                        w.present();
-                    }
-                });
-            }
-
-            win.fullscreen_on_monitor(monitor);
-            win.present();
-            self.counters.push(count);
-            self.dials.push(state);
-            self.windows.push(win);
-        }
-
-        if self.windows.is_empty() {
+        if built.is_empty() {
             eprintln!("tea: no monitors found — overlay not shown");
+            return;
         }
+
+        let soft = !self.hold.insists();
+        if soft {
+            arm_soft(&built[0]);
+        } else {
+            insist(
+                &self.app,
+                Rc::clone(&self.pages),
+                total,
+                self.anim.clone(),
+                self.hold.every(),
+                Rc::clone(&self.live),
+                Rc::clone(&self.session),
+            );
+        }
+
+        *self.pages.borrow_mut() = built;
+
+        // Screens come and go mid-break — a laptop docked or undocked. Follow
+        // the list: a monitor that appears would otherwise be an uncovered
+        // desk, and pages must land on the monitors that exist *now*, not the
+        // ones the break started with.
+        let app = self.app.clone();
+        let pages = Rc::clone(&self.pages);
+        let live = Rc::clone(&self.live);
+        let anim = self.anim.clone();
+        let watch = monitors.connect_items_changed(move |list, _, _, _| {
+            if !live.get() {
+                return;
+            }
+            let old: Vec<Page> = pages.borrow().clone();
+            let Some(first) = old.first() else {
+                return;
+            };
+            let left = Duration::from_secs_f64(first.dial.borrow().remaining.max(0.0));
+            let fresh: Vec<Page> = monitors_in(list)
+                .iter()
+                .map(|m| build_page(&app, m, total, left, &anim, Entrance::None))
+                .collect();
+            // Every monitor gone at once (a lid closing, a dock resetting):
+            // keep the old pages. They will be rebuilt onto whatever comes
+            // back, and dropping them here would end the coverage for good.
+            if fresh.is_empty() {
+                return;
+            }
+            if soft {
+                arm_soft(&fresh[0]);
+            }
+            *pages.borrow_mut() = fresh;
+            for page in old {
+                page.win.destroy();
+            }
+        });
+        self.monitors_watch = Some((monitors.clone(), watch));
     }
 
     fn update(&mut self, remaining: Duration) {
         let text = clock(remaining);
-        for label in &self.counters {
-            label.set_text(&text);
-        }
-        // The dial runs itself between ticks so the sweep is smooth; this is
-        // the once-a-second correction back to what the scheduler actually says.
-        for dial in &self.dials {
-            dial.borrow_mut().remaining = remaining.as_secs_f64();
+        for page in self.pages.borrow().iter() {
+            page.count.set_text(&text);
+            // The dial runs itself between ticks so the sweep is smooth; this
+            // is the once-a-second correction back to what the scheduler says.
+            page.dial.borrow_mut().remaining = remaining.as_secs_f64();
         }
     }
 
     fn release(&mut self) {
-        if self.windows.is_empty() {
+        // Before anything else: whatever is still insisting must stop insisting
+        // now, not on its next tick.
+        self.live.set(false);
+        if let Some((monitors, watch)) = self.monitors_watch.take() {
+            monitors.disconnect(watch);
+        }
+        let pages: Vec<Page> = self.pages.borrow_mut().drain(..).collect();
+        if pages.is_empty() {
             return;
         }
-        for win in self.windows.drain(..) {
+        for page in pages {
             // close_request is wired to Stop, so ask the window to go away in a
             // way it cannot veto.
-            win.destroy();
+            page.win.destroy();
         }
-        self.counters.clear();
-        self.dials.clear();
         println!("[back]  break over, timer reset.");
     }
 
@@ -364,6 +329,335 @@ impl Blocker for TerminalBlocker {
     }
 }
 
+/// What the break page does when you switch away from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Grip {
+    /// It covers the screen and asks once for the focus. Alt-Tab away and it
+    /// stays where it is, behind whatever you switched to.
+    #[default]
+    Soft,
+    /// It puts itself back in front, for as long as the break lasts. Leaving is
+    /// still physically possible -- see `insist` -- but you have to keep doing
+    /// it, which is the point.
+    Insist,
+}
+
+/// How hard the break page fights to stay in front.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Hold {
+    pub mode: Grip,
+    /// How often an insisting page checks whether it is still the one in front.
+    pub recheck: Dur,
+}
+
+impl Default for Hold {
+    fn default() -> Self {
+        // Soft by default. A tool that seizes the screen the first time you run
+        // it, before you have agreed to that, is a tool you uninstall.
+        Self { mode: Grip::Soft, recheck: Dur(Duration::from_millis(400)) }
+    }
+}
+
+impl Hold {
+    fn insists(&self) -> bool {
+        self.mode == Grip::Insist
+    }
+
+    /// Clamped: fast enough to beat a deliberate switch, slow enough that a
+    /// typo cannot turn the poll into a busy loop.
+    fn every(&self) -> Duration {
+        self.recheck.0.clamp(Duration::from_millis(100), Duration::from_secs(5))
+    }
+}
+
+/// One screen's worth of break page: the window, the screen it belongs to, and
+/// the two things that have to be kept up to date while the break runs.
+///
+/// Cloning one shares the same window and dial rather than copying them, which
+/// is what lets a page be handed to a timer without freezing what it shows.
+#[derive(Clone)]
+struct Page {
+    win: gtk::ApplicationWindow,
+    monitor: gdk::Monitor,
+    count: gtk::Label,
+    dial: Rc<RefCell<Dial>>,
+}
+
+/// Soft mode's one concession: a single window asks once for the focus back,
+/// and takes no for an answer. Only one page gets this, because a request from
+/// every screen at once is several windows stealing the focus from each other.
+fn arm_soft(page: &Page) {
+    page.win.connect_is_active_notify(|w| {
+        if !w.is_active() && w.is_visible() {
+            w.present();
+        }
+    });
+}
+
+/// Whether a page plays the arrival animation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Entrance {
+    /// The break has just started: the dark washes in, the blast goes out, the
+    /// dial lands.
+    Full,
+    /// A page being put back in front mid-break. It has to be *there*, at once,
+    /// showing the time that is actually left. Replaying the explosion every
+    /// time you switched away would be pantomime, and would hide the countdown
+    /// behind three seconds of animation each time.
+    None,
+}
+
+/// Build one page and put it on screen.
+///
+/// `remaining` is separate from `total` because a page is not always born at
+/// the start of a break: `insist` builds replacements part-way through, and
+/// they have to arrive showing the right time on the clock and the right amount
+/// of ring left.
+fn build_page(
+    app: &gtk::Application,
+    monitor: &gdk::Monitor,
+    total: Duration,
+    remaining: Duration,
+    anim: &Anim,
+    entrance: Entrance,
+) -> Page {
+    let arrival = match entrance {
+        Entrance::Full => anim.seconds(),
+        Entrance::None => 0.0,
+    };
+
+    let win = gtk::ApplicationWindow::builder()
+        .application(app)
+        .decorated(false)
+        .title("tea")
+        .build();
+    win.add_css_class("tea-overlay");
+
+    // One drawing surface covering the whole window. It has to be the
+    // full page: cairo clips to the widget, so a blast drawn inside a
+    // small dial can never reach the edges of the screen.
+    let (stage, state) = build_stage(total, remaining, arrival, anim);
+
+    // Sized from the screen, not fixed: a slot generous enough to clear
+    // the dial on a large display would not fit on a laptop panel at
+    // all, and the column would be clipped.
+    let geometry = monitor.geometry();
+    let slot = slot_height(geometry.width(), geometry.height());
+    let mark = logo_height(ring_radius(geometry.width(), geometry.height()));
+
+    // The countdown must land on the exact centre of the screen, where
+    // the dial is drawn. Rather than offsetting the other two from the
+    // centre -- which left the subtitle sitting on top of the numbers --
+    // the title and subtitle are given equal fixed heights above and
+    // below. Equal slots put the middle child in the middle by
+    // construction, whatever the text in them turns out to be.
+    let count = gtk::Label::new(Some(&clock(remaining)));
+    count.add_css_class("tea-count");
+
+    let title = gtk::Label::new(Some("Time to stop"));
+    title.add_css_class("tea-title");
+
+    // The mark and the title share the upper slot. They are grouped and
+    // centred inside it rather than packed from its top edge, so they
+    // stay balanced against the subtitle below.
+    let group = gtk::Box::new(gtk::Orientation::Vertical, 16);
+    group.set_halign(gtk::Align::Center);
+    group.set_valign(gtk::Align::Center);
+    group.set_vexpand(true);
+    if let Some(mark) = logo(mark) {
+        group.append(&mark);
+    }
+    group.append(&title);
+
+    let head = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    head.set_size_request(-1, slot);
+    head.append(&group);
+
+    let sub = gtk::Label::new(Some("Look away from the screen. Stand up."));
+    sub.add_css_class("tea-sub");
+    sub.set_size_request(-1, slot);
+
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    column.append(&head);
+    column.append(&count);
+    column.append(&sub);
+    column.set_halign(gtk::Align::Center);
+    column.set_valign(gtk::Align::Center);
+
+    let layers = gtk::Overlay::new();
+    layers.set_child(Some(&stage));
+    layers.add_overlay(&column);
+    win.set_child(Some(&layers));
+
+    // The words arrive after the blast has passed over them. Every
+    // timing is a share of the configured entrance, so turning that one
+    // number changes the whole sequence in proportion.
+    //
+    // Fades only, no sliding: these three share a box, so animating a
+    // margin would resize it every frame and the centred column -- the
+    // countdown with it -- would twitch for the whole entrance.
+    animate_in(&count, arrival * 0.34, 0, arrival * 0.30);
+    animate_in(&head, arrival * 0.34, 0, arrival * 0.46);
+    animate_in(&sub, arrival * 0.34, 0, arrival * 0.58);
+
+    // Insurance: if the frame clock never delivers -- a stalled
+    // compositor, a machine thrashing on resume -- an overlay stuck
+    // part-way through would be an invisible break. Force the finished
+    // state once the animation has had more than long enough.
+    let settled: Vec<gtk::Widget> =
+        vec![count.clone().upcast(), head.clone().upcast(), sub.clone().upcast()];
+    let finish = Rc::clone(&state);
+    let redraw = stage.clone();
+    glib::timeout_add_local_once(Duration::from_secs_f64((arrival * 1.6).max(1.0)), move || {
+        for w in &settled {
+            w.set_opacity(1.0);
+        }
+        finish.borrow_mut().entrance = 1.0;
+        redraw.queue_draw();
+    });
+
+    // Escape, Alt-F4 and the rest go nowhere. The break ends when the
+    // break ends.
+    let keys = gtk::EventControllerKey::new();
+    keys.connect_key_pressed(|_, _, _, _| glib::Propagation::Stop);
+    win.add_controller(keys);
+    win.connect_close_request(|_| glib::Propagation::Stop);
+
+    // Fullscreen before the window is ever shown. Asking afterwards costs a
+    // second round trip with the compositor, and the window spends it at the
+    // wrong size.
+    win.fullscreen_on_monitor(monitor);
+    win.present();
+
+    Page { win, monitor: monitor.clone(), count, dial: state }
+}
+
+/// Keep putting the pages back in front until the break is over.
+///
+/// Wayland has no keyboard grab and Mutter has no layer-shell, so there is no
+/// call that says "this window owns the screen now". What is left is attrition.
+/// Two levers, in order of rudeness:
+///
+/// 1. `present`, which is a *request*. GNOME turns it down when the window
+///    asking is not one you just interacted with: it flags the window for
+///    attention and leaves the focus where it was. That is precisely our case,
+///    so on its own it loses.
+/// 2. Building the page again, as a brand new window, and destroying the old
+///    one behind it. A window that has just appeared is a window the compositor
+///    will raise, because it cannot tell that one from any other new window.
+///
+/// The second lever is a *replacement*, not a re-show, and that is the whole
+/// point. Hiding a fullscreen window and showing it again is the obvious way to
+/// look new, and it works for about a second: the surface comes back mapped and
+/// the right size, but its frame clock never resumes, so nothing is ever drawn
+/// into it again. What you get is a page that is unmistakably there and totally
+/// black -- the worst of both, since it covers the screen without telling you
+/// how long is left. A new window has a new frame clock and no such history.
+///
+/// Every screen is put back, not just the one with the focus on it. Only one
+/// window can be active at a time, but the others can still be buried: raise a
+/// window on the second monitor and the page there stays underneath it, which
+/// is a break page you can simply work beside. The windows do not fight each
+/// other over this, because the question asked each time is about all of them
+/// at once -- is *any* of our pages the active window? Clicking the page on the
+/// second screen is not an escape, and must not provoke the first screen into
+/// snatching the focus back.
+///
+/// What pulls either lever is the user's *input*, never the focus alone. Focus
+/// is a liar here: Mutter refuses it to any window the user has not touched, so
+/// a page can be covering every screen, doing its job perfectly, and still not
+/// be the active window -- true of every page this daemon has ever presented,
+/// since nobody clicks a break page into being. A loop keyed on focus alone
+/// tears those perfectly fine pages down and rebuilds them a few times a
+/// second for the entire break: a strobe, which is how this function earned
+/// its rewrite. What actually marks an escape is input landing somewhere else:
+/// typing or mousing while no page has the focus is work happening beside the
+/// break. Hands off the keyboard, and the pages are left completely alone,
+/// whoever the compositor thinks is active. If the idle monitor cannot be
+/// asked at all, insisting degrades to sitting still rather than to strobing.
+///
+/// Nothing here can stop someone who keeps switching away. It makes escaping a
+/// thing you have to keep choosing, which is all a break tool should ever do.
+fn insist(
+    app: &gtk::Application,
+    pages: Rc<RefCell<Vec<Page>>>,
+    total: Duration,
+    anim: Anim,
+    every: Duration,
+    live: Rc<Cell<bool>>,
+    session: Rc<RefCell<Session>>,
+) {
+    /// Polite requests ignored before the pages are built again.
+    const PATIENCE: u32 = 3;
+
+    /// Input younger than this means the user is working right now. Old enough
+    /// that held-down typing never slips through a gap between keystrokes, and
+    /// young enough that a user who stops fighting goes quiet before the next
+    /// escalation -- at the default cadence the rebuild fires after
+    /// `PATIENCE + 1` ticks (1.6s), by which time untouched input is stale.
+    const RECENT: Duration = Duration::from_millis(1200);
+
+    let app = app.clone();
+    let refused = Cell::new(0u32);
+
+    glib::timeout_add_local(every, move || {
+        // The break ended: stop, and never touch the windows again. They are
+        // being destroyed, and building a replacement here would leave a page
+        // on screen that nothing owns.
+        if !live.get() {
+            return glib::ControlFlow::Break;
+        }
+        let showing: Vec<Page> = pages.borrow().clone();
+        if showing.is_empty() {
+            return glib::ControlFlow::Break;
+        }
+
+        if showing.iter().any(|p| p.win.is_active()) {
+            refused.set(0);
+            return glib::ControlFlow::Continue;
+        }
+
+        // Nobody focused on us proves nothing by itself -- see above. Only
+        // fresh input somewhere that is not a break page is an escape.
+        let working =
+            session.borrow_mut().idle().is_some_and(|idle| idle < RECENT);
+        if !working {
+            refused.set(0);
+            return glib::ControlFlow::Continue;
+        }
+
+        refused.set(refused.get() + 1);
+        if refused.get() <= PATIENCE {
+            for page in &showing {
+                page.win.present();
+            }
+            return glib::ControlFlow::Continue;
+        }
+
+        // Asked nicely, got nowhere. Come back as new windows, carrying the
+        // time that is actually left rather than restarting the break.
+        println!("[hold]  still working — the page comes back");
+        refused.set(0);
+        let fresh: Vec<Page> = showing
+            .iter()
+            .map(|page| {
+                let left = Duration::from_secs_f64(page.dial.borrow().remaining.max(0.0));
+                build_page(&app, &page.monitor, total, left, &anim, Entrance::None)
+            })
+            .collect();
+
+        // The new pages are up before the old ones go, so the screen is never
+        // uncovered -- not even for the frame it takes to swap them.
+        *pages.borrow_mut() = fresh;
+        for page in showing {
+            page.win.destroy();
+        }
+        glib::ControlFlow::Continue
+    });
+}
+
 /// How the break page arrives. Tunable because taste in this varies more than
 /// any other setting here, and because tuning it by rebuilding is miserable.
 #[derive(Debug, Clone, Deserialize)]
@@ -471,14 +765,21 @@ fn slot_height(width: i32, height: i32) -> i32 {
 
 /// The whole page: the dark, a blast that sweeps out past the corners, and the
 /// countdown dial settling in the middle of it.
-fn build_stage(total: Duration, anim: &Anim) -> (gtk::DrawingArea, Rc<RefCell<Dial>>) {
-    let arrival = anim.seconds();
+///
+/// `arrival` is passed in rather than read from `anim`, because a page built
+/// part-way through a break has to skip the entrance whatever the config says.
+fn build_stage(
+    total: Duration,
+    remaining: Duration,
+    arrival: f64,
+    anim: &Anim,
+) -> (gtk::DrawingArea, Rc<RefCell<Dial>>) {
     let burst_share = anim.burst_share();
     let shards = anim.shard_count();
 
     let state = Rc::new(RefCell::new(Dial {
         total: total.as_secs_f64().max(1.0),
-        remaining: total.as_secs_f64(),
+        remaining: remaining.as_secs_f64(),
         // With the animation switched off, start already arrived.
         entrance: if arrival <= 0.0 { 1.0 } else { 0.0 },
         last_frame: 0,
@@ -590,6 +891,25 @@ fn build_stage(total: Duration, anim: &Anim) -> (gtk::DrawingArea, Rc<RefCell<Di
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The recheck interval drives a timer on the main loop. Zero would be a
+    /// busy loop that fights the compositor at frame rate, and a value in hours
+    /// would mean the page never actually insists.
+    #[test]
+    fn the_recheck_interval_cannot_be_absurd() {
+        let at = |d| Hold { mode: Grip::Insist, recheck: Dur(d) }.every();
+
+        assert_eq!(at(Duration::ZERO), Duration::from_millis(100));
+        assert_eq!(at(Duration::from_secs(3600)), Duration::from_secs(5));
+        assert_eq!(at(Duration::from_millis(250)), Duration::from_millis(250));
+        assert_eq!(Hold::default().every(), Duration::from_millis(400));
+    }
+
+    #[test]
+    fn soft_is_the_default_and_does_not_insist() {
+        assert!(!Hold::default().insists());
+        assert!(Hold { mode: Grip::Insist, ..Hold::default() }.insists());
+    }
 
     /// The layout has one job: the words go outside the ring, on every screen.
     #[test]

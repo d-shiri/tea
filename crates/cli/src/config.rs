@@ -25,6 +25,16 @@ pause = "1m"
 duration = "1m"       # how much time one postpone buys
 budget = 2            # postpones allowed per window (0 disables postponing)
 window = "1h"
+
+[hold]
+# What the break page does when you switch away from it.
+#   "soft"   — it covers the screen and leaves it at that. Alt-Tab, or the
+#              Activities key, and you are back at your desk with the page
+#              sitting behind everything.
+#   "insist" — it puts itself back in front, again, for as long as the break
+#              lasts. You can still get out, but only by keeping at it.
+mode = "soft"
+recheck = "400ms"     # how often an insisting page checks it is still in front
 "#;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -39,6 +49,7 @@ pub struct FileConfig {
     pub calls: Calls,
     pub sound: crate::sound::Config,
     pub animation: crate::overlay::Anim,
+    pub hold: crate::overlay::Hold,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -78,6 +89,7 @@ impl Default for FileConfig {
             calls: Calls { warn_after: Dur(d.defer_warn_after) },
             sound: crate::sound::Config::default(),
             animation: crate::overlay::Anim::default(),
+            hold: crate::overlay::Hold::default(),
         }
     }
 }
@@ -285,6 +297,27 @@ mod tests {
         let got: tea_core::Config = parsed.into();
         assert_eq!(got.work, Duration::from_secs(50 * 60));
         assert_eq!(got.brk, tea_core::Config::default().brk);
+    }
+
+    #[test]
+    fn the_screen_is_only_held_when_the_file_asks_for_it() {
+        use crate::overlay::Grip;
+
+        // The shipped file, and an empty one, both leave you able to walk away.
+        let shipped: FileConfig = toml::from_str(DEFAULT_FILE).unwrap();
+        assert_eq!(shipped.hold.mode, Grip::Soft);
+        assert_eq!(toml::from_str::<FileConfig>("").unwrap().hold.mode, Grip::Soft);
+
+        let asked: FileConfig =
+            toml::from_str("[hold]\nmode = \"insist\"\nrecheck = \"250ms\"\n").unwrap();
+        assert_eq!(asked.hold.mode, Grip::Insist);
+        assert_eq!(asked.hold.recheck.0, Duration::from_millis(250));
+
+        // A mode nobody implements must say so rather than quietly meaning soft.
+        let err = toml::from_str::<FileConfig>("[hold]\nmode = \"maximum\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("maximum"), "{err}");
     }
 
     #[test]

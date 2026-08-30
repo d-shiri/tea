@@ -152,6 +152,17 @@ pub fn show(cfg: &Config, file: &FileConfig, path: &Path) {
         field(&s, "shards", &anim.shards.to_string(), "pieces of debris");
     }
 
+    section(&s, "holding the screen");
+    match file.hold.mode {
+        crate::overlay::Grip::Soft => {
+            field(&s, "switching away", "soft", "the page stays put, behind what you switched to")
+        }
+        crate::overlay::Grip::Insist => {
+            field(&s, "switching away", "insist", "the page puts itself back in front");
+            field(&s, "rechecks every", &literal(file.hold.recheck.0), "how often it looks");
+        }
+    }
+
     section(&s, "change a setting");
     columns(&s, &["tea set-work 30m", "tea set-break 5m", "tea set-warn 30s"]);
     columns(&s, &["tea set-sound <file>"]);

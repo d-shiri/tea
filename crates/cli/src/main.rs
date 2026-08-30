@@ -230,6 +230,7 @@ fn main() {
 
     let sound_cfg = file.sound.clone();
     let anim_cfg = file.animation.clone();
+    let hold_cfg = file.hold;
     let mut cfg: tea_core::Config = file.into();
     let Overrides { work, brk, warn_before, idle_credit, idle_pause, postpone, postpone_budget } =
         over;
@@ -266,7 +267,7 @@ fn main() {
         // Default to a real break, so what you see is what you will get.
         let total = run_for.unwrap_or(cfg.brk);
         println!("tea: showing the break page for {}", human(total));
-        return preview(total, sound_cfg, anim_cfg);
+        return preview(total, sound_cfg, anim_cfg, hold_cfg);
     }
 
     if run_warning {
@@ -287,7 +288,7 @@ fn main() {
     if headless {
         run_headless(cfg, sound_cfg);
     } else {
-        run_gtk(cfg, sound_cfg, anim_cfg);
+        run_gtk(cfg, sound_cfg, anim_cfg, hold_cfg);
     }
 }
 
@@ -303,7 +304,12 @@ fn run_headless(cfg: tea_core::Config, sound: sound::Config) {
 
 /// The real thing. GTK owns the main loop; the engine rides a 1s timeout on it,
 /// so there are no threads and no locking anywhere in this program.
-fn run_gtk(cfg: tea_core::Config, sound: sound::Config, anim: overlay::Anim) {
+fn run_gtk(
+    cfg: tea_core::Config,
+    sound: sound::Config,
+    anim: overlay::Anim,
+    hold: overlay::Hold,
+) {
     let app = gtk::Application::builder().application_id(APP_ID).build();
 
     let started = Cell::new(false);
@@ -318,14 +324,18 @@ fn run_gtk(cfg: tea_core::Config, sound: sound::Config, anim: overlay::Anim) {
         }
 
         // Nothing is on screen between breaks, and GtkApplication quits when
-        // its last window closes -- so hold it open explicitly.
-        let hold = app.hold();
+        // its last window closes -- so keep it open explicitly.
+        let keep_open = app.hold();
         let engine = RefCell::new(Engine::start(cfg.clone(), sound.clone()));
-        let ui =
-            RefCell::new(GtkBlocker::new(app, engine.borrow().postpone_flag(), anim.clone()));
+        let ui = RefCell::new(GtkBlocker::new(
+            app,
+            engine.borrow().postpone_flag(),
+            anim.clone(),
+            hold,
+        ));
 
         glib::timeout_add_seconds_local(1, move || {
-            let _keep = &hold;
+            let _keep = &keep_open;
             engine.borrow_mut().step(&mut *ui.borrow_mut());
             glib::ControlFlow::Continue
         });
@@ -338,7 +348,7 @@ fn run_gtk(cfg: tea_core::Config, sound: sound::Config, anim: overlay::Anim) {
 
 /// Put the overlay up for a fixed time and exit, so it can be tried without
 /// waiting out a work interval.
-fn preview(total: Duration, sound: sound::Config, anim: overlay::Anim) {
+fn preview(total: Duration, sound: sound::Config, anim: overlay::Anim, hold: overlay::Hold) {
     // Deliberately not APP_ID: sharing it would route this into the running
     // service instead of starting a throwaway app.
     let app = gtk::Application::builder()
@@ -350,6 +360,7 @@ fn preview(total: Duration, sound: sound::Config, anim: overlay::Anim) {
             app,
             Rc::new(Cell::new(false)),
             anim.clone(),
+            hold,
         )));
         let mut player = sound::Player::new(sound.clone());
         player.break_starts();
@@ -382,10 +393,13 @@ fn preview_warning(total: Duration, postpone: Duration, anim: overlay::Anim) {
         .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
         .build();
     app.connect_activate(move |app| {
+        // The toast never holds the screen, so how the break page behaves does
+        // not come into it.
         let ui = Rc::new(RefCell::new(GtkBlocker::new(
             app,
             Rc::new(Cell::new(false)),
             anim.clone(),
+            overlay::Hold::default(),
         )));
         ui.borrow_mut().warn(total, Some(tea_core::Snooze { duration: postpone, left: 2 }));
 

@@ -17,8 +17,10 @@ It tries not to be daft about it:
 - If you genuinely can't stop right now, there's a button for that. Twice an
   hour, so it stays a reprieve and not a habit.
 
-It can't physically hold you there — you can still switch away if you're
-determined. The aim is for stopping to be easier than dodging.
+By default it can't physically hold you there — you can still switch away if
+you're determined. The aim is for stopping to be easier than dodging. If that
+is too easy, `hold.mode = "insist"` makes the page put itself back in front
+every time you leave it.
 
 Built for Ubuntu GNOME on Wayland.
 
@@ -46,9 +48,56 @@ matching flag that overrides the file (`tea --help`).
     budget = 2
     window = "1h"
 
+    [hold]
+    mode = "soft"
+    recheck = "400ms"
+
 Durations are `"90s"`, `"25m"`, `"1h"`; a bare number means minutes. Unknown
 keys are a hard error — a silently ignored typo in a config you edit twice a
 year is worse than a crash on startup.
+
+## Holding the screen
+
+`hold.mode` decides what the break page does when you switch away from it.
+
+    soft      it covers the screen and leaves it at that (default)
+    insist    it puts itself back in front, for the whole break
+
+Wayland is the reason there is a choice at all. There is no keyboard grab and
+Mutter implements no layer-shell, so no client can own the screen; `insist` is
+attrition instead. Every `recheck` it asks whether you are working *beside* the
+break: input arriving while none of the pages holds the focus. Input is the
+tell, not focus alone — GNOME refuses focus to windows you never touched, so a
+page can be covering every screen, doing its job, without being "active", and
+fighting over that would be a strobe. Keep your hands off the keyboard and
+nothing on screen so much as blinks.
+
+When you *are* still typing or mousing, the page asks for the focus back. GNOME
+turns that request down when it comes from a window you didn't just touch, so
+after a few refusals the page is *built again* — a brand new window, carrying
+the time that's actually left, put up before the old one is destroyed behind
+it. A window that has just appeared is one the compositor will raise.
+
+Built again, not hidden and re-shown. Re-showing is the obvious way to look new
+and it works for about a second: the surface comes back mapped and the right
+size, but its frame clock never resumes, so nothing is drawn into it ever again.
+That gives you a page that is unmistakably there and completely black — the
+worst of both, since it covers the screen without telling you how long is left.
+
+Every screen comes back, not just the one you left from. Only one window can
+hold the focus, but any of the others can be *buried* — raise something on your
+second monitor and a page that only guarded the first would leave you a desk to
+work at. So the question asked each `recheck` is about all the screens at once:
+if none of the pages is the active window, all of them are put back. Clicking
+the page on the second screen is not an escape, and does not make the first one
+snatch the focus away.
+
+Screens that come and go mid-break are followed, in both modes: dock the laptop
+and the new monitors get pages carrying the time that's left, undock it and the
+survivors keep theirs.
+
+None of it stops someone who keeps switching away, and nothing here should.
+`insist` makes leaving a thing you have to keep choosing.
 
 ## Status
 
