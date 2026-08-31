@@ -86,6 +86,77 @@ pub fn set_sound(path: &Path, file: &Path) -> Result<String, String> {
     Ok(format!("sound: chime, {}", file.display()))
 }
 
+/// Turn the tag on or off, writing a token the first time it is needed.
+///
+/// Same one-step spirit as `set_sound`: switching it on and leaving no way to
+/// authenticate would be a trap, so the secret is made here rather than left as
+/// homework.
+pub fn set_nfc(path: &Path, switch: &str) -> Result<String, String> {
+    let on = match switch.trim().to_lowercase().as_str() {
+        "on" | "enabled" | "active" | "yes" | "true" => true,
+        "off" | "disabled" | "inactive" | "no" | "false" => false,
+        other => return Err(format!("{other:?}: say `tea set-nfc on`, or `tea set-nfc off`")),
+    };
+
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut doc = text
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| format!("{} is not valid TOML:\n{e}", path.display()))?;
+
+    if !doc.contains_key("nfc") {
+        doc["nfc"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let was = doc["nfc"].get("mode").and_then(|v| v.as_str()).unwrap_or("off").to_string();
+    put(&mut doc["nfc"], "mode", if on { "on" } else { "off" });
+
+    // Only ever adds one. Rewriting the token on every `set-nfc on` would
+    // silently break a tag that is already on the wall.
+    let known = doc["nfc"]
+        .get("token")
+        .and_then(|v| v.as_str())
+        .is_some_and(|t| !t.trim().is_empty());
+    let minted = on && !known;
+    if minted {
+        put(&mut doc["nfc"], "token", &crate::nfc::fresh_token()?);
+    }
+
+    let updated = doc.to_string();
+    let parsed: FileConfig = toml::from_str(&updated)
+        .map_err(|e| format!("that change would break the config:\n{e}"))?;
+    let mut cfg: Config = parsed.into();
+    config::reconcile(&mut cfg)?;
+
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, &updated).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("cannot replace {}: {e}", path.display()))?;
+    if known || minted {
+        // The file now holds something worth keeping to yourself.
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    let mode = if on { "on" } else { "off" };
+    Ok(match (was == mode, minted) {
+        (_, true) => format!("nfc: {was} → {mode}, with a fresh token"),
+        (true, _) => format!("nfc: already {mode}"),
+        _ => format!("nfc: {was} → {mode}"),
+    })
+}
+
+/// Replace a value without losing the comment sitting beside it, adding the key
+/// if it was never there.
+fn put(table: &mut toml_edit::Item, key: &str, value: &str) {
+    match table.get_mut(key).and_then(|item| item.as_value_mut()) {
+        Some(existing) => {
+            let decor = existing.decor().clone();
+            *existing = toml_edit::Value::from(value);
+            *existing.decor_mut() = decor;
+        }
+        None => table[key] = toml_edit::value(value),
+    }
+}
+
 pub fn show(cfg: &Config, file: &FileConfig, path: &Path) {
     let s = Style::new();
 
@@ -136,6 +207,11 @@ pub fn show(cfg: &Config, file: &FileConfig, path: &Path) {
     if matches!(sound.mode, crate::sound::Mode::Chime | crate::sound::Mode::Both) {
         field(&s, "on break start", "", &named(&sound.start_file));
         field(&s, "on break end", "", &named(&sound.end_file));
+        let scan = match sound.scan_file.as_os_str().is_empty() {
+            true => "the built-in chime".to_string(),
+            false => named(&sound.scan_file),
+        };
+        field(&s, "on scan", "", &scan);
     }
     if matches!(sound.mode, crate::sound::Mode::Voice | crate::sound::Mode::Both) {
         field(&s, "says", "", &format!("\"{}\"", sound.start_words));
@@ -163,9 +239,51 @@ pub fn show(cfg: &Config, file: &FileConfig, path: &Path) {
         }
     }
 
+    section(&s, "the tag");
+    let nfc = &file.nfc;
+    if !nfc.on() {
+        field(&s, "nfc", "off", "breaks end when the countdown does");
+    } else {
+        field(&s, "nfc", "on", "the page waits to be released by a scan");
+        if nfc.asks() {
+            let ha = &nfc.home_assistant;
+            field(&s, "watches", "", &format!("{} on {}", ha.entity, ha.url));
+            field(&s, "asks every", &literal(ha.poll.0), "while a break is on screen");
+        }
+        if nfc.asks() {
+            field(&s, "answers on", "", &format!("{} — for `tea unlock` only", nfc.listen));
+        } else {
+            field(&s, "answers on", "", &nfc.listen);
+        }
+        if nfc.fronted() {
+            field(&s, "reached through", "", &nfc.url);
+        }
+        if nfc.grace.0.is_zero() {
+            field(&s, "gives up after", "never", "the page waits for as long as it takes");
+        } else {
+            field(&s, "gives up after", &human(nfc.grace.0), "then hands the desk back anyway");
+        }
+        field(&s, "page says", "", &format!("\"{}\"", nfc.prompt));
+        // Never the token itself: this output gets pasted into terminals that
+        // other people read over.
+        if nfc.asks() {
+            field(&s, "hub token", "", &match nfc.home_assistant.secret() {
+                // The source, never the secret: this output gets read over
+                // shoulders and pasted into issues.
+                Ok(_) => format!("from {}", tilde(std::path::Path::new(&nfc.home_assistant.secret_source()))),
+                Err(why) => format!("MISSING — {why}"),
+            });
+        } else {
+            field(&s, "token", "", match nfc.token.trim().is_empty() {
+                true => "MISSING — `tea set-nfc on` writes one",
+                false => "set — `tea set-nfc on` prints the tag's URL",
+            });
+        }
+    }
+
     section(&s, "change a setting");
     columns(&s, &["tea set-work 30m", "tea set-break 5m", "tea set-warn 30s"]);
-    columns(&s, &["tea set-sound <file>"]);
+    columns(&s, &["tea set-sound <file>", "tea set-nfc on|off"]);
     println!();
     println!("    {}", s.dim("editing the file by hand works too — then: tea reload"));
     println!("    {}", s.dim("tea run previews the page, re-reading the file each time"));

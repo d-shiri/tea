@@ -35,6 +35,53 @@ window = "1h"
 #              lasts. You can still get out, but only by keeping at it.
 mode = "soft"
 recheck = "400ms"     # how often an insisting page checks it is still in front
+
+[nfc]
+# Sitting out a break at your own desk is not a break. With this on, the page
+# does not lift when the countdown ends -- it lifts when a tag you have to get
+# up and walk to says you went. Scanning early counts: the page still runs its
+# full time, and then simply ends.
+#
+#   mode    "off" (default) or "on". "enabled"/"active" also read as on.
+#   listen  address:port to answer on. Loopback by default, which answers this
+#           machine and nothing else. A phone in another room needs either an
+#           address on your network ("0.0.0.0:9797", plus a hole in the
+#           firewall) or `url` below, which needs neither.
+#   url     where the tag's URL really points, when something else is the front
+#           door -- a reverse proxy on a box that is already listening, with
+#           this machine dialling out to it. Nothing here listens to the
+#           network in that arrangement. See "The ear" in the README.
+#   token   the secret in the tag's URL. Anyone who can reach the door and
+#           knows it can end your break. `tea set-nfc on` writes a fresh one.
+#   grace   give up on the tag after this long and hand the desk back anyway,
+#           so a flat phone does not cost you an afternoon. "off" waits.
+#   prompt  what the page says while it waits. Yours knows where your tag is.
+mode = "off"
+listen = "127.0.0.1:9797"
+url = ""
+token = ""
+grace = "10m"
+prompt = "Scan the tag to get your desk back"
+
+# The other way round, and the tidier one: nothing reaches tea at all, tea does
+# the asking. Home Assistant already knows when a tag is scanned -- its app
+# fires the event -- so tea watches the entity and reads any change of its state
+# as a scan. No open port, nothing forwarded in, and a hub that cannot be
+# reached is something tea finds out about itself, in time to say so on the page
+# rather than leaving you to discover it in another room.
+#
+# Only asked while a break is on screen. Set url and entity to switch it on.
+#
+#   entity  `tag.<name>` if your Home Assistant makes tag entities. If it does
+#           not, point this at any helper an automation touches on the
+#           `tag_scanned` trigger -- an input_button is one line of YAML. Any
+#           entity whose state changes will do, which is why a Zigbee button by
+#           the kettle works just as well as a sticker.
+[nfc.home_assistant]
+url = ""              # e.g. "http://homeassistant.local:8123"
+token = ""            # a long-lived access token, from your profile page
+entity = ""           # e.g. "tag.living_room"
+poll = "2s"           # how often to ask, while a break is up
 "#;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -50,6 +97,7 @@ pub struct FileConfig {
     pub sound: crate::sound::Config,
     pub animation: crate::overlay::Anim,
     pub hold: crate::overlay::Hold,
+    pub nfc: crate::nfc::Config,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -90,6 +138,7 @@ impl Default for FileConfig {
             sound: crate::sound::Config::default(),
             animation: crate::overlay::Anim::default(),
             hold: crate::overlay::Hold::default(),
+            nfc: crate::nfc::Config::default(),
         }
     }
 }
@@ -124,6 +173,11 @@ impl From<FileConfig> for tea_core::Config {
             postpone_budget: f.postpone.budget,
             postpone_window: f.postpone.window.0,
             defer_warn_after: f.calls.warn_after.0,
+            // One switch, two consequences: the ear opens and the break page
+            // stops lifting on the countdown alone. Splitting them would let
+            // you configure a break nothing on earth could end.
+            require_release: f.nfc.on(),
+            release_grace: f.nfc.grace.0,
         }
     }
 }

@@ -26,8 +26,13 @@ pub struct Config {
     pub mode: Mode,
     pub start_file: PathBuf,
     pub end_file: PathBuf,
+    /// What a successful scan sounds like. Unset plays the chime tea ships --
+    /// the celebration should work without anyone hunting the internet for a
+    /// sound file -- and pointing this at a file of your own replaces it.
+    pub scan_file: PathBuf,
     pub start_words: String,
     pub end_words: String,
+    pub scan_words: String,
 }
 
 impl Default for Config {
@@ -38,8 +43,10 @@ impl Default for Config {
             mode: Mode::Off,
             start_file: PathBuf::new(),
             end_file: PathBuf::new(),
+            scan_file: PathBuf::new(),
             start_words: "Time for a break".into(),
             end_words: "Break over".into(),
+            scan_words: String::new(),
         }
     }
 }
@@ -67,9 +74,9 @@ impl Player {
         let wants_voice = matches!(cfg.mode, Mode::Voice | Mode::Both);
 
         if wants_chime {
-            for file in [&cfg.start_file, &cfg.end_file] {
-                // An unset file means "no sound at this moment", which is a
-                // choice, not a mistake.
+            for file in [&cfg.start_file, &cfg.end_file, &cfg.scan_file] {
+                // An unset file means "no sound at this moment" -- or, for the
+                // scan, the built-in chime -- which is a choice, not a mistake.
                 if file.as_os_str().is_empty() {
                     continue;
                 }
@@ -104,6 +111,17 @@ impl Player {
         self.emit(&file, &words);
     }
 
+    /// The tag was scanned: the celebration's soundtrack. The built-in chime
+    /// only when nothing is configured -- `scan_file` replaces it entirely.
+    pub fn scanned(&mut self) {
+        let file = match self.cfg.scan_file.as_os_str().is_empty() {
+            false => self.cfg.scan_file.clone(),
+            true => builtin_chime().unwrap_or_default(),
+        };
+        let words = self.cfg.scan_words.clone();
+        self.emit(&file, &words);
+    }
+
     fn emit(&mut self, file: &std::path::Path, words: &str) {
         self.reap();
         if matches!(self.cfg.mode, Mode::Chime | Mode::Both)
@@ -129,6 +147,29 @@ impl Player {
     fn reap(&mut self) {
         self.pending.retain_mut(|c| !matches!(c.try_wait(), Ok(Some(_)) | Err(_)));
     }
+}
+
+/// The one sound tea ships, for the scan celebration. Embedded rather than
+/// read from the repo -- the logo's rule, applied to audio: a sound loaded by
+/// path is a sound that eventually goes missing on someone else's machine.
+const CHIME_WAV: &[u8] = include_bytes!("../../../assets/celebrate.wav");
+
+/// Where the embedded chime lives at runtime, written on first use. The
+/// players are separate processes and cannot be handed bytes, so the bytes
+/// get a path. Rewritten when the size disagrees, so an upgrade that changes
+/// the sound actually changes the sound.
+fn builtin_chime() -> Option<PathBuf> {
+    let dir = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?
+        .join("tea");
+    let path = dir.join("celebrate.wav");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() == CHIME_WAV.len() as u64) {
+        return Some(path);
+    }
+    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::write(&path, CHIME_WAV).ok()?;
+    Some(path)
 }
 
 /// Pick a player that can actually decode this file. Extension-based, because

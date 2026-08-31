@@ -35,7 +35,11 @@ window.tea-toast button {
 window.tea-toast button:hover { background-color: #374260; }
 .tea-title { font-size: 26pt; font-weight: 300; color: #e6e9f0; }
 .tea-count { font-size: 56pt; font-weight: 200; color: #e6e9f0; }
+.tea-await { font-size: 30pt; font-weight: 300; color: #e6e9f0; }
 .tea-sub   { font-size: 12pt; color: #79839c; }
+.tea-tag       { font-size: 11pt; color: #79839c; }
+.tea-tag.done  { color: #73d19e; }
+.tea-tag.unseen { color: #c9a35f; }
 .tea-warn-text { font-size: 15pt; color: #e6e9f0; }
 .tea-warn-sub  { font-size: 11pt; color: #79839c; }
 ";
@@ -55,6 +59,22 @@ pub struct GtkBlocker {
     /// one, and has to put the new one somewhere `update` will find it.
     pages: Rc<RefCell<Vec<Page>>>,
     warning: Option<gtk::ApplicationWindow>,
+    /// What to ask for once the countdown has run out, if anything. Shared,
+    /// because a page rebuilt mid-wait -- by `insist`, or by a monitor being
+    /// plugged in -- has to be born already asking. A page that came back
+    /// showing a fresh countdown would be telling you a lie about a break that
+    /// is over.
+    ask: Option<String>,
+    waiting: Rc<Cell<bool>>,
+    /// Whether the tag has been scanned for the break on screen. Shared for the
+    /// same reason `waiting` is: a page rebuilt by `insist` has to come back
+    /// knowing it, or every escape attempt would quietly undo the walk you
+    /// already made.
+    scanned: Rc<Cell<bool>>,
+    /// Whether a scan could be noticed at all. Shared for the same reason as
+    /// the two above: a rebuilt page must not go back to promising something
+    /// that cannot happen.
+    reachable: Rc<Cell<bool>>,
     /// True for as long as the current break's windows are meant to be on
     /// screen. The insisting below runs on timers that outlive a single tick,
     /// and a timer that re-shows a window after the break has ended would leave
@@ -75,6 +95,7 @@ impl GtkBlocker {
         postpone: Rc<Cell<bool>>,
         anim: Anim,
         hold: Hold,
+        ask: Option<String>,
     ) -> Self {
         if let Some(display) = gdk::Display::default() {
             let provider = gtk::CssProvider::new();
@@ -92,10 +113,76 @@ impl GtkBlocker {
             hold,
             pages: Rc::new(RefCell::new(Vec::new())),
             warning: None,
+            ask,
+            waiting: Rc::new(Cell::new(false)),
+            scanned: Rc::new(Cell::new(false)),
+            reachable: Rc::new(Cell::new(true)),
             live: Rc::new(Cell::new(false)),
             session: Rc::new(RefCell::new(Session::connect())),
             monitors_watch: None,
         }
+    }
+}
+
+/// Everything a page shows that is not the clock.
+#[derive(Clone, Default)]
+struct Face {
+    /// Waiting, and the scan has landed: the page is a second from coming down
+    /// and should say so rather than still asking. Rebuilt pages included --
+    /// `insist` can replace one between the scan and the page lifting.
+    done: bool,
+    /// Set once the countdown is spent and the page is only waiting: what to
+    /// ask for, in the user's own words.
+    ask: Option<String>,
+    /// `None` when nothing is gating this break, and the page carries no badge
+    /// at all -- a break that ends by itself has nothing to report.
+    tag: Option<Tag>,
+}
+
+/// Whether the walk has been made yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tag {
+    Pending,
+    Scanned,
+    /// Nothing is watching for a scan that could be reached. Worth saying on
+    /// the page rather than in a log: the alternative is standing in another
+    /// room waving a phone at a sticker that was never going to work.
+    Unseen,
+}
+
+impl GtkBlocker {
+    /// A closure the page-rebuilding paths can ask, at the moment they rebuild,
+    /// what the new page should show. Passing the answer itself would freeze it
+    /// as it was when the break started -- and a page that came back saying the
+    /// tag was still unscanned would be asking for a second walk.
+    fn face(&self) -> impl Fn() -> Face + 'static {
+        let waiting = Rc::clone(&self.waiting);
+        let scanned = Rc::clone(&self.scanned);
+        let reachable = Rc::clone(&self.reachable);
+        let ask = self.ask.clone();
+        move || face_of(ask.as_deref(), waiting.get(), scanned.get(), reachable.get())
+    }
+}
+
+/// Split out from the closure above so the rules can be checked without a
+/// display: what a page shows is decided here, and a rebuilt page that forgot
+/// a scan would send someone back down the hall for nothing.
+fn face_of(ask: Option<&str>, waiting: bool, scanned: bool, reachable: bool) -> Face {
+    Face {
+        done: waiting && scanned,
+        // Only once the countdown is spent. Before that the page has a clock to
+        // show, and the badge below says all that needs saying about the tag.
+        ask: ask.filter(|_| waiting).map(str::to_string),
+        // The prompt doubles as the switch: it is set exactly when a tag is
+        // what ends this break.
+        tag: ask.map(|_| match (scanned, reachable) {
+            // A walk already made outlives the hub it was reported through:
+            // once the scan is in, it does not matter that the thing which saw
+            // it has since gone away.
+            (true, _) => Tag::Scanned,
+            (false, false) => Tag::Unseen,
+            (false, true) => Tag::Pending,
+        }),
     }
 }
 
@@ -110,15 +197,25 @@ impl Blocker for GtkBlocker {
         self.release();
         println!("\n[BREAK] stop. {} of rest.", clock(total));
         self.live = Rc::new(Cell::new(true));
+        // A break that is resumed mid-wait engages and is told to ask again in
+        // the same tick, so these only clear what the last break left behind.
+        self.waiting.set(false);
+        self.scanned.set(false);
+        self.reachable.set(true);
 
         let Some(display) = gdk::Display::default() else {
             eprintln!("tea: no display — overlay not shown");
             return;
         };
+        // Built once and shared by every screen: they are all showing the same
+        // break, and a fresh one at that -- nothing has been scanned for it yet.
+        let face = self.face()();
         let monitors = display.monitors();
         let built: Vec<Page> = monitors_in(&monitors)
             .iter()
-            .map(|monitor| build_page(&self.app, monitor, total, total, &self.anim, Entrance::Full))
+            .map(|monitor| {
+                build_page(&self.app, monitor, total, total, &self.anim, Entrance::Full, &face)
+            })
             .collect();
 
         if built.is_empty() {
@@ -138,6 +235,7 @@ impl Blocker for GtkBlocker {
                 self.hold.every(),
                 Rc::clone(&self.live),
                 Rc::clone(&self.session),
+                self.face(),
             );
         }
 
@@ -151,6 +249,7 @@ impl Blocker for GtkBlocker {
         let pages = Rc::clone(&self.pages);
         let live = Rc::clone(&self.live);
         let anim = self.anim.clone();
+        let facing = self.face();
         let watch = monitors.connect_items_changed(move |list, _, _, _| {
             if !live.get() {
                 return;
@@ -160,9 +259,10 @@ impl Blocker for GtkBlocker {
                 return;
             };
             let left = Duration::from_secs_f64(first.dial.borrow().remaining.max(0.0));
+            let face = facing();
             let fresh: Vec<Page> = monitors_in(list)
                 .iter()
-                .map(|m| build_page(&app, m, total, left, &anim, Entrance::None))
+                .map(|m| build_page(&app, m, total, left, &anim, Entrance::None, &face))
                 .collect();
             // Every monitor gone at once (a lid closing, a dock resetting):
             // keep the old pages. They will be rebuilt onto whatever comes
@@ -182,6 +282,9 @@ impl Blocker for GtkBlocker {
     }
 
     fn update(&mut self, remaining: Duration) {
+        if self.waiting.get() {
+            return;
+        }
         let text = clock(remaining);
         for page in self.pages.borrow().iter() {
             page.count.set_text(&text);
@@ -195,6 +298,7 @@ impl Blocker for GtkBlocker {
         // Before anything else: whatever is still insisting must stop insisting
         // now, not on its next tick.
         self.live.set(false);
+        self.waiting.set(false);
         if let Some((monitors, watch)) = self.monitors_watch.take() {
             monitors.disconnect(watch);
         }
@@ -202,10 +306,28 @@ impl Blocker for GtkBlocker {
         if pages.is_empty() {
             return;
         }
-        for page in pages {
-            // close_request is wired to Stop, so ask the window to go away in a
-            // way it cannot veto.
-            page.win.destroy();
+        // A celebration still playing gets to finish: the pages hang on for
+        // whatever is left of it and then go. A scan is the one way a break
+        // ends that the user personally earned, and tearing the page down
+        // mid-confetti hands them a desk instead of a reward. Insisting has
+        // already stopped -- `live` is down -- so the linger is only a linger.
+        let linger = pages
+            .iter()
+            .filter_map(|p| p.dial.borrow().celebrate)
+            .map(|t| CELEBRATE * (1.0 - t))
+            .fold(0.0, f64::max);
+        if linger > 0.05 {
+            glib::timeout_add_local_once(Duration::from_secs_f64(linger), move || {
+                for page in &pages {
+                    page.win.destroy();
+                }
+            });
+        } else {
+            for page in pages {
+                // close_request is wired to Stop, so ask the window to go away
+                // in a way it cannot veto.
+                page.win.destroy();
+            }
         }
         println!("[back]  break over, timer reset.");
     }
@@ -294,6 +416,64 @@ impl Blocker for GtkBlocker {
         }
     }
 
+    fn release_source(&mut self, reachable: bool) {
+        // Told every tick, so it must do nothing at all when nothing changed.
+        if self.reachable.get() == reachable || self.scanned.get() {
+            return;
+        }
+        self.reachable.set(reachable);
+        if !reachable {
+            println!("[wait]  nothing is watching for a scan — saying so on the page");
+        }
+        let tag = if reachable { Tag::Pending } else { Tag::Unseen };
+        for page in self.pages.borrow().iter() {
+            if let Some(badge) = &page.badge {
+                badge.paint(tag);
+                animate_in(&badge.row, 0.25, 0, 0.0);
+            }
+        }
+    }
+
+    fn release_seen(&mut self) {
+        // Called on every tick the scheduler still has a scan banked, so that a
+        // page resumed after a restart comes back green. Doing the work once is
+        // the point: repainting a label every second is how a page ends up
+        // flickering at someone who is trying to rest.
+        if self.scanned.replace(true) {
+            return;
+        }
+        let waiting = self.waiting.get();
+        for page in self.pages.borrow().iter() {
+            if waiting {
+                thank_them(page);
+            }
+            // The walk happened: confetti, on every screen at once. A page
+            // that was only waiting for this stays up long enough to play it
+            // -- see `release`.
+            page.dial.borrow_mut().celebrate = Some(0.0);
+            if let Some(badge) = &page.badge {
+                badge.paint(Tag::Scanned);
+                // A quarter of a second of fade, so the change registers as
+                // something that just happened rather than something that was
+                // always there.
+                animate_in(&badge.row, 0.25, 0, 0.0);
+            }
+        }
+    }
+
+    fn await_release(&mut self) {
+        let Some(ask) = self.ask.clone() else {
+            // Nothing is gating this break, so there is nothing to ask for and
+            // the page is about to come down anyway.
+            return;
+        };
+        println!("[wait]  time served — {ask}");
+        self.waiting.set(true);
+        for page in self.pages.borrow().iter() {
+            ask_for_the_tag(page, &ask);
+        }
+    }
+
     fn note(&mut self, msg: &str) {
         println!("[note]  {msg}");
     }
@@ -322,6 +502,10 @@ impl Blocker for TerminalBlocker {
             Some(s) => println!("[warn]  break in {} ({} postpones left)", clock(until_break), s.left),
             None => println!("[warn]  break in {} (no postpones left)", clock(until_break)),
         }
+    }
+
+    fn await_release(&mut self) {
+        println!("\r[wait]  time served — waiting for the tag.");
     }
 
     fn note(&mut self, msg: &str) {
@@ -382,6 +566,10 @@ struct Page {
     win: gtk::ApplicationWindow,
     monitor: gdk::Monitor,
     count: gtk::Label,
+    title: gtk::Label,
+    sub: gtk::Label,
+    /// Absent unless a tag is what ends this break.
+    badge: Option<Badge>,
     dial: Rc<RefCell<Dial>>,
 }
 
@@ -395,6 +583,179 @@ fn arm_soft(page: &Page) {
         }
     });
 }
+
+/// The "have you been yet?" line at the foot of the page.
+///
+/// It exists because the break page is otherwise silent about the one thing you
+/// have to do to end it. Scanning a tag gives you no feedback at the laptop --
+/// the phone says it worked, the page said nothing, and the natural response to
+/// that is to walk back and scan it again.
+#[derive(Clone)]
+struct Badge {
+    row: gtk::Box,
+    icon: gtk::DrawingArea,
+    label: gtk::Label,
+    state: Rc<Cell<Tag>>,
+}
+
+impl Badge {
+    fn new(tag: Tag) -> Self {
+        let state = Rc::new(Cell::new(tag));
+
+        let icon = gtk::DrawingArea::new();
+        icon.set_content_width(BADGE);
+        icon.set_content_height(BADGE);
+        icon.set_valign(gtk::Align::Center);
+        let drawing = Rc::clone(&state);
+        icon.set_draw_func(move |_, cr, width, height| {
+            draw_tag(cr, width, height, drawing.get());
+        });
+
+        let label = gtk::Label::new(Some(words_for(tag)));
+        label.add_css_class("tea-tag");
+
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 9);
+        row.set_halign(gtk::Align::Center);
+        row.append(&icon);
+        row.append(&label);
+
+        let badge = Self { row, icon, label, state };
+        badge.paint(tag);
+        badge
+    }
+
+    fn paint(&self, tag: Tag) {
+        self.state.set(tag);
+        self.label.set_text(words_for(tag));
+        // One class, toggled, rather than two that could both be on: a label
+        // that is somehow "not scanned" and green is worse than no badge.
+        for (class, on) in
+            [("done", tag == Tag::Scanned), ("unseen", tag == Tag::Unseen)]
+        {
+            if on {
+                self.label.add_css_class(class);
+            } else {
+                self.label.remove_css_class(class);
+            }
+        }
+        self.icon.queue_draw();
+    }
+}
+
+fn words_for(tag: Tag) -> &'static str {
+    match tag {
+        Tag::Pending => "Tag not scanned yet",
+        Tag::Scanned => "Tag scanned",
+        Tag::Unseen => "Can't see the tag — this break ends on the clock",
+    }
+}
+
+/// How tall the badge's glyph is drawn. Fixed, like the type beside it: this is
+/// a footnote, and a footnote that scales with the screen stops being one.
+const BADGE: i32 = 22;
+
+/// Two glyphs, drawn rather than pulled from an icon theme -- the same reason
+/// the mark on this page is embedded. An icon that is present on the machine
+/// you built on and missing on someone else's is a blank square in the middle
+/// of the one screen they cannot dismiss.
+fn draw_tag(cr: &gtk::cairo::Context, width: i32, height: i32, tag: Tag) {
+    let (cx, cy) = (width as f64 / 2.0, height as f64 / 2.0);
+    let r = (width.min(height) as f64) / 2.0 - 1.5;
+    // `arc` joins from the current point, so a path left behind by anything
+    // else would arrive here as a stray line across the glyph.
+    cr.new_path();
+    cr.set_line_cap(gtk::cairo::LineCap::Round);
+    cr.set_line_join(gtk::cairo::LineJoin::Round);
+
+    match tag {
+        // The contactless mark: waves leaving a point off to the left, which is
+        // the shape everyone already reads as "hold your phone here".
+        Tag::Pending => {
+            cr.set_source_rgba(0.475, 0.514, 0.612, 1.0);
+            cr.set_line_width((r * 0.24).max(1.2));
+            // Struck from a point off to the left, and that point is placed so
+            // the arcs -- not their centre -- end up centred in the box.
+            let origin = cx - r * 0.92;
+            for step in 1..=3 {
+                cr.new_path();
+                cr.arc(origin, cy, r * (0.4 * step as f64 + 0.18), -0.8, 0.8);
+                let _ = cr.stroke();
+            }
+        }
+        // A ring with the waves broken across it: the same mark as above,
+        // struck through, which is what "this is not going to work" looks like
+        // without a word of explanation.
+        Tag::Unseen => {
+            cr.set_source_rgba(0.788, 0.639, 0.373, 1.0);
+            cr.set_line_width((r * 0.20).max(1.2));
+            let origin = cx - r * 0.92;
+            for step in 1..=3 {
+                cr.new_path();
+                cr.arc(origin, cy, r * (0.4 * step as f64 + 0.18), -0.8, 0.8);
+                let _ = cr.stroke();
+            }
+            cr.new_path();
+            cr.set_line_width((r * 0.22).max(1.2));
+            cr.move_to(cx - r * 0.72, cy + r * 0.72);
+            cr.line_to(cx + r * 0.72, cy - r * 0.72);
+            let _ = cr.stroke();
+        }
+        // A ring and a tick. Green, and the only green on the page, so it
+        // carries across a room without anything else having to change.
+        Tag::Scanned => {
+            cr.set_source_rgba(0.451, 0.820, 0.620, 1.0);
+            cr.set_line_width((r * 0.20).max(1.2));
+            cr.arc(cx, cy, r * 0.9, 0.0, TAU);
+            let _ = cr.stroke();
+
+            cr.set_line_width((r * 0.26).max(1.4));
+            cr.move_to(cx - r * 0.40, cy + r * 0.02);
+            cr.line_to(cx - r * 0.11, cy + r * 0.32);
+            cr.line_to(cx + r * 0.44, cy - r * 0.30);
+            let _ = cr.stroke();
+        }
+    }
+}
+
+/// Repaint a page as one whose time is served and which is now waiting on the
+/// tag. The countdown is not left sitting at 0:00: a clock that has stopped
+/// reads as a bug, and the one thing this page has to do is say what it wants.
+fn ask_for_the_tag(page: &Page, ask: &str) {
+    page.title.set_text("Break's over");
+    page.count.remove_css_class("tea-count");
+    page.count.add_css_class("tea-await");
+    // A clock is four characters and never wraps; this is a sentence somebody
+    // wrote, and it lands in the middle of the screen where the ring used to
+    // be. Left to itself it would run off both edges.
+    page.count.set_wrap(true);
+    page.count.set_justify(gtk::Justification::Center);
+    page.count.set_max_width_chars(WRAP_AT);
+    // Two lines, and then an ellipsis. The column's height is what keeps the
+    // words clear of the screen edges on a small panel -- see the layout test
+    // -- and a prompt somebody wrote a paragraph into must not be what breaks
+    // it. Two lines at this size is about fifty characters, which is a
+    // sentence.
+    page.count.set_lines(2);
+    page.count.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    page.count.set_text(ask);
+    page.sub.set_text("The page lifts the moment it hears from you.");
+    // The time really is spent, so the ring stops being drawn -- see `Dial`.
+    let mut dial = page.dial.borrow_mut();
+    dial.remaining = 0.0;
+    dial.spent = true;
+}
+
+/// The walk paid off. On a page that was waiting this is what replaces the
+/// asking -- for the second or so before the page comes down, which is exactly
+/// long enough to see that it worked.
+fn thank_them(page: &Page) {
+    page.count.set_text("Off you go");
+    page.sub.set_text("That's the break done.");
+}
+
+/// Roughly where the prompt wraps, in characters. Wide enough for a sentence,
+/// narrow enough that it never reaches the edges of a laptop screen.
+const WRAP_AT: i32 = 24;
 
 /// Whether a page plays the arrival animation.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -422,6 +783,7 @@ fn build_page(
     remaining: Duration,
     anim: &Anim,
     entrance: Entrance,
+    face: &Face,
 ) -> Page {
     let arrival = match entrance {
         Entrance::Full => anim.seconds(),
@@ -477,12 +839,29 @@ fn build_page(
 
     let sub = gtk::Label::new(Some("Look away from the screen. Stand up."));
     sub.add_css_class("tea-sub");
-    sub.set_size_request(-1, slot);
+
+    // The subtitle and the badge share the lower slot the way the mark and the
+    // title share the upper one: grouped and centred inside it, so the
+    // countdown stays on the exact centre of the screen whether or not there is
+    // a tag to report on.
+    let badge = face.tag.map(Badge::new);
+    let feet = gtk::Box::new(gtk::Orientation::Vertical, 14);
+    feet.set_halign(gtk::Align::Center);
+    feet.set_valign(gtk::Align::Center);
+    feet.set_vexpand(true);
+    feet.append(&sub);
+    if let Some(badge) = &badge {
+        feet.append(&badge.row);
+    }
+
+    let foot = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    foot.set_size_request(-1, slot);
+    foot.append(&feet);
 
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     column.append(&head);
     column.append(&count);
-    column.append(&sub);
+    column.append(&foot);
     column.set_halign(gtk::Align::Center);
     column.set_valign(gtk::Align::Center);
 
@@ -500,14 +879,14 @@ fn build_page(
     // countdown with it -- would twitch for the whole entrance.
     animate_in(&count, arrival * 0.34, 0, arrival * 0.30);
     animate_in(&head, arrival * 0.34, 0, arrival * 0.46);
-    animate_in(&sub, arrival * 0.34, 0, arrival * 0.58);
+    animate_in(&foot, arrival * 0.34, 0, arrival * 0.58);
 
     // Insurance: if the frame clock never delivers -- a stalled
     // compositor, a machine thrashing on resume -- an overlay stuck
     // part-way through would be an invisible break. Force the finished
     // state once the animation has had more than long enough.
     let settled: Vec<gtk::Widget> =
-        vec![count.clone().upcast(), head.clone().upcast(), sub.clone().upcast()];
+        vec![count.clone().upcast(), head.clone().upcast(), foot.clone().upcast()];
     let finish = Rc::clone(&state);
     let redraw = stage.clone();
     glib::timeout_add_local_once(Duration::from_secs_f64((arrival * 1.6).max(1.0)), move || {
@@ -531,7 +910,22 @@ fn build_page(
     win.fullscreen_on_monitor(monitor);
     win.present();
 
-    Page { win, monitor: monitor.clone(), count, dial: state }
+    let page = Page {
+        win,
+        monitor: monitor.clone(),
+        count,
+        title,
+        sub,
+        badge,
+        dial: state,
+    };
+    if let Some(ask) = &face.ask {
+        ask_for_the_tag(&page, ask);
+    }
+    if face.done {
+        thank_them(&page);
+    }
+    page
 }
 
 /// Keep putting the pages back in front until the break is over.
@@ -580,6 +974,10 @@ fn build_page(
 ///
 /// Nothing here can stop someone who keeps switching away. It makes escaping a
 /// thing you have to keep choosing, which is all a break tool should ever do.
+// One argument more than clippy's taste allows, and each is a distinct thing
+// the loop needs: what to rebuild, how, how often, whether to still be doing it
+// at all, who to ask about input, and what a new page should say.
+#[allow(clippy::too_many_arguments)]
 fn insist(
     app: &gtk::Application,
     pages: Rc<RefCell<Vec<Page>>>,
@@ -588,6 +986,7 @@ fn insist(
     every: Duration,
     live: Rc<Cell<bool>>,
     session: Rc<RefCell<Session>>,
+    facing: impl Fn() -> Face + 'static,
 ) {
     /// Polite requests ignored before the pages are built again.
     const PATIENCE: u32 = 3;
@@ -640,11 +1039,12 @@ fn insist(
         // time that is actually left rather than restarting the break.
         println!("[hold]  still working — the page comes back");
         refused.set(0);
+        let face = facing();
         let fresh: Vec<Page> = showing
             .iter()
             .map(|page| {
                 let left = Duration::from_secs_f64(page.dial.borrow().remaining.max(0.0));
-                build_page(&app, &page.monitor, total, left, &anim, Entrance::None)
+                build_page(&app, &page.monitor, total, left, &anim, Entrance::None, &face)
             })
             .collect();
 
@@ -697,10 +1097,26 @@ impl Anim {
 pub struct Dial {
     total: f64,
     remaining: f64,
+    /// The countdown is over and the page is only waiting. The ring stops being
+    /// drawn at all: an empty circle with a sentence running through it is
+    /// worse than no circle, and the middle of the screen is needed for the
+    /// sentence.
+    spent: bool,
     /// 0 to 1 while it arrives, then stays at 1.
     entrance: f64,
+    /// `Some` from the moment the scan lands, running 0 to 1 over
+    /// [`CELEBRATE`] seconds while the stage plays the confetti. `None` on a
+    /// page that has never seen a scan -- including one rebuilt by `insist`
+    /// mid-play: a celebration replayed on every rebuild stops being one.
+    celebrate: Option<f64>,
     last_frame: i64,
 }
+
+/// How long the confetti plays after a scan — and, when the scan is what ends
+/// the break, how long the page stays up to play it: see `release`. Three
+/// seconds: long enough to land as a reward, short enough that the desk it
+/// just unlocked is not held hostage by its own applause.
+const CELEBRATE: f64 = 3.0;
 
 /// The mark shown on the break page. Embedded rather than read from disk: it is
 /// part of the application, and a logo loaded by path is a logo that eventually
@@ -780,8 +1196,10 @@ fn build_stage(
     let state = Rc::new(RefCell::new(Dial {
         total: total.as_secs_f64().max(1.0),
         remaining: remaining.as_secs_f64(),
+        spent: false,
         // With the animation switched off, start already arrived.
         entrance: if arrival <= 0.0 { 1.0 } else { 0.0 },
+        celebrate: None,
         last_frame: 0,
     }));
 
@@ -839,6 +1257,20 @@ fn build_stage(
             }
         }
 
+        // The scan landed: the celebration, over whatever the page is showing
+        // -- the waiting words, or a countdown that still has to run.
+        if let Some(t) = dial.celebrate {
+            if t < 1.0 {
+                draw_celebration(cr, cx, cy, reach, t);
+            }
+        }
+
+        // Nothing left to count. The backdrop is the whole page from here, and
+        // the words that replaced the clock get the room the ring was using.
+        if dial.spent {
+            return;
+        }
+
         // 3. The dial arrives in the middle, once the blast is on its way out.
         let arriving = phase(entrance, 0.22, 0.80);
         if arriving <= 0.0 {
@@ -880,12 +1312,68 @@ fn build_stage(
                 (dial.entrance + delta / arrival).min(1.0)
             };
             dial.remaining = (dial.remaining - delta).max(0.0);
+            if let Some(t) = dial.celebrate {
+                dial.celebrate = Some((t + delta / CELEBRATE).min(1.0));
+            }
         }
         area.queue_draw();
         glib::ControlFlow::Continue
     });
 
     (area, state)
+}
+
+/// Confetti colours, every one already on the page: the badge's green, the
+/// dial's two blues, and the unseen badge's amber. A celebration in colours
+/// the page has never used would look pasted on.
+const CONFETTI: [(f64, f64, f64); 4] = [
+    (0.451, 0.820, 0.620),
+    (0.48, 0.63, 0.97),
+    (0.62, 0.74, 1.0),
+    (0.788, 0.639, 0.373),
+];
+
+/// The walk paid off: one green wave and a sky of confetti, launched from the
+/// middle of the page and sinking as it fades. Varied without randomness, the
+/// same way the shards are -- every scan earns the same celebration, and
+/// nothing here needs a seed.
+fn draw_celebration(cr: &gtk::cairo::Context, cx: f64, cy: f64, reach: f64, t: f64) {
+    let fade = (1.0 - t).powi(2);
+
+    // The wave first: the badge's green, and the only green ring this page
+    // ever draws, so "that worked" reads from across the room.
+    let wave = ease_out_cubic(t);
+    cr.new_path();
+    cr.set_line_width((7.0 * (1.0 - t)).max(0.5));
+    cr.set_source_rgba(0.451, 0.820, 0.620, fade * 0.85);
+    cr.arc(cx, cy, (reach * 0.6 * wave).max(1.0), 0.0, TAU);
+    let _ = cr.stroke();
+
+    const PIECES: u32 = 60;
+    let flown = ease_out_cubic(t);
+    for i in 0..PIECES {
+        let angle = i as f64 / PIECES as f64 * TAU + 0.7;
+        let speed = 0.30 + ((i * 11) % 7) as f64 * 0.11;
+        let distance = reach * 0.5 * flown * speed;
+        // Heavier pieces sink sooner. The sag is what makes this confetti
+        // rather than shrapnel: the blast flies straight, a celebration falls.
+        let sink = reach * 0.10 * t * t * (1.0 + ((i * 5) % 3) as f64);
+        let x = cx + angle.cos() * distance;
+        let y = cy + angle.sin() * distance * 0.85 + sink;
+
+        let (r, g, b) = CONFETTI[(i % 4) as usize];
+        cr.set_source_rgba(r, g, b, fade);
+
+        // Little rectangles, each tumbling at its own rate.
+        let spin = angle + t * (2.0 + ((i * 3) % 5) as f64);
+        let size = 3.0 + ((i * 13) % 4) as f64 * 1.5;
+        let _ = cr.save();
+        cr.translate(x, y);
+        cr.rotate(spin);
+        cr.rectangle(-size / 2.0, -size / 4.0, size, size / 2.0);
+        let _ = cr.fill();
+        let _ = cr.restore();
+    }
 }
 
 #[cfg(test)]
@@ -906,6 +1394,43 @@ mod tests {
     }
 
     #[test]
+    fn a_page_rebuilt_mid_break_remembers_the_walk() {
+        const PROMPT: &str = "Scan the tag in the hall";
+        let prompt = Some(PROMPT);
+
+        // Nothing gating the break: no badge at all, on a page that has never
+        // heard of a tag.
+        assert!(face_of(None, false, false, true).tag.is_none());
+        assert!(face_of(None, true, true, true).tag.is_none());
+
+        // Gated: the badge tracks the scan, and survives whatever rebuilds the
+        // page -- insisting, or a monitor arriving mid-break.
+        assert_eq!(face_of(prompt, false, false, true).tag, Some(Tag::Pending));
+        assert_eq!(face_of(prompt, false, true, true).tag, Some(Tag::Scanned));
+
+        // Nothing watching: the page says so rather than asking for a walk that
+        // would not be noticed. A scan already made outranks it.
+        assert_eq!(face_of(prompt, false, false, false).tag, Some(Tag::Unseen));
+        assert_eq!(face_of(prompt, false, true, false).tag, Some(Tag::Scanned));
+
+        // Waiting *and* scanned is a page about to come down, and it says so
+        // rather than still asking -- however many times it gets rebuilt in the
+        // second before it goes.
+        assert!(!face_of(prompt, false, true, true).done, "not waiting yet");
+        assert!(!face_of(prompt, true, false, true).done, "waiting, nobody has been");
+        assert!(face_of(prompt, true, true, true).done);
+
+        // The full waiting page only once the countdown is actually spent.
+        assert_eq!(face_of(prompt, false, false, true).ask, None);
+        assert_eq!(face_of(prompt, true, false, true).ask, Some(PROMPT.to_string()));
+    }
+
+    #[test]
+    fn the_two_tag_states_never_read_the_same() {
+        assert_ne!(words_for(Tag::Pending), words_for(Tag::Scanned));
+    }
+
+    #[test]
     fn soft_is_the_default_and_does_not_insist() {
         assert!(!Hold::default().insists());
         assert!(Hold { mode: Grip::Insist, ..Hold::default() }.insists());
@@ -914,7 +1439,11 @@ mod tests {
     /// The layout has one job: the words go outside the ring, on every screen.
     #[test]
     fn the_text_always_clears_the_dial() {
-        const SUB_HEIGHT: f64 = 40.0;
+        // The subtitle, the gap, and the tag badge under it -- the tallest the
+        // lower slot ever gets, since the badge is the only thing that can be
+        // added to it. Generous on purpose: it is the number that decides
+        // whether the words land on the ring.
+        const SUB_HEIGHT: f64 = 64.0;
 
         for (w, h) in [(1280, 720), (1366, 768), (1920, 1080), (2560, 1440), (3840, 2160)] {
             let slot = slot_height(w, h) as f64;

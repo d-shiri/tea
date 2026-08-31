@@ -2,6 +2,7 @@
 //! No overlay yet — this exists to shake out the timing before any GTK lands.
 
 mod config;
+mod nfc;
 mod overlay;
 mod session;
 mod settings;
@@ -12,7 +13,7 @@ mod status;
 use config::human;
 use gtk::glib;
 use gtk::prelude::*;
-use tea_core::{Blocker, PostponeResult, Scheduler};
+use tea_core::{Blocker, PostponeResult, ReleaseResult, Scheduler};
 use overlay::{GtkBlocker, TerminalBlocker};
 use session::Session;
 use std::cell::{Cell, RefCell};
@@ -55,6 +56,8 @@ fn main() {
     let mut show_config = false;
     let mut set_key: Option<(&str, String)> = None;
     let mut set_sound: Option<String> = None;
+    let mut set_nfc: Option<String> = None;
+    let mut unlock = false;
 
     // Indexed rather than an iterator so a command can look at the argument
     // after it without swallowing it: `tea run` and `tea run 5s` are both
@@ -128,6 +131,11 @@ fn main() {
                 set_sound = Some(value_at(&argv, i, "set-sound"));
                 i += 1;
             }
+            "set-nfc" => {
+                set_nfc = Some(value_at(&argv, i, "set-nfc"));
+                i += 1;
+            }
+            "unlock" => unlock = true,
             "-c" | "--config" => {
                 explicit_path = Some(PathBuf::from(value_at(&argv, i, "--config")));
                 i += 1;
@@ -154,6 +162,27 @@ fn main() {
         match settings::set_sound(&path, std::path::Path::new(&file)) {
             Ok(change) => {
                 println!("tea: {change}");
+                println!("tea: run `tea reload` to apply");
+            }
+            Err(e) => fail(&e),
+        }
+        return;
+    }
+
+    if let Some(switch) = set_nfc {
+        if let Err(e) = config::write_default(&path) {
+            fail(&e);
+        }
+        match settings::set_nfc(&path, &switch) {
+            Ok(change) => {
+                println!("tea: {change}");
+                // Read it back rather than reporting what we meant to write:
+                // the URL printed here is the one that has to work.
+                if let Ok(file) = config::load(&path)
+                    && file.nfc.on()
+                {
+                    tag_instructions(&file.nfc);
+                }
                 println!("tea: run `tea reload` to apply");
             }
             Err(e) => fail(&e),
@@ -231,6 +260,7 @@ fn main() {
     let sound_cfg = file.sound.clone();
     let anim_cfg = file.animation.clone();
     let hold_cfg = file.hold;
+    let nfc_cfg = file.nfc.clone();
     let mut cfg: tea_core::Config = file.into();
     let Overrides { work, brk, warn_before, idle_credit, idle_pause, postpone, postpone_budget } =
         over;
@@ -259,15 +289,31 @@ fn main() {
         eprintln!("tea: note: {note}");
     }
 
+    if unlock {
+        if !nfc_cfg.on() {
+            fail("nfc is off in this config — `tea set-nfc on` first");
+        }
+        return match nfc::knock(&nfc_cfg) {
+            Ok(reply) => println!("tea: {reply}"),
+            Err(e) => fail(&e),
+        };
+    }
+
     if probe {
-        return run_probe();
+        return run_probe(&nfc_cfg);
     }
 
     if run_page {
         // Default to a real break, so what you see is what you will get.
         let total = run_for.unwrap_or(cfg.brk);
         println!("tea: showing the break page for {}", human(total));
-        return preview(total, sound_cfg, anim_cfg, hold_cfg);
+        if nfc_cfg.on() {
+            println!(
+                "tea: the tag is on — after the countdown the page waits for a real scan,\n\
+                 \x20    exactly like a break would."
+            );
+        }
+        return preview(total, sound_cfg, anim_cfg, hold_cfg, nfc_cfg);
     }
 
     if run_warning {
@@ -285,19 +331,96 @@ fn main() {
         path.display()
     );
 
+    if nfc_cfg.on() {
+        println!(
+            "nfc: on — the page waits for the tag, {}",
+            match cfg.release_grace {
+                g if g.is_zero() => "for as long as it takes".to_string(),
+                g => format!("giving up after {}", human(g)),
+            }
+        );
+    }
+
     if headless {
-        run_headless(cfg, sound_cfg);
+        run_headless(cfg, sound_cfg, nfc_cfg);
     } else {
-        run_gtk(cfg, sound_cfg, anim_cfg, hold_cfg);
+        run_gtk(cfg, sound_cfg, anim_cfg, hold_cfg, nfc_cfg);
+    }
+}
+
+/// What to write on the tag, and where to hold your phone.
+fn tag_instructions(cfg: &nfc::Config) {
+    let host = cfg.listen.split(':').next().unwrap_or("");
+    let port = cfg.listen.rsplit(':').next().unwrap_or("9797");
+    let token = &cfg.token;
+
+    // Nothing to write on the tag at all: Home Assistant owns it, and the app
+    // that scanned it is the app that wrote it.
+    if cfg.asks() {
+        let ha = &cfg.home_assistant;
+        println!("tea: the tag is Home Assistant's — {}", ha.entity);
+        println!("     write the tag from the companion app: Settings → Tags");
+        println!("tea: tea asks {} about it while a break is up, so nothing", ha.url);
+        println!("     on this machine listens and nothing has to reach it.");
+        return;
+    }
+
+    // Something else is the front door, so where tea listens is nobody's
+    // business but the proxy's -- and none of the advice below applies.
+    if cfg.fronted() {
+        println!("tea: write this URL on the tag:");
+        println!("       {}", cfg.tag_url());
+        println!("     (tea itself listens on {} — nothing on this machine", cfg.listen);
+        println!("      is reachable from the network)");
+        return;
+    }
+
+    // "listen on everything" is an instruction to this machine, not an address
+    // anything can dial. Printing it on the tag line would be printing a URL
+    // that cannot work.
+    if host == "0.0.0.0" || host == "::" {
+        match nfc::lan_address() {
+            Some(ip) => {
+                println!("tea: write this URL on the tag:");
+                println!("       http://{ip}:{port}/unlock?token={token}");
+                println!(
+                    "     (tea answers on every address this machine has; that is the one\n\
+                     \x20     your phone can reach, as long as it is on the same network)"
+                );
+            }
+            None => {
+                println!("tea: write this on the tag, with this machine's address in place of HOST:");
+                println!("       http://HOST:{port}/unlock?token={token}");
+            }
+        }
+        return;
+    }
+
+    println!("tea: write this URL on the tag:");
+    println!("       {}", cfg.tag_url());
+    if host.starts_with("127.") || host == "localhost" || host == "::1" {
+        println!(
+            "tea: note — nfc.listen is loopback, so only this machine can reach it.\n\
+             \x20    A phone in another room needs either listen = \"0.0.0.0:{port}\"\n\
+             \x20    and a hole in the firewall, or nfc.url pointing at something\n\
+             \x20    that is already listening. See \"The ear\" in the README."
+        );
     }
 }
 
 /// Terminal-only: no GTK, no display needed. Works over SSH.
-fn run_headless(cfg: tea_core::Config, sound: sound::Config) {
-    let mut engine = Engine::start(cfg, sound);
+fn run_headless(cfg: tea_core::Config, sound: sound::Config, nfc: nfc::Config) {
+    let mut engine = Engine::start(cfg, sound, nfc);
     let mut ui = TerminalBlocker;
+    // There is no GTK main loop out here, but the socket that listens for the
+    // tag still dispatches on glib's. Pumping whatever is pending each second
+    // is enough for a doorbell: the answer is built from the last tick anyway.
+    let context = glib::MainContext::default();
     loop {
         std::thread::sleep(TICK);
+        while context.pending() {
+            context.iteration(false);
+        }
         engine.step(&mut ui);
     }
 }
@@ -309,6 +432,7 @@ fn run_gtk(
     sound: sound::Config,
     anim: overlay::Anim,
     hold: overlay::Hold,
+    nfc: nfc::Config,
 ) {
     let app = gtk::Application::builder().application_id(APP_ID).build();
 
@@ -326,12 +450,13 @@ fn run_gtk(
         // Nothing is on screen between breaks, and GtkApplication quits when
         // its last window closes -- so keep it open explicitly.
         let keep_open = app.hold();
-        let engine = RefCell::new(Engine::start(cfg.clone(), sound.clone()));
+        let engine = RefCell::new(Engine::start(cfg.clone(), sound.clone(), nfc.clone()));
         let ui = RefCell::new(GtkBlocker::new(
             app,
             engine.borrow().postpone_flag(),
             anim.clone(),
             hold,
+            nfc.on().then(|| nfc.prompt.clone()),
         ));
 
         glib::timeout_add_seconds_local(1, move || {
@@ -346,9 +471,28 @@ fn run_gtk(
     app.run_with_args(&argv);
 }
 
-/// Put the overlay up for a fixed time and exit, so it can be tried without
-/// waiting out a work interval.
-fn preview(total: Duration, sound: sound::Config, anim: overlay::Anim, hold: overlay::Hold) {
+/// Put the overlay up for one break and exit, so it can be tried without
+/// waiting out a work interval. With the tag on, the same ear and the same
+/// watch the daemon uses are wired in, and the page waits for a *real* scan —
+/// a dry run that pretends the walk was made proves nothing about the tag.
+fn preview(
+    total: Duration,
+    sound: sound::Config,
+    anim: overlay::Anim,
+    hold: overlay::Hold,
+    nfc: nfc::Config,
+) {
+    /// Only when nothing real can hear a scan does the preview act one out:
+    /// this long on the waiting page, so it can be looked at...
+    const LOOK_AT_IT_FOR: Duration = Duration::from_secs(6);
+    /// ...and how much of that is spent *after* the scan — pretend or real.
+    /// Long enough for the whole celebration. The order matters: waiting
+    /// first, then scanned, then the page lifts, because that is the only
+    /// order a real break can happen in. Flipping the badge green while the
+    /// page is still asking shows a state that cannot exist, and teaches you
+    /// to distrust the badge.
+    const THEN_LIFT_AFTER: Duration = Duration::from_secs(3);
+
     // Deliberately not APP_ID: sharing it would route this into the running
     // service instead of starting a throwaway app.
     let app = gtk::Application::builder()
@@ -356,28 +500,142 @@ fn preview(total: Duration, sound: sound::Config, anim: overlay::Anim, hold: ove
         .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
         .build();
     app.connect_activate(move |app| {
+        let asking = nfc.on();
+        let link = nfc::Link::new();
+
+        // Hear a real scan every way the daemon can. Neither failure is fatal
+        // here: the running service usually owns the port, and the whole point
+        // of a preview is seeing what there is to see.
+        let mut ear = None;
+        let mut watch = None;
+        if asking {
+            match nfc::listen(&nfc, Rc::clone(&link)) {
+                Ok(e) => {
+                    println!("nfc: listening on {}", e.addr);
+                    ear = Some(e);
+                }
+                // Only worth a line when the ear was the only way a scan
+                // could have arrived.
+                Err(why) if !nfc.asks() => eprintln!("tea: {why}"),
+                Err(_) => {}
+            }
+            if nfc.asks() {
+                match nfc::watch(&nfc.home_assistant, Rc::clone(&link)) {
+                    Ok(w) => {
+                        println!(
+                            "nfc: watching {} — scan the tag to lift the page",
+                            nfc.home_assistant.entity.trim()
+                        );
+                        watch = Some(w);
+                    }
+                    Err(why) => eprintln!("tea: {why}"),
+                }
+            }
+            if ear.is_none() && watch.is_none() {
+                println!("nfc: nothing can hear a real scan, so the preview will act one out");
+            }
+        }
+        let wired = ear.is_some() || watch.is_some();
+
         let ui = Rc::new(RefCell::new(GtkBlocker::new(
             app,
             Rc::new(Cell::new(false)),
             anim.clone(),
             hold,
+            asking.then(|| nfc.prompt.clone()),
         )));
         let mut player = sound::Player::new(sound.clone());
         player.break_starts();
         ui.borrow_mut().engage(total);
 
+        let grace = nfc.grace.0;
         let left = Cell::new(total);
+        let waited = Cell::new(Duration::ZERO);
+        let shown = Cell::new(Duration::ZERO);
+        let asked = Cell::new(false);
+        let scanned = Cell::new(false);
+        let late = Cell::new(false);
         let app = app.clone();
         glib::timeout_add_seconds_local(1, move || {
+            // Held here so the ear keeps listening and the watch keeps polling
+            // for as long as the page is up.
+            let _keep = (&ear, &watch);
+
+            // A scan lands between ticks, exactly as it does in the daemon.
+            // Early ones bank: the countdown still runs out.
+            if link.take_scan() && !scanned.replace(true) {
+                println!("[scan]  the tag was scanned");
+                late.set(asked.get());
+                ui.borrow_mut().release_seen();
+                player.scanned();
+            }
+
             let remaining = left.get().saturating_sub(TICK);
             left.set(remaining);
-            if remaining.is_zero() {
-                player.break_ends();
+
+            let done = if !remaining.is_zero() {
+                ui.borrow_mut().update(remaining);
+                false
+            } else if !asking {
+                true
+            } else if scanned.get() {
+                // A scan that ended the wait gets a moment on screen before
+                // the page lifts — flashing straight past "scanned" reads as a
+                // glitch, not a walk that registered.
+                if late.get() {
+                    shown.set(shown.get() + TICK);
+                    shown.get() >= THEN_LIFT_AFTER
+                } else {
+                    true
+                }
+            } else {
+                if !asked.replace(true) {
+                    ui.borrow_mut().await_release();
+                }
+                waited.set(waited.get() + TICK);
+                if wired {
+                    // The daemon's rules, not softer ones: a watcher that
+                    // cannot be reached, or a grace that runs out, ends the
+                    // break on the clock and says so.
+                    let lost = link.reachable() == Some(false);
+                    ui.borrow_mut().release_source(!lost);
+                    let gave_up = !grace.is_zero() && waited.get() >= grace;
+                    if lost {
+                        println!("[ha]    nothing to ask — ending on the clock");
+                    } else if gave_up {
+                        println!("[wait]  no scan after {} — giving up", human(waited.get()));
+                    }
+                    lost || gave_up
+                } else {
+                    // Nothing is listening, so the scan is acted out instead.
+                    if waited.get() + THEN_LIFT_AFTER >= LOOK_AT_IT_FOR && !scanned.replace(true) {
+                        println!("[scan]  (preview) somebody pretends to scan the tag");
+                        late.set(true);
+                        ui.borrow_mut().release_seen();
+                        player.scanned();
+                    }
+                    false
+                }
+            };
+
+            if done {
+                // A scan that ended the wait already had its chime; the
+                // end-of-break sound on top would be a clatter.
+                if !late.get() {
+                    player.break_ends();
+                }
                 ui.borrow_mut().release();
                 app.quit();
                 return glib::ControlFlow::Break;
             }
-            ui.borrow_mut().update(remaining);
+
+            // What the watch's "only while a break is up" gate reads.
+            link.post(nfc::Desk {
+                breaking: true,
+                remaining,
+                waiting: asked.get() && !scanned.get(),
+                released: scanned.get(),
+            });
             glib::ControlFlow::Continue
         });
     });
@@ -400,6 +658,7 @@ fn preview_warning(total: Duration, postpone: Duration, anim: overlay::Anim) {
             Rc::new(Cell::new(false)),
             anim.clone(),
             overlay::Hold::default(),
+            None,
         )));
         ui.borrow_mut().warn(total, Some(tea_core::Snooze { duration: postpone, left: 2 }));
 
@@ -431,10 +690,17 @@ struct Engine {
     catchup: Option<(Duration, Duration)>,
     postpone: Rc<Cell<bool>>,
     sound: sound::Player,
+    /// Where the tag's scans land, and where the tick leaves the answer the
+    /// server gives out. Held even when nfc is off, so the tick has one shape.
+    link: Rc<nfc::Link>,
+    /// The listening socket, alive only as long as the engine is.
+    _ear: Option<nfc::Ear>,
+    /// The poll that asks Home Assistant about the tag, same lifetime.
+    _watch: Option<nfc::Watch>,
 }
 
 impl Engine {
-    fn start(cfg: tea_core::Config, sound: sound::Config) -> Self {
+    fn start(cfg: tea_core::Config, sound: sound::Config, nfc_cfg: nfc::Config) -> Self {
         let now = boottime();
         let store = state::Store::new();
         let restored = store.as_ref().and_then(|s| s.load(now));
@@ -452,6 +718,44 @@ impl Engine {
             None => (Scheduler::new(cfg), None),
         };
 
+        let link = nfc::Link::new();
+        // A port that will not open must not stop the timer: the break page
+        // still works, the grace still ends it, and the reason is on stderr.
+        let ear = nfc_cfg.on().then(|| nfc::listen(&nfc_cfg, Rc::clone(&link))).and_then(|r| {
+            match r {
+                Ok(ear) => {
+                    println!("nfc: listening on {}", ear.addr);
+                    Some(ear)
+                }
+                Err(e) => {
+                    eprintln!("tea: nfc is off — {e}");
+                    None
+                }
+            }
+        });
+
+        // Asking is the tidier half of this: nothing has to be forwarded in, and
+        // an unreachable hub is a thing tea finds out about by itself.
+        let watch = nfc_cfg.asks().then(|| nfc::watch(&nfc_cfg.home_assistant, Rc::clone(&link)))
+            .and_then(|r| match r {
+                Ok(watch) => {
+                    println!(
+                        "nfc: watching {} on {}",
+                        nfc_cfg.home_assistant.entity, nfc_cfg.home_assistant.url
+                    );
+                    Some(watch)
+                }
+                Err(e) => {
+                    // Configured and broken is worse than not configured: the
+                    // gate would be on with nothing able to open it. Say the
+                    // source is unreachable, which is what it is, and let the
+                    // page and the countdown deal with it honestly.
+                    eprintln!("tea: not watching Home Assistant — {e}");
+                    link.set_reachable(false);
+                    None
+                }
+            });
+
         Self {
             sched,
             session: Session::connect(),
@@ -460,6 +764,9 @@ impl Engine {
             catchup,
             postpone: Rc::new(Cell::new(false)),
             sound: sound::Player::new(sound),
+            link,
+            _ear: ear,
+            _watch: watch,
         }
     }
 
@@ -487,6 +794,31 @@ impl Engine {
     }
 
     fn step(&mut self, ui: &mut dyn Blocker) {
+        // The server never touches the scheduler; this is where a scan that
+        // arrived between ticks actually lands.
+        let mut celebrated = false;
+        if self.link.take_scan() {
+            match self.sched.released() {
+                ReleaseResult::Freed => {
+                    println!("[nfc]   tag scanned — the desk is yours");
+                    // Told now, not via the next snapshot: the break resets on
+                    // this very tick, and a page torn down without ever
+                    // acknowledging the walk reads as a scan that was
+                    // swallowed. This is also what starts the celebration.
+                    ui.release_seen();
+                    self.sound.scanned();
+                    celebrated = true;
+                }
+                ReleaseResult::Banked { remaining } => {
+                    println!("[nfc]   tag scanned — {} of the break still to run", human(remaining));
+                    ui.release_seen();
+                    self.sound.scanned();
+                }
+                ReleaseResult::NotBreaking => println!("[nfc]   tag scanned — no break to end"),
+                ReleaseResult::NotRequired => println!("[nfc]   tag scanned — nothing was waiting"),
+            }
+        }
+
         if self.postpone.replace(false) {
             match self.sched.postpone() {
                 PostponeResult::Granted { remaining_budget } => {
@@ -534,10 +866,45 @@ impl Engine {
                     }
                 }
                 tea_core::Command::ShowOverlay { .. } => self.sound.break_starts(),
-                tea_core::Command::HideOverlay => self.sound.break_ends(),
+                // The scan that just freed this break has its own sound; the
+                // ordinary end-of-break one stacked on top would turn the
+                // celebration into a clatter.
+                tea_core::Command::HideOverlay if !celebrated => self.sound.break_ends(),
+                tea_core::Command::HideOverlay => {}
                 _ => {}
             }
         }
+
+        // Told every tick, not just the one the scan landed on: a page that is
+        // rebuilt -- or resumed after a restart -- has to come back knowing the
+        // walk was already made. The blocker does the work once.
+        if after.breaking && after.released {
+            ui.release_seen();
+        }
+
+        if after.breaking && !after.released {
+            // `None` means nothing has looked yet, which is not the same as
+            // "cannot be reached" and must not paint the page as broken.
+            let lost = self.link.reachable() == Some(false);
+            ui.release_source(!lost);
+
+            // A gate nobody can open is not a gate, it is a lock. If the thing
+            // that would notice a scan cannot be reached when the countdown
+            // runs out, the break ends on the clock and says why. Degrading is
+            // the rule everywhere else in here; there is no reason for the one
+            // feature that holds your screen to be the exception.
+            if lost && self.sched.awaiting_release() {
+                self.sched.released();
+                println!("[ha]    nothing to ask — ending the break on the clock");
+            }
+        }
+
+        self.link.post(nfc::Desk {
+            breaking: after.breaking,
+            remaining: self.sched.config().brk.saturating_sub(after.rested),
+            waiting: self.sched.awaiting_release(),
+            released: after.released,
+        });
 
         if let Some(store) = &mut self.store {
             // Anything that would hurt to lose gets written immediately; plain
@@ -552,7 +919,17 @@ impl Engine {
 
 /// Print what the session reports, once a second, so idle detection can be
 /// eyeballed without waiting out a work interval.
-fn run_probe() {
+fn run_probe(nfc_cfg: &nfc::Config) {
+    if nfc_cfg.asks() {
+        let ha = &nfc_cfg.home_assistant;
+        print!("tea: asking {} about {} ... ", ha.url, ha.entity);
+        match nfc::probe(ha) {
+            Ok(state) => println!("{state:?}"),
+            Err(e) => println!("\ntea: {e}"),
+        }
+        println!();
+    }
+
     let mut session = Session::connect();
     println!("tea: probing the session bus (5s). Stop touching the keyboard.");
     for _ in 0..5 {
@@ -626,6 +1003,8 @@ fn usage() {
         ("set-break <dur>", "change the break length"),
         ("set-warn <dur>", "change the warning time"),
         ("set-sound <file>", "play this file when a break starts"),
+        ("set-nfc on|off", "hold the page until a tag is scanned"),
+        ("unlock", "scan the tag from here, without the tag"),
     ];
     const OPTIONS: &[(&str, &str)] = &[
         ("-c, --config <path>", "use this config file instead"),

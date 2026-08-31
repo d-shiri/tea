@@ -35,6 +35,13 @@ struct Saved {
     due: bool,
     postpones_used: u32,
     window_elapsed: u64,
+    /// Both default, so a state file written before the tag existed still
+    /// loads. Missing them would only ever mean "no scan yet", which is the
+    /// safe reading anyway.
+    #[serde(default)]
+    released: bool,
+    #[serde(default)]
+    waiting: u64,
 }
 
 /// How much of a gap the machine spent switched off, and therefore counts as
@@ -109,6 +116,8 @@ impl Store {
                 due: saved.due,
                 postpones_used: saved.postpones_used,
                 window_elapsed: Duration::from_secs(saved.window_elapsed),
+                released: saved.released,
+                waiting: Duration::from_secs(saved.waiting),
             },
             gap,
             idle,
@@ -135,6 +144,8 @@ impl Store {
             due: snap.due,
             postpones_used: snap.postpones_used,
             window_elapsed: snap.window_elapsed.as_secs(),
+            released: snap.released,
+            waiting: snap.waiting.as_secs(),
         };
 
         if let Err(e) = self.write(&saved) {

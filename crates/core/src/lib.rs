@@ -27,6 +27,13 @@ pub struct Config {
     /// If a call or video holds a break up for longer than this, say so.
     /// Zero disables the warning.
     pub defer_warn_after: Duration,
+    /// Serving the time is no longer enough on its own: the break also waits
+    /// for a release signal from somewhere you have to get up to reach.
+    pub require_release: bool,
+    /// Stop waiting for that signal after this long and end the break anyway.
+    /// Zero waits for as long as it takes. The point of the gate is to get you
+    /// out of the chair, not to hold your desk hostage to a flat phone.
+    pub release_grace: Duration,
 }
 
 impl Default for Config {
@@ -41,6 +48,8 @@ impl Default for Config {
             postpone_budget: 2,
             postpone_window: Duration::from_secs(60 * 60),
             defer_warn_after: Duration::from_secs(20 * 60),
+            require_release: false,
+            release_grace: Duration::from_secs(10 * 60),
         }
     }
 }
@@ -70,6 +79,11 @@ pub enum Command {
     /// A break has been waiting on an inhibitor for an unreasonable time --
     /// usually an app that forgot to say it was finished.
     Overdue { waiting: Duration },
+    /// The time has been served and the break is now waiting on its release
+    /// signal. Emitted once, when the countdown runs out.
+    AwaitRelease,
+    /// The signal never came. Ending the break on the clock alone.
+    GaveUpWaiting { waited: Duration },
 }
 
 /// What a postpone would buy, and how many are left.
@@ -101,6 +115,22 @@ pub trait Blocker {
     fn warn(&mut self, until_break: Duration, snooze: Option<Snooze>);
     /// The warning no longer applies (postponed, or the break arrived).
     fn clear_warning(&mut self) {}
+    /// The countdown has run out but the break is not over: it is waiting to
+    /// be released. Say so, or the page reads as a clock that has stuck.
+    fn await_release(&mut self) {}
+    /// Whether whatever watches for the release signal can be reached at all.
+    ///
+    /// Called on every tick of a gated break, so the page can say that scanning
+    /// would not be noticed *before* someone walks off to do it. Idempotent:
+    /// the same answer twice means nothing has changed.
+    fn release_source(&mut self, _reachable: bool) {}
+    /// The release signal has arrived for the break currently on screen.
+    ///
+    /// Called by the host rather than emitted as a command, because a signal
+    /// can land between ticks and the page has to show it either way: a scan
+    /// that changes nothing on screen is a scan the user assumes did not work,
+    /// and they walk back to the tag to do it again.
+    fn release_seen(&mut self) {}
     /// Anything worth saying that isn't a state change.
     fn note(&mut self, _msg: &str) {}
 }
@@ -129,6 +159,10 @@ pub fn drive(
             }
             Command::Tick { remaining } => ui.update(remaining),
             Command::HideOverlay => ui.release(),
+            Command::AwaitRelease => ui.await_release(),
+            Command::GaveUpWaiting { waited } => {
+                ui.note(&format!("no release after {}s — ending the break anyway", waited.as_secs()))
+            }
             Command::CreditedIdle { was_idle } => {
                 ui.clear_warning();
                 ui.note(&format!("away {}s — counted as your break", was_idle.as_secs()));
@@ -148,6 +182,20 @@ pub enum PostponeResult {
     Exhausted,
 }
 
+/// What a release signal did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseResult {
+    /// The time was already served: the break ends on this tick.
+    Freed,
+    /// Banked. The break still has this long to run, and will end when it does
+    /// without anything else being asked of you.
+    Banked { remaining: Duration },
+    /// Nothing to release — no break is on screen.
+    NotBreaking,
+    /// Breaks are not gated on a signal, so this one changes nothing.
+    NotRequired,
+}
+
 /// Everything worth surviving a restart.
 ///
 /// Plain data on purpose: core stays dependency-free, so the host picks the
@@ -160,6 +208,10 @@ pub struct Snapshot {
     pub due: bool,
     pub postpones_used: u32,
     pub window_elapsed: Duration,
+    /// A release signal already arrived for the break in progress.
+    pub released: bool,
+    /// How long the break has been sitting past its countdown waiting for one.
+    pub waiting: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -174,6 +226,9 @@ pub struct Scheduler {
     idle_credited: bool,
     postpones_used: u32,
     window_elapsed: Duration,
+    released: bool,
+    waiting: Duration,
+    await_announced: bool,
 }
 
 impl Scheduler {
@@ -189,6 +244,9 @@ impl Scheduler {
             idle_credited: false,
             postpones_used: 0,
             window_elapsed: Duration::ZERO,
+            released: false,
+            waiting: Duration::ZERO,
+            await_announced: false,
         }
     }
 
@@ -212,6 +270,8 @@ impl Scheduler {
             due,
             postpones_used: self.postpones_used,
             window_elapsed: self.window_elapsed,
+            released: self.released,
+            waiting: self.waiting,
         }
     }
 
@@ -227,6 +287,10 @@ impl Scheduler {
         };
         s.postpones_used = snap.postpones_used.min(s.cfg.postpone_budget);
         s.window_elapsed = snap.window_elapsed;
+        // A scan already made is not made again: walking to the tag and back
+        // only to have the service restart under you would be unforgivable.
+        s.released = snap.breaking && snap.released;
+        s.waiting = if snap.breaking { snap.waiting } else { Duration::ZERO };
         // Restored in the middle of a break: nothing is on screen, so the
         // overlay has to be asked for again. Without this the rest of the break
         // counts down invisibly and enforces nothing.
@@ -318,19 +382,52 @@ impl Scheduler {
                     out.push(Command::Warn { until_break: until });
                 }
             }
-            State::Breaking { mut rested } => {
-                rested += delta;
-                if rested >= self.cfg.brk {
-                    self.reset_work();
-                    out.push(Command::HideOverlay);
-                } else {
-                    self.state = State::Breaking { rested };
+            State::Breaking { rested } => {
+                // Time past the countdown is kept separately rather than piled
+                // onto `rested`, so every "how much of the break is left" sum
+                // below stays a subtraction that cannot go negative.
+                let total = rested + delta;
+                let rested = total.min(self.cfg.brk);
+                self.state = State::Breaking { rested };
+
+                if rested < self.cfg.brk {
                     let remaining = self.cfg.brk - rested;
                     if self.resume_overlay {
                         self.resume_overlay = false;
                         out.push(Command::ShowOverlay { duration: remaining });
                     }
                     out.push(Command::Tick { remaining });
+                    return out;
+                }
+
+                // The time is served. Whether that is enough is the whole
+                // question: with a release gate on, sitting out the countdown
+                // at your desk was exactly the thing that needed fixing.
+                if !self.cfg.require_release || self.released {
+                    self.reset_work();
+                    out.push(Command::HideOverlay);
+                    return out;
+                }
+
+                self.waiting += total.saturating_sub(self.cfg.brk);
+                // Restored mid-wait: the page has to come back before it can
+                // say what it is waiting for. It carries the full break length
+                // because the countdown it shows is already spent -- the
+                // `AwaitRelease` that follows is what paints over it.
+                if self.resume_overlay {
+                    self.resume_overlay = false;
+                    out.push(Command::ShowOverlay { duration: self.cfg.brk });
+                }
+                if !self.await_announced {
+                    self.await_announced = true;
+                    out.push(Command::AwaitRelease);
+                }
+                let grace = self.cfg.release_grace;
+                if !grace.is_zero() && self.waiting >= grace {
+                    let waited = self.waiting;
+                    self.reset_work();
+                    out.push(Command::GaveUpWaiting { waited });
+                    out.push(Command::HideOverlay);
                 }
             }
         }
@@ -363,6 +460,31 @@ impl Scheduler {
         PostponeResult::Granted { remaining_budget: self.postpones_left() }
     }
 
+    /// The release signal arrived — the tag was scanned.
+    ///
+    /// Deliberately not "end the break now": arriving early banks the signal
+    /// and the countdown still has to run out. Otherwise the walk to the tag
+    /// *replaces* the break instead of being the thing that proves you took
+    /// one, and a five-minute rest becomes a ninety-second errand.
+    pub fn released(&mut self) -> ReleaseResult {
+        let State::Breaking { rested } = self.state else {
+            return ReleaseResult::NotBreaking;
+        };
+        if !self.cfg.require_release {
+            return ReleaseResult::NotRequired;
+        }
+        self.released = true;
+        match self.cfg.brk.saturating_sub(rested) {
+            left if left.is_zero() => ReleaseResult::Freed,
+            left => ReleaseResult::Banked { remaining: left },
+        }
+    }
+
+    /// Whether the break is sitting past its countdown waiting to be released.
+    pub fn awaiting_release(&self) -> bool {
+        self.await_announced && !self.released
+    }
+
     /// End the current break early (debug/escape hatch; the overlay does not
     /// offer this).
     pub fn skip_break(&mut self) {
@@ -378,6 +500,9 @@ impl Scheduler {
         self.deferred_for = Duration::ZERO;
         self.overdue_announced = false;
         self.resume_overlay = false;
+        self.released = false;
+        self.waiting = Duration::ZERO;
+        self.await_announced = false;
     }
 }
 
@@ -401,6 +526,8 @@ mod tests {
             postpone_budget: 2,
             postpone_window: secs(1000),
             defer_warn_after: secs(50),
+            require_release: false,
+            release_grace: secs(30),
         }
     }
 
@@ -663,6 +790,126 @@ mod tests {
         // Lid closed for an hour: one huge delta, idle just as large.
         let out = s.tick(secs(3600), secs(3600), false);
         assert_eq!(out, vec![Command::CreditedIdle { was_idle: secs(3600) }]);
+    }
+
+    /// A break you have to be released from, with a 30s grace on top.
+    fn gated() -> Config {
+        Config { require_release: true, release_grace: secs(30), ..cfg() }
+    }
+
+    #[test]
+    fn a_gated_break_does_not_end_when_the_countdown_does() {
+        let mut s = Scheduler::new(gated());
+        run(&mut s, 100); // break starts
+
+        let out = run(&mut s, 20); // the whole 20s of it
+        assert_eq!(
+            out.iter().filter(|c| matches!(c, Command::AwaitRelease)).count(),
+            1,
+            "says once that it is waiting, then waits quietly"
+        );
+        assert!(
+            !out.contains(&Command::HideOverlay),
+            "sitting out the countdown must not hand the desk back"
+        );
+        assert!(matches!(s.state(), State::Breaking { .. }));
+        assert!(s.awaiting_release());
+    }
+
+    #[test]
+    fn a_scan_part_way_through_is_banked_and_the_break_still_runs() {
+        let mut s = Scheduler::new(gated());
+        run(&mut s, 100);
+        run(&mut s, 5); // 5s into a 20s break: up, and away from the desk
+
+        assert_eq!(s.released(), ReleaseResult::Banked { remaining: secs(15) });
+        assert!(!s.awaiting_release(), "nothing is being waited for");
+
+        // The rest of the break is served as normal -- and then it just ends.
+        // Walking to the tag is not a way of buying the other 15 seconds back.
+        let out = run(&mut s, 15);
+        assert_eq!(out.last(), Some(&Command::HideOverlay));
+        assert!(!out.contains(&Command::AwaitRelease), "nothing left to ask for");
+        assert_eq!(s.state(), State::Working { worked: Duration::ZERO, due: false });
+    }
+
+    #[test]
+    fn a_scan_after_the_countdown_gives_the_desk_back_at_once() {
+        let mut s = Scheduler::new(gated());
+        run(&mut s, 100);
+        run(&mut s, 25); // 5s past the end, waiting
+
+        assert_eq!(s.released(), ReleaseResult::Freed);
+        assert_eq!(s.tick(secs(1), Duration::ZERO, false), vec![Command::HideOverlay]);
+    }
+
+    #[test]
+    fn a_release_nobody_asked_for_changes_nothing() {
+        let mut s = Scheduler::new(cfg()); // ungated
+        assert_eq!(s.released(), ReleaseResult::NotBreaking);
+        run(&mut s, 100);
+        assert_eq!(s.released(), ReleaseResult::NotRequired);
+        // ...and the break still ends on its own, exactly as before.
+        assert_eq!(run(&mut s, 20).last(), Some(&Command::HideOverlay));
+    }
+
+    #[test]
+    fn a_signal_that_never_comes_gives_up_after_the_grace() {
+        let mut s = Scheduler::new(gated());
+        run(&mut s, 100);
+        run(&mut s, 20); // countdown done
+
+        let out = run(&mut s, 30); // the full grace, with no scan
+        assert_eq!(out[out.len() - 2], Command::GaveUpWaiting { waited: secs(30) });
+        assert_eq!(out.last(), Some(&Command::HideOverlay));
+        assert_eq!(s.state(), State::Working { worked: Duration::ZERO, due: false });
+    }
+
+    #[test]
+    fn a_grace_of_zero_waits_for_as_long_as_it_takes() {
+        let mut s = Scheduler::new(Config { release_grace: Duration::ZERO, ..gated() });
+        run(&mut s, 100);
+
+        let out = run(&mut s, 3600); // an hour past the end of a 20s break
+        assert!(!out.contains(&Command::HideOverlay));
+        assert!(s.awaiting_release());
+
+        assert_eq!(s.released(), ReleaseResult::Freed);
+        assert_eq!(s.tick(secs(1), Duration::ZERO, false), vec![Command::HideOverlay]);
+    }
+
+    #[test]
+    fn a_restart_while_waiting_puts_the_page_back_and_asks_again() {
+        let mut s = Scheduler::new(gated());
+        run(&mut s, 100);
+        run(&mut s, 25); // waiting, 5s in
+
+        let mut restored = Scheduler::restore(gated(), s.snapshot());
+        let out = restored.tick(secs(1), Duration::ZERO, false);
+
+        // Without the overlay coming back, a restart mid-wait would leave the
+        // screen free while the scheduler still believed it was holding it.
+        assert_eq!(out[0], Command::ShowOverlay { duration: secs(20) });
+        assert_eq!(out[1], Command::AwaitRelease);
+
+        // The grace picks up where it left off rather than restarting.
+        let out = run(&mut restored, 24);
+        assert!(out.contains(&Command::HideOverlay), "30s of grace, 6s of it before the restart");
+    }
+
+    #[test]
+    fn a_scan_survives_a_restart() {
+        let mut s = Scheduler::new(gated());
+        run(&mut s, 100);
+        run(&mut s, 5);
+        s.released();
+
+        // Walking to the tag and back only to be asked to do it again is the
+        // one failure this must not have.
+        let mut restored = Scheduler::restore(gated(), s.snapshot());
+        let out = run(&mut restored, 15);
+        assert!(!out.contains(&Command::AwaitRelease));
+        assert_eq!(out.last(), Some(&Command::HideOverlay));
     }
 
     #[test]

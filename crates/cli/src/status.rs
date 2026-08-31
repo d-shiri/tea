@@ -45,6 +45,10 @@ pub fn show(cfg: Config, config_path: &std::path::Path, boottime: Duration) {
     // ---- headline ----------------------------------------------------------
     let state = if !running {
         "tea — not running".to_string()
+    } else if snap.breaking && cfg.require_release && !snap.released
+        && (snap.rested + elapsed) >= cfg.brk
+    {
+        s.yellow("tea — waiting for the tag")
     } else if snap.breaking {
         s.green("tea — on a break")
     } else if snap.due {
@@ -60,11 +64,18 @@ pub fn show(cfg: Config, config_path: &std::path::Path, boottime: Duration) {
         let rested = (snap.rested + elapsed).min(cfg.brk);
         let left = cfg.brk.saturating_sub(rested);
         println!("  {}  {}", s.dim("rest    "), bar(rested, cfg.brk, &s));
+        // Time served and still up means it is waiting on the tag, and "back to
+        // work in 0s" beside a page that is plainly still there reads as a bug.
+        let waiting = cfg.require_release && left.is_zero() && !snap.released;
         println!(
-            "            {} of {} — back to work in {}",
+            "            {} of {} — {}",
             human(rested),
             human(cfg.brk),
-            s.bold(&human(left))
+            if waiting {
+                s.bold("waiting for the tag")
+            } else {
+                format!("back to work in {}", s.bold(&human(left)))
+            }
         );
     } else {
         let worked = (snap.worked + elapsed).min(cfg.work);
