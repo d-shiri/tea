@@ -167,6 +167,27 @@ pub fn show(cfg: &Config, file: &FileConfig, path: &Path) {
     field(&s, "work", &human(cfg.work), "before a break falls due");
     field(&s, "break", &human(cfg.brk), "how long you rest");
     field(&s, "warning", &human(cfg.warn_before), "heads-up before it appears");
+    match cfg.long_every {
+        0 => field(&s, "long break", "off", "every break is the same length"),
+        every => field(
+            &s,
+            "long break",
+            &human(cfg.long_brk),
+            &format!("every {every} breaks, instead of {}", human(cfg.brk)),
+        ),
+    }
+
+    section(&s, "when tea is awake");
+    let hours = &file.hours;
+    if hours.set() {
+        field(&s, "hours", &hours.describe(), "outside these, nothing is counted");
+    } else {
+        field(&s, "hours", "always", "no time of day is off limits");
+    }
+    match crate::state::off::left() {
+        Some(left) => field(&s, "right now", "off", &format!("for another {} — `tea on`", human(left))),
+        None => field(&s, "right now", "on", "`tea off 1h` stops it for a while"),
+    }
 
     section(&s, "away from the keyboard");
     field(&s, "counts as a break", &human(cfg.idle_credit), "and the break is taken");
@@ -249,6 +270,14 @@ pub fn show(cfg: &Config, file: &FileConfig, path: &Path) {
             let ha = &nfc.home_assistant;
             field(&s, "watches", "", &format!("{} on {}", ha.entity, ha.url));
             field(&s, "asks every", &literal(ha.poll.0), "while a break is on screen");
+        }
+        if nfc.counts_steps() {
+            field(&s, "steps", &nfc.steps.count.to_string(), "walked before the page lifts");
+            field(&s, "counted from", "", &nfc.steps.entity);
+        } else if let Some(why) = nfc.steps_misconfigured() {
+            field(&s, "steps", "off", &why);
+        } else {
+            field(&s, "steps", "off", "the scan is the whole gate");
         }
         if nfc.asks() {
             field(&s, "answers on", "", &format!("{} — for `tea unlock` only", nfc.listen));

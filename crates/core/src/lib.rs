@@ -34,6 +34,15 @@ pub struct Config {
     /// Zero waits for as long as it takes. The point of the gate is to get you
     /// out of the chair, not to hold your desk hostage to a flat phone.
     pub release_grace: Duration,
+    /// Every this-many-th break is a long one. Zero means they are all the
+    /// same length.
+    ///
+    /// Four five-minute breaks in a row are four chances to stand up and no
+    /// chance to go anywhere. The long one is the walk, the coffee, the thing
+    /// you cannot do in three hundred seconds.
+    pub long_every: u32,
+    /// How long that one lasts.
+    pub long_brk: Duration,
 }
 
 impl Default for Config {
@@ -50,6 +59,11 @@ impl Default for Config {
             defer_warn_after: Duration::from_secs(20 * 60),
             require_release: false,
             release_grace: Duration::from_secs(10 * 60),
+            // Off by default like everything else that changes when your day is
+            // interrupted: a longer break is a good idea, and an upgrade that
+            // silently starts taking fifteen minutes off you is not.
+            long_every: 0,
+            long_brk: Duration::from_secs(15 * 60),
         }
     }
 }
@@ -124,6 +138,24 @@ pub trait Blocker {
     /// would not be noticed *before* someone walks off to do it. Idempotent:
     /// the same answer twice means nothing has changed.
     fn release_source(&mut self, _reachable: bool) {}
+    /// The tag has been scanned for the break on screen.
+    ///
+    /// Not the same thing as the break being over: where a walk is counted too,
+    /// the scan is only half the gate. The page still has to show it -- a scan
+    /// that changes nothing on screen is a scan the user assumes did not work.
+    fn tag_seen(&mut self) {}
+    /// How the walk is going: `walked` steps counted since the page went up,
+    /// out of the `needed` this break is asking for.
+    ///
+    /// `marked` says the count has been re-based since the page appeared -- the
+    /// first report a phone sends mid-break carries steps from before it, so it
+    /// moves the mark instead of paying for the break. The page has to be able
+    /// to say that, or it reads *0 of 50* at somebody who has demonstrably just
+    /// walked, and they walk it again.
+    ///
+    /// Called on every tick of a gated break, so it must do nothing when
+    /// nothing has changed.
+    fn steps_seen(&mut self, _walked: u32, _needed: u32, _marked: bool) {}
     /// The release signal has arrived for the break currently on screen.
     ///
     /// Called by the host rather than emitted as a command, because a signal
@@ -212,6 +244,11 @@ pub struct Snapshot {
     pub released: bool,
     /// How long the break has been sitting past its countdown waiting for one.
     pub waiting: Duration,
+    /// Breaks begun, which is what decides when the next long one falls due.
+    pub breaks_done: u32,
+    /// How long the break in progress is, since that is not always `cfg.brk`.
+    /// Zero when nothing is on screen.
+    pub break_len: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -229,10 +266,19 @@ pub struct Scheduler {
     released: bool,
     waiting: Duration,
     await_announced: bool,
+    /// Breaks begun. Counted rather than derived from the clock so that the
+    /// long one falls on every fourth *break*, not every fourth hour of a day
+    /// you spent in meetings.
+    breaks_done: u32,
+    /// The length of the break in progress. Fixed when it starts rather than
+    /// read from the config each tick: editing the config mid-break must not
+    /// make the page on screen change its mind about how long it is.
+    brk_len: Duration,
 }
 
 impl Scheduler {
     pub fn new(cfg: Config) -> Self {
+        let cfg_brk = cfg.brk;
         Self {
             cfg,
             state: State::Working { worked: Duration::ZERO, due: false },
@@ -247,6 +293,8 @@ impl Scheduler {
             released: false,
             waiting: Duration::ZERO,
             await_announced: false,
+            breaks_done: 0,
+            brk_len: cfg_brk,
         }
     }
 
@@ -272,6 +320,11 @@ impl Scheduler {
             window_elapsed: self.window_elapsed,
             released: self.released,
             waiting: self.waiting,
+            breaks_done: self.breaks_done,
+            break_len: match breaking {
+                true => self.brk_len,
+                false => Duration::ZERO,
+            },
         }
     }
 
@@ -291,6 +344,15 @@ impl Scheduler {
         // only to have the service restart under you would be unforgivable.
         s.released = snap.breaking && snap.released;
         s.waiting = if snap.breaking { snap.waiting } else { Duration::ZERO };
+        s.breaks_done = snap.breaks_done;
+        // A break carries its own length across a restart. Without this a long
+        // break resumed from the state file would come back as a short one and
+        // end early, which is the sort of arithmetic nobody would ever notice
+        // going wrong.
+        s.brk_len = match snap.breaking && !snap.break_len.is_zero() {
+            true => snap.break_len,
+            false => s.cfg.brk,
+        };
         // Restored in the middle of a break: nothing is on screen, so the
         // overlay has to be asked for again. Without this the rest of the break
         // counts down invisibly and enforces nothing.
@@ -300,6 +362,40 @@ impl Scheduler {
 
     pub fn postpones_left(&self) -> u32 {
         self.cfg.postpone_budget.saturating_sub(self.postpones_used)
+    }
+
+    /// How long the break on screen runs for -- or, between breaks, how long
+    /// the next one will. Not always `config().brk`: every `long_every`-th one
+    /// is the long one.
+    pub fn break_length(&self) -> Duration {
+        match self.state {
+            State::Breaking { .. } => self.brk_len,
+            State::Working { .. } => self.length_of(self.breaks_done + 1),
+        }
+    }
+
+    /// Whether the break on screen -- or the next one -- is a long one.
+    pub fn long_break(&self) -> bool {
+        self.break_length() != self.cfg.brk
+    }
+
+    /// How many more ordinary breaks before the long one. Zero while the long
+    /// one is the next thing to happen; `None` when they are all the same.
+    pub fn until_long(&self) -> Option<u32> {
+        let every = self.cfg.long_every;
+        if every == 0 || self.cfg.long_brk.is_zero() {
+            return None;
+        }
+        Some((every - 1) - (self.breaks_done % every))
+    }
+
+    /// The length of the `nth` break, counting from one.
+    fn length_of(&self, nth: u32) -> Duration {
+        let every = self.cfg.long_every;
+        match every > 0 && !self.cfg.long_brk.is_zero() && nth.is_multiple_of(every) {
+            true => self.cfg.long_brk,
+            false => self.cfg.brk,
+        }
     }
 
     /// Advance by `delta`, given the system's current `idle` time and whether an
@@ -367,10 +463,15 @@ impl Scheduler {
                             out.push(Command::Overdue { waiting: self.deferred_for });
                         }
                     } else {
+                        // Counted the moment the page goes up, so that the
+                        // fourth break is long even if the third was cut short
+                        // by a grace running out.
+                        self.breaks_done += 1;
+                        self.brk_len = self.length_of(self.breaks_done);
                         self.state = State::Breaking { rested: Duration::ZERO };
                         self.warned = false;
                         self.deferred = false;
-                        out.push(Command::ShowOverlay { duration: self.cfg.brk });
+                        out.push(Command::ShowOverlay { duration: self.brk_len });
                     }
                     return out;
                 }
@@ -387,11 +488,11 @@ impl Scheduler {
                 // onto `rested`, so every "how much of the break is left" sum
                 // below stays a subtraction that cannot go negative.
                 let total = rested + delta;
-                let rested = total.min(self.cfg.brk);
+                let rested = total.min(self.brk_len);
                 self.state = State::Breaking { rested };
 
-                if rested < self.cfg.brk {
-                    let remaining = self.cfg.brk - rested;
+                if rested < self.brk_len {
+                    let remaining = self.brk_len - rested;
                     if self.resume_overlay {
                         self.resume_overlay = false;
                         out.push(Command::ShowOverlay { duration: remaining });
@@ -409,14 +510,14 @@ impl Scheduler {
                     return out;
                 }
 
-                self.waiting += total.saturating_sub(self.cfg.brk);
+                self.waiting += total.saturating_sub(self.brk_len);
                 // Restored mid-wait: the page has to come back before it can
                 // say what it is waiting for. It carries the full break length
                 // because the countdown it shows is already spent -- the
                 // `AwaitRelease` that follows is what paints over it.
                 if self.resume_overlay {
                     self.resume_overlay = false;
-                    out.push(Command::ShowOverlay { duration: self.cfg.brk });
+                    out.push(Command::ShowOverlay { duration: self.brk_len });
                 }
                 if !self.await_announced {
                     self.await_announced = true;
@@ -474,7 +575,7 @@ impl Scheduler {
             return ReleaseResult::NotRequired;
         }
         self.released = true;
-        match self.cfg.brk.saturating_sub(rested) {
+        match self.brk_len.saturating_sub(rested) {
             left if left.is_zero() => ReleaseResult::Freed,
             left => ReleaseResult::Banked { remaining: left },
         }
@@ -528,6 +629,8 @@ mod tests {
             defer_warn_after: secs(50),
             require_release: false,
             release_grace: secs(30),
+            long_every: 0,
+            long_brk: secs(60),
         }
     }
 
@@ -554,6 +657,58 @@ mod tests {
         let ending = run(&mut s, 20);
         assert_eq!(ending.last(), Some(&Command::HideOverlay));
         assert_eq!(s.state(), State::Working { worked: Duration::ZERO, due: false });
+    }
+
+    #[test]
+    fn every_fourth_break_is_the_long_one() {
+        let long = Config { long_every: 4, long_brk: secs(60), ..cfg() };
+        let mut s = Scheduler::new(long.clone());
+
+        // Three of the ordinary length, and then one that is not.
+        for nth in 1..=4 {
+            assert_eq!(s.until_long(), Some(4 - nth));
+            let out = run(&mut s, 100);
+            let wanted = if nth == 4 { secs(60) } else { secs(20) };
+            assert!(
+                out.contains(&Command::ShowOverlay { duration: wanted }),
+                "break {nth} should run for {wanted:?}: {out:?}"
+            );
+            assert_eq!(s.break_length(), wanted);
+            assert_eq!(s.long_break(), nth == 4);
+            // Sit the whole thing out, however long it is.
+            let ending = run(&mut s, wanted.as_secs());
+            assert_eq!(ending.last(), Some(&Command::HideOverlay), "break {nth} has to end");
+        }
+        // And round again: the fifth is short.
+        assert_eq!(s.until_long(), Some(3));
+
+        // Off by default, and off means every break is the same.
+        let mut plain = Scheduler::new(cfg());
+        assert_eq!(plain.until_long(), None);
+        assert!(!plain.long_break());
+        run(&mut plain, 100);
+        assert_eq!(plain.break_length(), secs(20));
+    }
+
+    #[test]
+    fn a_long_break_survives_a_restart_at_its_own_length() {
+        // The arithmetic nobody would notice going wrong: a fifteen-minute
+        // break resumed as a five-minute one just ends, early, silently.
+        let long = Config { long_every: 2, long_brk: secs(60), ..cfg() };
+        let mut s = Scheduler::new(long.clone());
+        run(&mut s, 100);
+        run(&mut s, 20);
+        run(&mut s, 100);
+        assert_eq!(s.break_length(), secs(60), "the second break is the long one");
+
+        let half_way = run(&mut s, 30);
+        assert!(half_way.iter().any(|c| matches!(c, Command::Tick { .. })));
+        let mut back = Scheduler::restore(long, s.snapshot());
+        assert_eq!(back.break_length(), secs(60));
+        // Thirty seconds served, so thirty to go and not ten.
+        let ending = run(&mut back, 29);
+        assert!(!ending.contains(&Command::HideOverlay), "ended early: {ending:?}");
+        assert_eq!(run(&mut back, 1).last(), Some(&Command::HideOverlay));
     }
 
     #[test]

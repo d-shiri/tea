@@ -11,6 +11,7 @@ use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
 use crate::config::Dur;
+use crate::nfc::Walk;
 use crate::session::Session;
 use tea_core::{Blocker, Snooze};
 use serde::Deserialize;
@@ -19,29 +20,53 @@ use std::f64::consts::{FRAC_PI_2, TAU};
 use std::rc::Rc;
 use std::time::Duration;
 
+/// One typeface for the whole thing, and a monospaced one: this page is a
+/// clock, a count and two labels that change under you, and proportional type
+/// makes all three twitch as their digits change width. The stack is only
+/// names -- whichever of them the machine actually has is the one it uses.
+const MONO: &str = "\"JetBrains Mono\", \"CaskaydiaMono NF\", \"Cascadia Mono\", \
+                    \"IBM Plex Mono\", \"Ubuntu Sans Mono\", \"Noto Sans Mono\", \
+                    \"DejaVu Sans Mono\", monospace";
+
 const CSS: &str = "
-window.tea-overlay { background-color: transparent; }
-.tea-backdrop { background-color: #0d1017; }
-window.tea-toast { background-color: #1b2030; border-radius: 14px; }
+window.tea-overlay { background-color: transparent; font-family: MONO; }
+.tea-backdrop { background-color: #06080d; }
+window.tea-toast {
+    background-color: #101522;
+    border-radius: 16px;
+    font-family: MONO;
+}
 window.tea-toast button {
     background-image: none;
-    background-color: #2b3450;
-    color: #e6e9f0;
-    border: 1px solid #3a4560;
-    border-radius: 9px;
-    padding: 8px 14px;
-    font-size: 12pt;
+    background-color: rgba(122,162,255,0.10);
+    color: #dce4f5;
+    border: 1px solid rgba(122,162,255,0.22);
+    border-radius: 999px;
+    padding: 8px 18px;
+    font-size: 11pt;
+    letter-spacing: 1px;
 }
-window.tea-toast button:hover { background-color: #374260; }
-.tea-title { font-size: 26pt; font-weight: 300; color: #e6e9f0; }
-.tea-count { font-size: 56pt; font-weight: 200; color: #e6e9f0; }
-.tea-await { font-size: 30pt; font-weight: 300; color: #e6e9f0; }
-.tea-sub   { font-size: 12pt; color: #79839c; }
-.tea-tag       { font-size: 11pt; color: #79839c; }
-.tea-tag.done  { color: #73d19e; }
-.tea-tag.unseen { color: #c9a35f; }
+window.tea-toast button:hover { background-color: rgba(122,162,255,0.18); }
+
+/* A pill: the shape everything on this page that is not the clock arrives in. */
+.tea-chip {
+    background-color: rgba(122,162,255,0.05);
+    border: 1px solid rgba(122,162,255,0.15);
+    border-radius: 999px;
+    padding: 7px 18px;
+}
+.tea-chip-word { font-size: 10pt; letter-spacing: 4px; color: #93a3c0; }
+
+.tea-title { font-size: 34pt; font-weight: 300; color: #eef2fa; letter-spacing: 2px; }
+.tea-count { font-size: 58pt; font-weight: 300; color: #ffffff; letter-spacing: 4px; }
+.tea-caption { font-size: 8pt; letter-spacing: 6px; color: #5d6880; }
+.tea-await { font-size: 26pt; font-weight: 300; color: #eef2fa; letter-spacing: 1px; }
+.tea-sub   { font-size: 12pt; color: #78849c; letter-spacing: 1px; }
+.tea-tag       { font-size: 11pt; color: #9aa9c4; letter-spacing: 1px; }
+.tea-tag.done  { color: #79dca8; }
+.tea-tag.unseen { color: #d8b06a; }
 .tea-warn-text { font-size: 15pt; color: #e6e9f0; }
-.tea-warn-sub  { font-size: 11pt; color: #79839c; }
+.tea-warn-sub  { font-size: 11pt; color: #78849c; letter-spacing: 1px; }
 ";
 
 pub struct GtkBlocker {
@@ -75,6 +100,15 @@ pub struct GtkBlocker {
     /// the two above: a rebuilt page must not go back to promising something
     /// that cannot happen.
     reachable: Rc<Cell<bool>>,
+    /// How far the walk has got, when this break is also being walked off.
+    /// Shared for the same reason again -- a page rebuilt at step eighteen has
+    /// to come back saying eighteen.
+    walk: Rc<Cell<Walk>>,
+    /// Both halves are in and the break is ending. Distinct from `scanned`,
+    /// which is only the tag: the celebration belongs to the moment the page is
+    /// actually about to lift, not to the first of two things that had to
+    /// happen.
+    open: Rc<Cell<bool>>,
     /// True for as long as the current break's windows are meant to be on
     /// screen. The insisting below runs on timers that outlive a single tick,
     /// and a timer that re-shows a window after the break has ended would leave
@@ -99,7 +133,7 @@ impl GtkBlocker {
     ) -> Self {
         if let Some(display) = gdk::Display::default() {
             let provider = gtk::CssProvider::new();
-            provider.load_from_string(CSS);
+            provider.load_from_string(&CSS.replace("MONO", MONO));
             gtk::style_context_add_provider_for_display(
                 &display,
                 &provider,
@@ -117,6 +151,8 @@ impl GtkBlocker {
             waiting: Rc::new(Cell::new(false)),
             scanned: Rc::new(Cell::new(false)),
             reachable: Rc::new(Cell::new(true)),
+            walk: Rc::new(Cell::new(Walk::default())),
+            open: Rc::new(Cell::new(false)),
             live: Rc::new(Cell::new(false)),
             session: Rc::new(RefCell::new(Session::connect())),
             monitors_watch: None,
@@ -127,7 +163,7 @@ impl GtkBlocker {
 /// Everything a page shows that is not the clock.
 #[derive(Clone, Default)]
 struct Face {
-    /// Waiting, and the scan has landed: the page is a second from coming down
+    /// Waiting, and the gate has opened: the page is a second from coming down
     /// and should say so rather than still asking. Rebuilt pages included --
     /// `insist` can replace one between the scan and the page lifting.
     done: bool,
@@ -137,6 +173,8 @@ struct Face {
     /// `None` when nothing is gating this break, and the page carries no badge
     /// at all -- a break that ends by itself has nothing to report.
     tag: Option<Tag>,
+    /// `None` when this break has no walk in it.
+    walk: Option<Walk>,
 }
 
 /// Whether the walk has been made yet.
@@ -159,20 +197,73 @@ impl GtkBlocker {
         let waiting = Rc::clone(&self.waiting);
         let scanned = Rc::clone(&self.scanned);
         let reachable = Rc::clone(&self.reachable);
+        let walk = Rc::clone(&self.walk);
+        let open = Rc::clone(&self.open);
         let ask = self.ask.clone();
-        move || face_of(ask.as_deref(), waiting.get(), scanned.get(), reachable.get())
+        move || {
+            face_of(
+                ask.as_deref(),
+                waiting.get(),
+                scanned.get(),
+                reachable.get(),
+                open.get(),
+                walk.get(),
+            )
+        }
+    }
+
+    /// What the current face is, without building a page from it.
+    fn facing(&self) -> Face {
+        (self.face())()
+    }
+
+    /// The waiting page's big line, worked out again.
+    ///
+    /// What the page is asking for changes as the gate closes: with the tag in
+    /// and a walk still to do, a page still saying "scan the tag" is sending
+    /// somebody back down the hall for something they have already done.
+    fn retext(&self) {
+        if !self.waiting.get() {
+            return;
+        }
+        let face = self.facing();
+        for page in self.pages.borrow().iter() {
+            if face.done {
+                thank_them(page);
+            } else if let Some(ask) = &face.ask {
+                ask_for_the_tag(page, ask);
+            }
+        }
     }
 }
 
 /// Split out from the closure above so the rules can be checked without a
 /// display: what a page shows is decided here, and a rebuilt page that forgot
 /// a scan would send someone back down the hall for nothing.
-fn face_of(ask: Option<&str>, waiting: bool, scanned: bool, reachable: bool) -> Face {
+fn face_of(
+    ask: Option<&str>,
+    waiting: bool,
+    scanned: bool,
+    reachable: bool,
+    open: bool,
+    walk: Walk,
+) -> Face {
+    let walk = (walk.needed > 0).then_some(walk);
     Face {
-        done: waiting && scanned,
+        done: waiting && open,
         // Only once the countdown is spent. Before that the page has a clock to
-        // show, and the badge below says all that needs saying about the tag.
-        ask: ask.filter(|_| waiting).map(str::to_string),
+        // show, and the badges below say all that needs saying about the gate.
+        ask: match (waiting, scanned, walk) {
+            (false, ..) => None,
+            // The tag is in and the walk is not: asking for the tag again would
+            // send someone back down the hall for a thing they have done. What
+            // is left is the only thing worth saying.
+            (true, true, Some(w)) if !w.done() => Some(match w.left() {
+                1 => "One more step".to_string(),
+                left => format!("{left} more steps"),
+            }),
+            (true, ..) => ask.map(str::to_string),
+        },
         // The prompt doubles as the switch: it is set exactly when a tag is
         // what ends this break.
         tag: ask.map(|_| match (scanned, reachable) {
@@ -183,6 +274,7 @@ fn face_of(ask: Option<&str>, waiting: bool, scanned: bool, reachable: bool) -> 
             (false, false) => Tag::Unseen,
             (false, true) => Tag::Pending,
         }),
+        walk: ask.and(walk),
     }
 }
 
@@ -201,6 +293,10 @@ impl Blocker for GtkBlocker {
         // the same tick, so these only clear what the last break left behind.
         self.waiting.set(false);
         self.scanned.set(false);
+        // The gate too, and not only its tag half: left standing from the last
+        // break, `done` would be true the moment this one starts waiting, and
+        // the page would say "off you go" while still holding the screen.
+        self.open.set(false);
         self.reachable.set(true);
 
         let Some(display) = gdk::Display::default() else {
@@ -428,20 +524,66 @@ impl Blocker for GtkBlocker {
         let tag = if reachable { Tag::Pending } else { Tag::Unseen };
         for page in self.pages.borrow().iter() {
             if let Some(badge) = &page.badge {
-                badge.paint(tag);
+                badge.paint(Mark::Tag(tag));
                 animate_in(&badge.row, 0.25, 0, 0.0);
             }
         }
     }
 
-    fn release_seen(&mut self) {
-        // Called on every tick the scheduler still has a scan banked, so that a
-        // page resumed after a restart comes back green. Doing the work once is
-        // the point: repainting a label every second is how a page ends up
-        // flickering at someone who is trying to rest.
+    fn tag_seen(&mut self) {
+        // Called on every tick the scan is still banked, so that a page resumed
+        // after a restart comes back green. Doing the work once is the point:
+        // repainting a label every second is how a page ends up flickering at
+        // someone who is trying to rest.
         if self.scanned.replace(true) {
             return;
         }
+        for page in self.pages.borrow().iter() {
+            if let Some(badge) = &page.badge {
+                badge.paint(Mark::Tag(Tag::Scanned));
+                // A quarter of a second of fade, so the change registers as
+                // something that just happened rather than something that was
+                // always there.
+                animate_in(&badge.row, 0.25, 0, 0.0);
+            }
+        }
+        // With a walk still to do, the big text has been asking for a tag that
+        // is now in. It has to stop, and say what is actually left.
+        self.retext();
+    }
+
+    fn steps_seen(&mut self, walked: u32, needed: u32, marked: bool) {
+        let walk = Walk { walked, needed, marked };
+        if self.walk.replace(walk) == walk {
+            return;
+        }
+        for page in self.pages.borrow().iter() {
+            if let Some(badge) = &page.walk {
+                badge.paint(Mark::Walk(walk));
+                // Only the finish is worth a fade. A badge that flashes on
+                // every step counted is a strobe at the foot of a page whose
+                // one job is to be restful.
+                if walk.done() {
+                    animate_in(&badge.row, 0.25, 0, 0.0);
+                }
+            }
+            if let Some(meter) = &page.meter {
+                meter.paint(walk);
+            }
+        }
+        self.retext();
+    }
+
+    fn release_seen(&mut self) {
+        // Both halves are in. Told every tick from here on, so like the two
+        // above it does its work exactly once.
+        self.tag_seen();
+        if self.open.replace(true) {
+            return;
+        }
+        // The walk badge is deliberately not touched here: a break freed by its
+        // grace, or by a hub that went away, must not end with the page
+        // claiming a walk that nobody made.
         let waiting = self.waiting.get();
         for page in self.pages.borrow().iter() {
             if waiting {
@@ -451,27 +593,23 @@ impl Blocker for GtkBlocker {
             // that was only waiting for this stays up long enough to play it
             // -- see `release`.
             page.dial.borrow_mut().celebrate = Some(0.0);
-            if let Some(badge) = &page.badge {
-                badge.paint(Tag::Scanned);
-                // A quarter of a second of fade, so the change registers as
-                // something that just happened rather than something that was
-                // always there.
-                animate_in(&badge.row, 0.25, 0, 0.0);
-            }
         }
     }
 
     fn await_release(&mut self) {
-        let Some(ask) = self.ask.clone() else {
+        if self.ask.is_none() {
             // Nothing is gating this break, so there is nothing to ask for and
             // the page is about to come down anyway.
             return;
-        };
-        println!("[wait]  time served — {ask}");
-        self.waiting.set(true);
-        for page in self.pages.borrow().iter() {
-            ask_for_the_tag(page, &ask);
         }
+        // Set first: what the page asks for depends on it, and on what of the
+        // gate is already in -- a tag scanned during the countdown leaves only
+        // the steps to ask about.
+        self.waiting.set(true);
+        if let Some(ask) = self.facing().ask {
+            println!("[wait]  time served — {ask}");
+        }
+        self.retext();
     }
 
     fn note(&mut self, msg: &str) {
@@ -568,9 +706,35 @@ struct Page {
     count: gtk::Label,
     title: gtk::Label,
     sub: gtk::Label,
+    /// The "REMAINING" under the clock, and the blank above it that keeps the
+    /// clock centred. Both go when the countdown does: a page waiting on a tag
+    /// has a sentence where the numbers were, and nothing left to caption.
+    caption: gtk::Box,
+    pad: gtk::Box,
     /// Absent unless a tag is what ends this break.
     badge: Option<Badge>,
+    /// Absent unless the break is being walked off as well.
+    walk: Option<Badge>,
+    /// The block of squares under the badges, same condition as `walk`.
+    meter: Option<Meter>,
     dial: Rc<RefCell<Dial>>,
+}
+
+/// The three layers the page is painted on, and why there are three.
+///
+/// They used to be one full-screen drawing area redrawn on every frame of the
+/// break: the dark, the graph paper, a full-screen gradient and the ring, sixty
+/// times a second, on every monitor, for the length of a break. That is a space
+/// heater with a clock on it. Split by how often each part actually changes,
+/// and the steady state costs a small square in the middle of the screen.
+struct Stage {
+    /// Never changes once drawn: the dark, the grid, the glow.
+    backdrop: gtk::DrawingArea,
+    /// The blast and the confetti. Full screen, but hidden except while one of
+    /// them is actually playing, which is a few seconds of a five-minute break.
+    burst: gtk::DrawingArea,
+    /// The ring, in a box just big enough to hold it.
+    ring: gtk::DrawingArea,
 }
 
 /// Soft mode's one concession: a single window asks once for the focus back,
@@ -595,12 +759,32 @@ struct Badge {
     row: gtk::Box,
     icon: gtk::DrawingArea,
     label: gtk::Label,
-    state: Rc<Cell<Tag>>,
+    state: Rc<Cell<Mark>>,
+}
+
+/// What one badge is reporting on. Two of them can be on a page at once -- the
+/// tag and the walk -- and they are the same thing twice over: a footnote
+/// saying whether that half of the gate is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    Tag(Tag),
+    Walk(Walk),
+}
+
+impl Mark {
+    /// Whether this half is in. Green is spent on exactly this and nothing
+    /// else, on a page that is otherwise grey.
+    fn done(self) -> bool {
+        match self {
+            Mark::Tag(tag) => tag == Tag::Scanned,
+            Mark::Walk(walk) => walk.done(),
+        }
+    }
 }
 
 impl Badge {
-    fn new(tag: Tag) -> Self {
-        let state = Rc::new(Cell::new(tag));
+    fn new(mark: Mark) -> Self {
+        let state = Rc::new(Cell::new(mark));
 
         let icon = gtk::DrawingArea::new();
         icon.set_content_width(BADGE);
@@ -608,29 +792,30 @@ impl Badge {
         icon.set_valign(gtk::Align::Center);
         let drawing = Rc::clone(&state);
         icon.set_draw_func(move |_, cr, width, height| {
-            draw_tag(cr, width, height, drawing.get());
+            draw_mark(cr, width, height, drawing.get());
         });
 
-        let label = gtk::Label::new(Some(words_for(tag)));
+        let label = gtk::Label::new(Some(&words_for(mark)));
         label.add_css_class("tea-tag");
 
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 9);
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         row.set_halign(gtk::Align::Center);
+        row.add_css_class("tea-chip");
         row.append(&icon);
         row.append(&label);
 
         let badge = Self { row, icon, label, state };
-        badge.paint(tag);
+        badge.paint(mark);
         badge
     }
 
-    fn paint(&self, tag: Tag) {
-        self.state.set(tag);
-        self.label.set_text(words_for(tag));
+    fn paint(&self, mark: Mark) {
+        self.state.set(mark);
+        self.label.set_text(&words_for(mark));
         // One class, toggled, rather than two that could both be on: a label
         // that is somehow "not scanned" and green is worse than no badge.
         for (class, on) in
-            [("done", tag == Tag::Scanned), ("unseen", tag == Tag::Unseen)]
+            [("done", mark.done()), ("unseen", mark == Mark::Tag(Tag::Unseen))]
         {
             if on {
                 self.label.add_css_class(class);
@@ -642,11 +827,123 @@ impl Badge {
     }
 }
 
-fn words_for(tag: Tag) -> &'static str {
-    match tag {
-        Tag::Pending => "Tag not scanned yet",
-        Tag::Scanned => "Tag scanned",
-        Tag::Unseen => "Can't see the tag — this break ends on the clock",
+/// One square per step, filling as you walk, fifty to a row.
+///
+/// The badge beside it already says "12 of 20 steps", and this says the same
+/// thing again on purpose: a number has to be read, a block of squares that is
+/// two thirds full does not. It is the only thing on the page that can be
+/// understood from the other side of the room, which is where the person it is
+/// for is standing.
+#[derive(Clone)]
+struct Meter {
+    area: gtk::DrawingArea,
+    state: Rc<Cell<Walk>>,
+}
+
+/// A square, and the air after it.
+const PIP: f64 = 9.0;
+const PIP_GAP: f64 = 6.0;
+/// The air between one row and the next. The same gap as between squares, so
+/// the block reads as a grid rather than as rows that happen to be near.
+const ROW_GAP: f64 = 6.0;
+/// Squares to a row. Past fifty a row stops being a thing you take in at a
+/// glance and becomes a ruler you have to read along, so the next fifty go
+/// underneath -- and a full row is then worth exactly fifty steps, which is
+/// the count itself readable from the doorway.
+const PIPS_ROW: u32 = 50;
+/// Past this many, one square stops meaning one step and starts meaning a
+/// share of the walk -- four rows is a block whose shape can still be seen,
+/// twenty is a texture.
+const PIPS_MOST: u32 = 4 * PIPS_ROW;
+
+impl Meter {
+    fn new(walk: Walk) -> Self {
+        let state = Rc::new(Cell::new(walk));
+        let area = gtk::DrawingArea::new();
+        let (cols, rows) = Self::grid(walk.needed);
+        area.set_content_width((cols as f64 * (PIP + PIP_GAP) - PIP_GAP).ceil() as i32);
+        area.set_content_height((rows as f64 * (PIP + ROW_GAP) - ROW_GAP).ceil() as i32);
+        area.set_halign(gtk::Align::Center);
+
+        let drawing = Rc::clone(&state);
+        area.set_draw_func(move |_, cr, width, height| {
+            draw_meter(cr, width, height, drawing.get());
+        });
+        Self { area, state }
+    }
+
+    /// How many squares stand for `needed` steps.
+    fn pips(needed: u32) -> u32 {
+        needed.clamp(1, PIPS_MOST)
+    }
+
+    /// The block those squares are laid out in: how wide, and how many rows
+    /// deep. Fifty is a full row, so a hundred is two rows and a hundred and
+    /// twenty is two rows and twenty. The short row is left-aligned under the
+    /// others because that is the order the squares light in.
+    fn grid(needed: u32) -> (u32, u32) {
+        let pips = Self::pips(needed);
+        (pips.min(PIPS_ROW), pips.div_ceil(PIPS_ROW))
+    }
+
+    fn paint(&self, walk: Walk) {
+        self.state.set(walk);
+        self.area.queue_draw();
+    }
+}
+
+fn draw_meter(cr: &gtk::cairo::Context, width: i32, height: i32, walk: Walk) {
+    let pips = Meter::pips(walk.needed);
+    let (cols, rows) = Meter::grid(walk.needed);
+    // Rounded off rather than up: a square that lights before its step has
+    // been taken is a promise the gate will not keep.
+    let lit = ((walk.walked as f64 / walk.needed.max(1) as f64) * pips as f64).floor() as u32;
+    let span = cols as f64 * (PIP + PIP_GAP) - PIP_GAP;
+    let tall = rows as f64 * (PIP + ROW_GAP) - ROW_GAP;
+    let left = (width as f64 - span) / 2.0;
+    let top = (height as f64 - tall) / 2.0;
+
+    for i in 0..pips {
+        // Left to right and then down, the way the squares light and the way
+        // anybody looking at them reads.
+        let x = left + (i % PIPS_ROW) as f64 * (PIP + PIP_GAP);
+        let y = top + (i / PIPS_ROW) as f64 * (PIP + ROW_GAP);
+        if i < lit {
+            cr.set_source_rgba(0.54, 0.69, 1.0, 1.0);
+        } else {
+            cr.set_source_rgba(0.42, 0.52, 0.72, 0.22);
+        }
+        rounded(cr, x, y, PIP, PIP, 2.0);
+        let _ = cr.fill();
+    }
+}
+
+/// A rectangle with its corners taken off. Cairo has no such call, and every
+/// square on this page wants one.
+fn rounded(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
+    let r = r.min(w / 2.0).min(h / 2.0);
+    cr.new_path();
+    cr.arc(x + w - r, y + r, r, -FRAC_PI_2, 0.0);
+    cr.arc(x + w - r, y + h - r, r, 0.0, FRAC_PI_2);
+    cr.arc(x + r, y + h - r, r, FRAC_PI_2, std::f64::consts::PI);
+    cr.arc(x + r, y + r, r, std::f64::consts::PI, 3.0 * FRAC_PI_2);
+    cr.close_path();
+}
+
+fn words_for(mark: Mark) -> String {
+    match mark {
+        Mark::Tag(Tag::Pending) => "Tag not scanned yet".to_string(),
+        Mark::Tag(Tag::Scanned) => "Tag scanned".to_string(),
+        Mark::Tag(Tag::Unseen) => "Can't see the tag — this break ends on the clock".to_string(),
+        // The number first, because it is the part that changes and the part
+        // being read from across a room.
+        Mark::Walk(walk) if walk.done() => format!("{} steps walked", walk.walked),
+        // Nothing counted yet, and the reason is not that you have not walked:
+        // the first thing your phone said mid-break was a batch from before it,
+        // so the count starts again from there. Saying *0 of 50* to somebody
+        // who has just crossed the flat sends them across it a second time.
+        Mark::Walk(walk) if walk.walked == 0 && walk.marked => "Counting from here".to_string(),
+        Mark::Walk(walk) => format!("{} of {} steps", walk.walked, walk.needed),
     }
 }
 
@@ -658,6 +955,55 @@ const BADGE: i32 = 22;
 /// the mark on this page is embedded. An icon that is present on the machine
 /// you built on and missing on someone else's is a blank square in the middle
 /// of the one screen they cannot dismiss.
+fn draw_mark(cr: &gtk::cairo::Context, width: i32, height: i32, mark: Mark) {
+    match mark {
+        Mark::Tag(tag) => draw_tag(cr, width, height, tag),
+        // A finished walk gets the same tick a scanned tag does. Two halves of
+        // one gate, and when both are in the page says so the same way twice.
+        Mark::Walk(walk) if walk.done() => draw_tag(cr, width, height, Tag::Scanned),
+        Mark::Walk(walk) => draw_walk(cr, width, height, walk),
+    }
+}
+
+/// Somebody walking. Not a progress ring: the squares under the badge
+/// is already the progress, and a ring at nought steps is an empty circle that
+/// reads as a glyph that failed to load.
+fn draw_walk(cr: &gtk::cairo::Context, width: i32, height: i32, _walk: Walk) {
+    let unit = width.min(height) as f64 / 22.0;
+    cr.new_path();
+    cr.set_source_rgba(0.475, 0.514, 0.612, 1.0);
+    cr.set_line_cap(gtk::cairo::LineCap::Round);
+    cr.set_line_join(gtk::cairo::LineJoin::Round);
+
+    // The head, and then a figure mid-stride: the legs apart is the whole of
+    // what makes this read as walking rather than standing.
+    cr.arc(11.6 * unit, 4.6 * unit, 2.0 * unit, 0.0, TAU);
+    let _ = cr.fill();
+
+    cr.set_line_width(1.9 * unit);
+    cr.new_path();
+    cr.move_to(11.8 * unit, 8.0 * unit);
+    cr.line_to(9.8 * unit, 12.6 * unit);
+    let _ = cr.stroke();
+
+    // Front leg, striding out; back leg, trailing.
+    cr.new_path();
+    cr.move_to(9.8 * unit, 12.6 * unit);
+    cr.line_to(13.0 * unit, 17.4 * unit);
+    let _ = cr.stroke();
+    cr.new_path();
+    cr.move_to(9.8 * unit, 12.6 * unit);
+    cr.line_to(6.2 * unit, 16.2 * unit);
+    let _ = cr.stroke();
+
+    // And an arm, swung the other way, which is what stops it reading as a
+    // pair of scissors.
+    cr.new_path();
+    cr.move_to(11.2 * unit, 9.4 * unit);
+    cr.line_to(7.6 * unit, 8.4 * unit);
+    let _ = cr.stroke();
+}
+
 fn draw_tag(cr: &gtk::cairo::Context, width: i32, height: i32, tag: Tag) {
     let (cx, cy) = (width as f64 / 2.0, height as f64 / 2.0);
     let r = (width.min(height) as f64) / 2.0 - 1.5;
@@ -722,28 +1068,77 @@ fn draw_tag(cr: &gtk::cairo::Context, width: i32, height: i32, tag: Tag) {
 /// reads as a bug, and the one thing this page has to do is say what it wants.
 fn ask_for_the_tag(page: &Page, ask: &str) {
     page.title.set_text("Break's over");
+    // Nothing left to caption: the clock is gone and a sentence has the middle
+    // of the page. The blank that balanced the caption goes with it, or the
+    // sentence would sit above centre for no visible reason.
+    page.caption.set_visible(false);
+    page.pad.set_visible(false);
     page.count.remove_css_class("tea-count");
     page.count.add_css_class("tea-await");
-    // A clock is four characters and never wraps; this is a sentence somebody
-    // wrote, and it lands in the middle of the screen where the ring used to
-    // be. Left to itself it would run off both edges.
-    page.count.set_wrap(true);
     page.count.set_justify(gtk::Justification::Center);
-    page.count.set_max_width_chars(WRAP_AT);
-    // Two lines, and then an ellipsis. The column's height is what keeps the
-    // words clear of the screen edges on a small panel -- see the layout test
-    // -- and a prompt somebody wrote a paragraph into must not be what breaks
-    // it. Two lines at this size is about fifty characters, which is a
-    // sentence.
-    page.count.set_lines(2);
-    page.count.set_ellipsize(gtk::pango::EllipsizeMode::End);
+
+    // A clock is four characters wide and never changes; this is a sentence
+    // somebody wrote, and it has to land on one line. Rather than wrapping it
+    // at some fixed count of characters -- which broke "Scan the tag in the
+    // living room" across two lines at thirty, and would break somebody else's
+    // prompt at any other number -- the type is sized to the sentence and the
+    // screen it is on.
+    let width = page.monitor.geometry().width() as f64;
+    let (size, fits) = ask_size(width, ask.chars().count());
+    let attrs = gtk::pango::AttrList::new();
+    attrs.insert(gtk::pango::AttrSize::new((size * gtk::pango::SCALE as f64) as i32));
+    page.count.set_attributes(Some(&attrs));
+
+    // If it fits at that size -- and after the sizing above it nearly always
+    // does -- then nothing is allowed to break it. Wrapping stays off, and so
+    // does ellipsizing: with either of them on, the label tells GTK it could
+    // manage in less space, GTK believes it, and the sentence comes back in
+    // two lines inside a box wide enough for one.
+    let one_line = fits >= ask.chars().count() as i32;
+    page.count.set_wrap(!one_line);
+    page.count.set_ellipsize(match one_line {
+        true => gtk::pango::EllipsizeMode::None,
+        // A prompt somebody wrote a paragraph into is not going to fit on one
+        // line at any size worth reading. Three lines of smaller type beats
+        // one line of nothing.
+        false => gtk::pango::EllipsizeMode::End,
+    });
+    page.count.set_max_width_chars(fits);
+    page.count.set_lines(3);
     page.count.set_text(ask);
+
     page.sub.set_text("The page lifts the moment it hears from you.");
     // The time really is spent, so the ring stops being drawn -- see `Dial`.
     let mut dial = page.dial.borrow_mut();
     dial.remaining = 0.0;
     dial.spent = true;
 }
+
+/// What size to set a prompt of `chars` characters on a screen `width` wide,
+/// and how many characters fit on a line at that size.
+///
+/// Split out from the widget so the arithmetic can be checked without a
+/// display: this is the thing that decides whether the one sentence on the
+/// page arrives whole.
+fn ask_size(width: f64, chars: usize) -> (f64, i32) {
+    // Monospaced, so every character is the same width: about 0.6 of the font
+    // size in ems, and a point is four thirds of a pixel.
+    const PER_CHAR: f64 = 0.6 * 4.0 / 3.0;
+    // Not the whole screen: the sentence sits inside the same margins as
+    // everything else on the page.
+    let usable = width * 0.8;
+    let chars = chars.max(1) as f64;
+    let size = (usable / (chars * PER_CHAR)).clamp(ASK_SMALLEST, ASK_BIGGEST);
+    let fits = (usable / (size * PER_CHAR)).floor().max(1.0);
+    (size, fits as i32)
+}
+
+/// The prompt is set at this, and shrinks from here only if the sentence is
+/// too long for the screen to take in one line.
+const ASK_BIGGEST: f64 = 26.0;
+/// Below this it stops being readable across a room, which is the whole point
+/// of it, so a very long prompt wraps instead of shrinking further.
+const ASK_SMALLEST: f64 = 13.0;
 
 /// The walk paid off. On a page that was waiting this is what replaces the
 /// asking -- for the second or so before the page comes down, which is exactly
@@ -752,10 +1147,6 @@ fn thank_them(page: &Page) {
     page.count.set_text("Off you go");
     page.sub.set_text("That's the break done.");
 }
-
-/// Roughly where the prompt wraps, in characters. Wide enough for a sentence,
-/// narrow enough that it never reaches the edges of a laptop screen.
-const WRAP_AT: i32 = 24;
 
 /// Whether a page plays the arrival animation.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -797,61 +1188,105 @@ fn build_page(
         .build();
     win.add_css_class("tea-overlay");
 
-    // One drawing surface covering the whole window. It has to be the
-    // full page: cairo clips to the widget, so a blast drawn inside a
-    // small dial can never reach the edges of the screen.
-    let (stage, state) = build_stage(total, remaining, arrival, anim);
-
     // Sized from the screen, not fixed: a slot generous enough to clear
     // the dial on a large display would not fit on a laptop panel at
     // all, and the column would be clipped.
     let geometry = monitor.geometry();
-    let slot = slot_height(geometry.width(), geometry.height());
-    let mark = logo_height(ring_radius(geometry.width(), geometry.height()));
+    // How many rows of squares the foot is carrying: a hundred-step walk is
+    // two, and the slot below the clock has to be deep enough for them.
+    let rows = face.walk.map_or(1, |walk| Meter::grid(walk.needed).1);
+    let slot = slot_height(geometry.width(), geometry.height(), rows);
+    let radius = ring_radius(geometry.width(), geometry.height());
+
+    // The layers, sized from the monitor rather than from their own
+    // allocation: the ring's box has to be built before it is measured.
+    let (stage, state) = build_stage(total, remaining, arrival, anim, radius);
 
     // The countdown must land on the exact centre of the screen, where
     // the dial is drawn. Rather than offsetting the other two from the
     // centre -- which left the subtitle sitting on top of the numbers --
-    // the title and subtitle are given equal fixed heights above and
+    // the head and the foot are given equal fixed heights above and
     // below. Equal slots put the middle child in the middle by
     // construction, whatever the text in them turns out to be.
     let count = gtk::Label::new(Some(&clock(remaining)));
     count.add_css_class("tea-count");
 
+    // What the clock is a clock *of*, in the smallest type on the page. It
+    // hangs below the numbers, inside the ring, and is balanced by an equal
+    // blank above them -- otherwise the pair would centre itself and leave the
+    // clock riding high in a ring drawn around the middle of the screen.
+    let caption = gtk::Label::new(Some("REMAINING"));
+    caption.add_css_class("tea-caption");
+    caption.set_valign(gtk::Align::Start);
+    let below = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    below.set_size_request(-1, CAPTION_SLOT);
+    below.append(&caption);
+    let above = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    above.set_size_request(-1, CAPTION_SLOT);
+
+    let middle = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    middle.set_halign(gtk::Align::Center);
+    middle.append(&above);
+    middle.append(&count);
+    middle.append(&below);
+
     let title = gtk::Label::new(Some("Time to stop"));
     title.add_css_class("tea-title");
 
-    // The mark and the title share the upper slot. They are grouped and
-    // centred inside it rather than packed from its top edge, so they
-    // stay balanced against the subtitle below.
-    let group = gtk::Box::new(gtk::Orientation::Vertical, 16);
+    let sub = gtk::Label::new(Some("Look away from the screen. Stand up."));
+    sub.add_css_class("tea-sub");
+
+    // The mark and the word, in a pill: enough branding for a page nobody
+    // asked to see, and it doubles as the thing that says what this *is* to
+    // somebody meeting it for the first time.
+    let chip = gtk::Box::new(gtk::Orientation::Horizontal, 11);
+    chip.set_halign(gtk::Align::Center);
+    chip.add_css_class("tea-chip");
+    chip.append(&logo(MARK));
+    let word = gtk::Label::new(Some("BREAK"));
+    word.add_css_class("tea-chip-word");
+    chip.append(&word);
+
+    // The chip, the title and the subtitle share the upper slot. They are
+    // grouped and centred inside it rather than packed from its top edge, so
+    // they stay balanced against the badges below.
+    let group = gtk::Box::new(gtk::Orientation::Vertical, STACK_GAP);
     group.set_halign(gtk::Align::Center);
     group.set_valign(gtk::Align::Center);
     group.set_vexpand(true);
-    if let Some(mark) = logo(mark) {
-        group.append(&mark);
-    }
+    group.append(&chip);
     group.append(&title);
+    group.append(&sub);
 
     let head = gtk::Box::new(gtk::Orientation::Vertical, 0);
     head.set_size_request(-1, slot);
     head.append(&group);
 
-    let sub = gtk::Label::new(Some("Look away from the screen. Stand up."));
-    sub.add_css_class("tea-sub");
+    // The two halves of the gate, side by side in the order they happen in:
+    // you scan on the way past, and the steps are what you do next.
+    let badge = face.tag.map(|tag| Badge::new(Mark::Tag(tag)));
+    let walk = face.walk.map(|walk| Badge::new(Mark::Walk(walk)));
+    let badges = gtk::Box::new(gtk::Orientation::Horizontal, 14);
+    badges.set_halign(gtk::Align::Center);
+    if let Some(badge) = &badge {
+        badges.append(&badge.row);
+    }
+    if let Some(walk) = &walk {
+        badges.append(&walk.row);
+    }
 
-    // The subtitle and the badge share the lower slot the way the mark and the
-    // title share the upper one: grouped and centred inside it, so the
-    // countdown stays on the exact centre of the screen whether or not there is
-    // a tag to report on.
-    let badge = face.tag.map(Badge::new);
-    let feet = gtk::Box::new(gtk::Orientation::Vertical, 14);
+    // And the walk again, as squares that fill up, fifty to a row: the badge
+    // is the number, this is the picture of it, and the picture is the one you can
+    // read from the doorway without your glasses on.
+    let meter = face.walk.map(Meter::new);
+
+    let feet = gtk::Box::new(gtk::Orientation::Vertical, STACK_GAP + 4);
     feet.set_halign(gtk::Align::Center);
     feet.set_valign(gtk::Align::Center);
     feet.set_vexpand(true);
-    feet.append(&sub);
-    if let Some(badge) = &badge {
-        feet.append(&badge.row);
+    feet.append(&badges);
+    if let Some(meter) = &meter {
+        feet.append(&meter.area);
     }
 
     let foot = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -860,13 +1295,17 @@ fn build_page(
 
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     column.append(&head);
-    column.append(&count);
+    column.append(&middle);
     column.append(&foot);
     column.set_halign(gtk::Align::Center);
     column.set_valign(gtk::Align::Center);
 
+    // Bottom to top: the dark, the ring around where the clock will be, the
+    // blast over both, and the words over everything.
     let layers = gtk::Overlay::new();
-    layers.set_child(Some(&stage));
+    layers.set_child(Some(&stage.backdrop));
+    layers.add_overlay(&stage.ring);
+    layers.add_overlay(&stage.burst);
     layers.add_overlay(&column);
     win.set_child(Some(&layers));
 
@@ -877,7 +1316,10 @@ fn build_page(
     // Fades only, no sliding: these three share a box, so animating a
     // margin would resize it every frame and the centred column -- the
     // countdown with it -- would twitch for the whole entrance.
-    animate_in(&count, arrival * 0.34, 0, arrival * 0.30);
+    // The dark washes in by fading the layer, not by repainting it: the
+    // backdrop is drawn once and this is the only thing that ever moves it.
+    animate_in(&stage.backdrop, arrival * 0.18, 0, 0.0);
+    animate_in(&middle, arrival * 0.34, 0, arrival * 0.30);
     animate_in(&head, arrival * 0.34, 0, arrival * 0.46);
     animate_in(&foot, arrival * 0.34, 0, arrival * 0.58);
 
@@ -885,10 +1327,14 @@ fn build_page(
     // compositor, a machine thrashing on resume -- an overlay stuck
     // part-way through would be an invisible break. Force the finished
     // state once the animation has had more than long enough.
-    let settled: Vec<gtk::Widget> =
-        vec![count.clone().upcast(), head.clone().upcast(), foot.clone().upcast()];
+    let settled: Vec<gtk::Widget> = vec![
+        middle.clone().upcast(),
+        head.clone().upcast(),
+        foot.clone().upcast(),
+        stage.backdrop.clone().upcast(),
+    ];
     let finish = Rc::clone(&state);
-    let redraw = stage.clone();
+    let redraw = stage.ring.clone();
     glib::timeout_add_local_once(Duration::from_secs_f64((arrival * 1.6).max(1.0)), move || {
         for w in &settled {
             w.set_opacity(1.0);
@@ -907,6 +1353,13 @@ fn build_page(
     // Fullscreen before the window is ever shown. Asking afterwards costs a
     // second round trip with the compositor, and the window spends it at the
     // wrong size.
+    //
+    // The size is asked for as well as the state, because fullscreen is a
+    // request like any other: something that does not grant it leaves a window
+    // at whatever GTK guesses, which is 200x200 and useless. Sized to the
+    // monitor, the worst case is a page that covers the screen without being
+    // flagged fullscreen, instead of a postage stamp in the corner.
+    win.set_default_size(geometry.width(), geometry.height());
     win.fullscreen_on_monitor(monitor);
     win.present();
 
@@ -914,9 +1367,13 @@ fn build_page(
         win,
         monitor: monitor.clone(),
         count,
+        caption: below,
+        pad: above,
         title,
         sub,
         badge,
+        walk,
+        meter,
         dial: state,
     };
     if let Some(ask) = &face.ask {
@@ -1112,55 +1569,104 @@ pub struct Dial {
     last_frame: i64,
 }
 
+/// How far apart the lines of the graph paper behind everything are.
+const GRID: f64 = 72.0;
+
 /// How long the confetti plays after a scan — and, when the scan is what ends
 /// the break, how long the page stays up to play it: see `release`. Three
 /// seconds: long enough to land as a reward, short enough that the desk it
 /// just unlocked is not held hostage by its own applause.
 const CELEBRATE: f64 = 3.0;
 
-/// The mark shown on the break page. Embedded rather than read from disk: it is
-/// part of the application, and a logo loaded by path is a logo that eventually
-/// goes missing on someone else's machine.
-const LOGO: &[u8] = include_bytes!("../../../assets/tea.png");
+/// How tall the mark is drawn inside the chip at the top of the page. Fixed,
+/// and small: it is a full stop next to the word BREAK, not a poster.
+const MARK: i32 = 18;
 
-fn logo(height: i32) -> Option<gtk::Image> {
-    let texture = gtk::gdk::Texture::from_bytes(&glib::Bytes::from_static(LOGO)).ok()?;
-    // Image, not Picture: `set_size_request` on a Picture is only a *minimum*,
-    // so it kept its natural 512px and shoved the countdown off centre.
-    // `set_pixel_size` is an exact instruction.
-    let image = gtk::Image::from_paintable(Some(&texture));
-    image.set_pixel_size(height);
-    Some(image)
-}
+/// The mark, drawn rather than scaled down from `assets/tea.png`.
+///
+/// The artwork is a full-colour illustration with its own outlines, and at
+/// eighteen pixels beside a word in 10pt type it is a smudge -- the detail
+/// that makes it a good icon at 512px is exactly what turns it to mush here.
+/// One line and one arc survive the size, and they still read as a cup.
+fn logo(height: i32) -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::new();
+    area.set_content_width(height);
+    area.set_content_height(height);
+    area.set_valign(gtk::Align::Center);
+    area.set_draw_func(|_, cr, width, height| {
+        let unit = width.min(height) as f64 / 18.0;
+        cr.set_source_rgba(0.576, 0.639, 0.753, 1.0);
+        cr.set_line_width(1.5 * unit);
+        cr.set_line_cap(gtk::cairo::LineCap::Round);
+        cr.set_line_join(gtk::cairo::LineJoin::Round);
 
-/// A mark, not a poster. Sized from the ring rather than from the slot, because
-/// the slot is sized from this -- and something has to break the circle.
-fn logo_height(radius: f64) -> i32 {
-    (radius * 0.55).clamp(48.0, 96.0) as i32
+        // The handle first, so the cup is drawn over where it meets the body.
+        cr.new_path();
+        cr.arc(13.0 * unit, 9.6 * unit, 2.6 * unit, -1.1, 1.1);
+        let _ = cr.stroke();
+
+        // The cup: straight sides that draw in a little, and a rounded base.
+        cr.new_path();
+        cr.move_to(3.0 * unit, 6.2 * unit);
+        cr.line_to(12.4 * unit, 6.2 * unit);
+        cr.line_to(11.4 * unit, 12.0 * unit);
+        cr.curve_to(
+            11.2 * unit,
+            13.4 * unit,
+            4.2 * unit,
+            13.4 * unit,
+            4.0 * unit,
+            12.0 * unit,
+        );
+        cr.close_path();
+        let _ = cr.stroke();
+    });
+    area
 }
 
 /// The dial's radius. The single number the whole layout is built from -- the
 /// text slots are derived from it, so the two cannot disagree about where the
 /// ring ends and the words begin.
+///
+/// The share is what a 720p panel can afford: on a short screen the slots get
+/// capped by the screen rather than by the ring, and every pixel of radius
+/// beyond this comes straight out of the air under the subtitle. See the
+/// layout test, which is the thing that actually pins this number down.
 fn ring_radius(width: i32, height: i32) -> f64 {
-    (width.min(height) as f64 * 0.13).clamp(100.0, 180.0)
+    (width.min(height) as f64 * 0.15).clamp(100.0, 200.0)
 }
 
 /// Clear air between the ring and the nearest line of text.
 const RING_GAP: f64 = 56.0;
 
-/// Rough heights of the three lines. Only estimates -- they decide how much air
-/// there is, never whether anything collides.
-const COUNT_HEIGHT: f64 = 110.0;
-const TITLE_HEIGHT: f64 = 50.0;
-const LOGO_GAP: f64 = 16.0;
+/// Rough heights of the stacks above and below the clock. Only estimates --
+/// they decide how much air there is, never whether anything collides.
+///
+/// The middle is the clock plus the caption under it, and the caption is
+/// balanced by an equal blank above, so the clock itself lands dead centre --
+/// where the ring is drawn around it.
+const COUNT_HEIGHT: f64 = 130.0;
+/// The chip, the title and the subtitle, with the gaps between them.
+const HEAD_HEIGHT: f64 = 140.0;
+/// The two badges and one row of the step meter under them.
+const FOOT_HEIGHT: f64 = 70.0;
 
-/// The mark and the title stacked together, which is what the upper slot has to
-/// hold. The title sits at the *bottom* of that stack, so it reaches this much
-/// further towards the ring than the middle of the slot -- the thing the first
-/// version of this formula forgot.
-fn head_height(radius: f64) -> f64 {
-    logo_height(radius) as f64 + LOGO_GAP + TITLE_HEIGHT
+/// The same, for a walk whose squares wrap onto `rows` of them. Every row past
+/// the first makes the stack deeper, and a stack that grows without the slot
+/// growing with it is a badge creeping back onto the ring.
+fn foot_height(rows: u32) -> f64 {
+    FOOT_HEIGHT + rows.saturating_sub(1) as f64 * (PIP + ROW_GAP)
+}
+/// The blank above the clock and the caption below it: equal, by construction.
+const CAPTION_SLOT: i32 = 26;
+/// Air between the pieces of the head and foot stacks.
+const STACK_GAP: i32 = 14;
+
+/// What the upper slot has to hold. Its *bottom* line -- the subtitle -- is
+/// what reaches towards the ring, which is why the slot is sized from the whole
+/// stack rather than from any one line of it.
+fn head_height() -> f64 {
+    HEAD_HEIGHT
 }
 
 /// Height reserved above and below the countdown, for the title and subtitle.
@@ -1170,11 +1676,14 @@ fn head_height(radius: f64) -> f64 {
 /// Capped so the column can never be taller than the screen: GTK would squeeze
 /// the slots to fit, dragging the text back inside the ring -- which is exactly
 /// how it went wrong before.
-fn slot_height(width: i32, height: i32) -> i32 {
+fn slot_height(width: i32, height: i32, rows: u32) -> i32 {
     let radius = ring_radius(width, height);
     // Deep enough that the *bottom of the stack* clears the ring, not merely
-    // the middle of the slot.
-    let clear_of_ring = 2.0 * (radius + RING_GAP) + head_height(radius) - COUNT_HEIGHT;
+    // the middle of the slot -- and sized to whichever stack is taller, since
+    // both slots are the same depth and it is the deeper one that decides
+    // whether anything lands on the ring.
+    let stack = head_height().max(foot_height(rows));
+    let clear_of_ring = 2.0 * (radius + RING_GAP) + stack - COUNT_HEIGHT;
     let fits_on_screen = (height as f64 - COUNT_HEIGHT) / 2.0;
     clear_of_ring.min(fits_on_screen).max(150.0) as i32
 }
@@ -1189,7 +1698,8 @@ fn build_stage(
     remaining: Duration,
     arrival: f64,
     anim: &Anim,
-) -> (gtk::DrawingArea, Rc<RefCell<Dial>>) {
+    radius: f64,
+) -> (Stage, Rc<RefCell<Dial>>) {
     let burst_share = anim.burst_share();
     let shards = anim.shard_count();
 
@@ -1203,27 +1713,62 @@ fn build_stage(
         last_frame: 0,
     }));
 
-    let area = gtk::DrawingArea::new();
-    area.set_hexpand(true);
-    area.set_vexpand(true);
+    // ---- the backdrop: drawn once, and then left alone ------------------
+    let backdrop = gtk::DrawingArea::new();
+    backdrop.set_hexpand(true);
+    backdrop.set_vexpand(true);
+    backdrop.set_draw_func(move |_, cr, width, height| {
+        let (cx, cy) = (width as f64 / 2.0, height as f64 / 2.0);
+        let reach = (cx * cx + cy * cy).sqrt();
 
+        cr.set_source_rgba(0.024, 0.031, 0.051, 1.0);
+        let _ = cr.paint();
+
+        // Graph paper, almost too faint to see: it gives the black somewhere
+        // to be, so a screen that is entirely one colour does not read as a
+        // screen that has died.
+        cr.set_line_width(1.0);
+        cr.set_source_rgba(0.55, 0.70, 1.0, 0.022);
+        let mut x = (width as f64 % GRID) / 2.0;
+        while x < width as f64 {
+            cr.move_to(x.floor() + 0.5, 0.0);
+            cr.line_to(x.floor() + 0.5, height as f64);
+            x += GRID;
+        }
+        let mut y = (height as f64 % GRID) / 2.0;
+        while y < height as f64 {
+            cr.move_to(0.0, y.floor() + 0.5);
+            cr.line_to(width as f64, y.floor() + 0.5);
+            y += GRID;
+        }
+        let _ = cr.stroke();
+
+        // And a breath of light behind the dial, so the middle of the page is
+        // where the eye goes.
+        let glow = gtk::cairo::RadialGradient::new(cx, cy, 0.0, cx, cy, reach * 0.62);
+        glow.add_color_stop_rgba(0.0, 0.29, 0.42, 0.85, 0.10);
+        glow.add_color_stop_rgba(1.0, 0.29, 0.42, 0.85, 0.0);
+        let _ = cr.set_source(&glow);
+        let _ = cr.paint();
+    });
+
+    // ---- the burst: the blast and the confetti, and nothing else --------
+    let burst = gtk::DrawingArea::new();
+    burst.set_hexpand(true);
+    burst.set_vexpand(true);
+    burst.set_can_target(false);
     let drawing = Rc::clone(&state);
-    area.set_draw_func(move |_, cr, width, height| {
+    burst.set_draw_func(move |_, cr, width, height| {
         let dial = drawing.borrow();
         let entrance = dial.entrance;
         let (cx, cy) = (width as f64 / 2.0, height as f64 / 2.0);
         // Corner to corner, and a little past, so the blast leaves the page
         // rather than stopping short of it.
         let reach = (cx * cx + cy * cy).sqrt() * 1.12;
-
-        // 1. The dark washes in first.
-        cr.set_source_rgba(0.051, 0.063, 0.090, phase(entrance, 0.0, 0.18));
-        let _ = cr.paint();
-
         cr.set_line_cap(gtk::cairo::LineCap::Round);
 
-        // 2. The blast, all the way out. Three waves rather than one: a single
-        //    expanding circle reads as a ripple, three read as a shock.
+        // The blast, all the way out. Three waves rather than one: a single
+        // expanding circle reads as a ripple, three read as a shock.
         let blast = phase(entrance, 0.02, burst_share.max(0.05));
         if burst_share > 0.0 && blast < 1.0 {
             for (start, weight, thickness) in [(0.0, 0.85, 10.0), (0.16, 0.55, 7.0), (0.34, 0.35, 5.0)] {
@@ -1259,68 +1804,217 @@ fn build_stage(
 
         // The scan landed: the celebration, over whatever the page is showing
         // -- the waiting words, or a countdown that still has to run.
-        if let Some(t) = dial.celebrate {
-            if t < 1.0 {
-                draw_celebration(cr, cx, cy, reach, t);
-            }
+        if let Some(t) = dial.celebrate
+            && t < 1.0
+        {
+            draw_celebration(cr, cx, cy, reach, t);
         }
+    });
 
-        // Nothing left to count. The backdrop is the whole page from here, and
-        // the words that replaced the clock get the room the ring was using.
+    // ---- the ring: a small box in the middle of the screen --------------
+    // Big enough for the widest glow stroke and for the overshoot the arrival
+    // ends on, and not one pixel bigger: this is the layer that gets redrawn
+    // while the break runs, and its size is what that costs.
+    let box_radius = radius * 1.10 + 12.0;
+    let ring = gtk::DrawingArea::new();
+    ring.set_content_width((box_radius * 2.0).ceil() as i32);
+    ring.set_content_height((box_radius * 2.0).ceil() as i32);
+    ring.set_halign(gtk::Align::Center);
+    ring.set_valign(gtk::Align::Center);
+    ring.set_can_target(false);
+    let drawing = Rc::clone(&state);
+    ring.set_draw_func(move |_, cr, width, height| {
+        let dial = drawing.borrow();
         if dial.spent {
             return;
         }
+        let (cx, cy) = (width as f64 / 2.0, height as f64 / 2.0);
+        cr.set_line_cap(gtk::cairo::LineCap::Round);
 
-        // 3. The dial arrives in the middle, once the blast is on its way out.
-        let arriving = phase(entrance, 0.22, 0.80);
+        // The dial arrives in the middle, once the blast is on its way out.
+        let arriving = phase(dial.entrance, 0.22, 0.80);
         if arriving <= 0.0 {
             return;
         }
         // Overshoot slightly at the end, so it lands rather than stops.
-        let radius = ring_radius(width, height) * (0.25 + 0.75 * ease_out_back(arriving));
+        let radius = radius * (0.25 + 0.75 * ease_out_back(arriving));
 
-        cr.set_line_width(12.0);
-        cr.set_source_rgba(0.13, 0.16, 0.24, arriving);
+        // A hairline, not a hoop: the ring is a boundary drawn around the
+        // clock, and the only heavy thing on this page should be the time.
+        cr.set_line_width(2.5);
+        cr.set_source_rgba(0.20, 0.28, 0.47, 0.9 * arriving);
         cr.arc(cx, cy, radius, 0.0, TAU);
         let _ = cr.stroke();
 
         // Time left, draining clockwise from the top. While it arrives, the arc
         // draws itself around rather than snapping to full.
-        let left = (dial.remaining / dial.total).clamp(0.0, 1.0);
-        let drawn = left * ease_out_cubic(phase(entrance, 0.42, 1.0));
+        let drawn = arc_of(&dial) * ease_out_cubic(phase(dial.entrance, 0.42, 1.0));
         if drawn > 0.0 {
-            cr.set_source_rgba(0.48, 0.63, 0.97, arriving);
-            cr.arc(cx, cy, radius, -FRAC_PI_2, -FRAC_PI_2 + TAU * drawn);
-            let _ = cr.stroke();
+            // Three strokes, widest and faintest first: cairo has no blur, and
+            // stacking them is what makes the arc look lit rather than painted.
+            for (thickness, alpha) in [(16.0, 0.07), (8.0, 0.16), (3.0, 1.0)] {
+                cr.set_line_width(thickness);
+                cr.set_source_rgba(0.56, 0.71, 1.0, alpha * arriving);
+                cr.arc(cx, cy, radius, -FRAC_PI_2, -FRAC_PI_2 + TAU * drawn);
+                let _ = cr.stroke();
+            }
         }
     });
 
-    let ticking = Rc::clone(&state);
-    area.add_tick_callback(move |area, clock| {
-        let now = clock.frame_time();
-        {
-            let mut dial = ticking.borrow_mut();
+    // ---- what actually asks for a repaint, and how often ----------------
+    let pace = Rc::new(Pace {
+        dial: Rc::clone(&state),
+        burst: burst.clone(),
+        ring: ring.clone(),
+        arrival,
+        radius,
+        painted: Cell::new(NEVER_PAINTED),
+        ticking: Cell::new(false),
+    });
+
+    // The arrival is playing from the first frame, so the frame clock starts
+    // with it. It takes itself off again the moment nothing needs it.
+    pace.follow_the_frame_clock(&backdrop);
+
+    // And underneath, a slow heartbeat for the rest of the break: it moves the
+    // clock on, repaints the ring when its arc has actually gone somewhere, and
+    // is what notices a celebration starting and calls the frame clock back.
+    let weak = backdrop.downgrade();
+    let beating = Rc::clone(&pace);
+    glib::timeout_add_local(HEARTBEAT, move || {
+        let Some(backdrop) = weak.upgrade() else {
+            // The page is gone. So is the reason to keep waking up.
+            return glib::ControlFlow::Break;
+        };
+        if beating.step() && !beating.ticking.get() {
+            beating.follow_the_frame_clock(&backdrop);
+        }
+        glib::ControlFlow::Continue
+    });
+
+    (Stage { backdrop, burst, ring }, state)
+}
+
+/// How often the page is looked at when nothing is animating.
+///
+/// Eight times a second, which sounds slow for a countdown and is not: the ring
+/// of a five-minute break creeps round at about three pixels a second, and the
+/// numbers under it only change once a second anyway. What this is *not* is
+/// sixty times a second for five minutes.
+const HEARTBEAT: Duration = Duration::from_millis(120);
+
+/// Who repaints what, and how often.
+///
+/// Two drivers share this: the frame clock, while something is genuinely
+/// animating, and a slow timer for the rest of the break. Both go through
+/// [`Pace::step`], and the elapsed time comes from the monotonic clock rather
+/// than from either driver's own interval -- otherwise the two would both
+/// advance the countdown and it would run at double speed whenever they
+/// overlapped.
+struct Pace {
+    dial: Rc<RefCell<Dial>>,
+    burst: gtk::DrawingArea,
+    ring: gtk::DrawingArea,
+    arrival: f64,
+    radius: f64,
+    /// The arc as it was last actually painted, to compare against.
+    painted: Cell<f64>,
+    /// Whether the frame clock is currently driving this.
+    ticking: Cell<bool>,
+}
+
+impl Pace {
+    /// Ask for every frame until nothing needs one.
+    fn follow_the_frame_clock(self: &Rc<Self>, backdrop: &gtk::DrawingArea) {
+        self.ticking.set(true);
+        let pace = Rc::clone(self);
+        backdrop.add_tick_callback(move |_, _| {
+            if pace.step() {
+                glib::ControlFlow::Continue
+            } else {
+                pace.ticking.set(false);
+                glib::ControlFlow::Break
+            }
+        });
+    }
+
+    /// Move everything on to now, and repaint whatever that changed. Says
+    /// whether anything is still animating.
+    fn step(&self) -> bool {
+        let now = glib::monotonic_time();
+        let (animating, spent, arc) = {
+            let mut dial = self.dial.borrow_mut();
             let delta = if dial.last_frame == 0 {
                 0.0
             } else {
                 (now - dial.last_frame) as f64 / 1_000_000.0
             };
             dial.last_frame = now;
-            dial.entrance = if arrival <= 0.0 {
+            dial.entrance = if self.arrival <= 0.0 {
                 1.0
             } else {
-                (dial.entrance + delta / arrival).min(1.0)
+                (dial.entrance + delta / self.arrival).min(1.0)
             };
             dial.remaining = (dial.remaining - delta).max(0.0);
             if let Some(t) = dial.celebrate {
                 dial.celebrate = Some((t + delta / CELEBRATE).min(1.0));
             }
-        }
-        area.queue_draw();
-        glib::ControlFlow::Continue
-    });
+            let playing = dial.entrance < 1.0 || dial.celebrate.is_some_and(|t| t < 1.0);
+            (playing, dial.spent, arc_of(&dial))
+        };
 
-    (area, state)
+        // The blast and the confetti live on a full-screen layer, so it is
+        // hidden rather than merely left undrawn: a transparent layer the size
+        // of the screen still costs something to composite, every frame, on
+        // every monitor.
+        if animating {
+            if !self.burst.is_visible() {
+                self.burst.set_visible(true);
+            }
+            self.burst.queue_draw();
+        } else if self.burst.is_visible() {
+            self.burst.set_visible(false);
+        }
+
+        if spent {
+            // The countdown is over and the ring is not drawn any more. Take
+            // the whole layer out rather than compositing an empty one.
+            if self.ring.is_visible() {
+                self.ring.set_visible(false);
+            }
+        } else if animating || worth_repainting(arc, self.painted.get(), self.radius) {
+            self.painted.set(arc);
+            self.ring.queue_draw();
+        }
+
+        animating
+    }
+}
+
+/// What `Pace::painted` holds before the ring has been drawn even once.
+///
+/// Infinity rather than NaN, and the difference is the whole ring: the test
+/// below is a comparison, every comparison against NaN is false, and `painted`
+/// is only written *inside* the branch that comparison guards. Seeded with NaN
+/// a page that is not animating on its first step never takes the branch, so
+/// never seeds it, and never repaints the ring again -- which is every page
+/// built with `Entrance::None` (a monitor plugged in mid-break, an insisting
+/// page coming back) and every page at all with the entrance switched off.
+const NEVER_PAINTED: f64 = f64::INFINITY;
+
+/// Whether the arc has crept far enough since it was last painted to be worth
+/// a frame -- three quarters of a pixel along its own circumference.
+///
+/// Split out from `Pace` so it can be checked without a display, because what
+/// it answers on the *first* look is the difference between a ring that sweeps
+/// for the whole break and one that stops dead a second in. See `painted`.
+fn worth_repainting(arc: f64, painted: f64, radius: f64) -> bool {
+    (arc - painted).abs() * TAU * radius >= 0.75
+}
+
+/// How much of the ring is still to be drawn, as a share of the whole.
+fn arc_of(dial: &Dial) -> f64 {
+    (dial.remaining / dial.total).clamp(0.0, 1.0)
 }
 
 /// Confetti colours, every one already on the page: the badge's green, the
@@ -1393,6 +2087,11 @@ mod tests {
         assert_eq!(Hold::default().every(), Duration::from_millis(400));
     }
 
+    /// The three cells a page is rebuilt from, with no walk in the break.
+    fn faced(ask: Option<&str>, waiting: bool, scanned: bool, reachable: bool) -> Face {
+        face_of(ask, waiting, scanned, reachable, waiting && scanned, Walk::default())
+    }
+
     #[test]
     fn a_page_rebuilt_mid_break_remembers_the_walk() {
         const PROMPT: &str = "Scan the tag in the hall";
@@ -1400,34 +2099,158 @@ mod tests {
 
         // Nothing gating the break: no badge at all, on a page that has never
         // heard of a tag.
-        assert!(face_of(None, false, false, true).tag.is_none());
-        assert!(face_of(None, true, true, true).tag.is_none());
+        assert!(faced(None, false, false, true).tag.is_none());
+        assert!(faced(None, true, true, true).tag.is_none());
 
         // Gated: the badge tracks the scan, and survives whatever rebuilds the
         // page -- insisting, or a monitor arriving mid-break.
-        assert_eq!(face_of(prompt, false, false, true).tag, Some(Tag::Pending));
-        assert_eq!(face_of(prompt, false, true, true).tag, Some(Tag::Scanned));
+        assert_eq!(faced(prompt, false, false, true).tag, Some(Tag::Pending));
+        assert_eq!(faced(prompt, false, true, true).tag, Some(Tag::Scanned));
 
         // Nothing watching: the page says so rather than asking for a walk that
         // would not be noticed. A scan already made outranks it.
-        assert_eq!(face_of(prompt, false, false, false).tag, Some(Tag::Unseen));
-        assert_eq!(face_of(prompt, false, true, false).tag, Some(Tag::Scanned));
+        assert_eq!(faced(prompt, false, false, false).tag, Some(Tag::Unseen));
+        assert_eq!(faced(prompt, false, true, false).tag, Some(Tag::Scanned));
 
         // Waiting *and* scanned is a page about to come down, and it says so
         // rather than still asking -- however many times it gets rebuilt in the
         // second before it goes.
-        assert!(!face_of(prompt, false, true, true).done, "not waiting yet");
-        assert!(!face_of(prompt, true, false, true).done, "waiting, nobody has been");
-        assert!(face_of(prompt, true, true, true).done);
+        assert!(!faced(prompt, false, true, true).done, "not waiting yet");
+        assert!(!faced(prompt, true, false, true).done, "waiting, nobody has been");
+        assert!(faced(prompt, true, true, true).done);
 
         // The full waiting page only once the countdown is actually spent.
-        assert_eq!(face_of(prompt, false, false, true).ask, None);
-        assert_eq!(face_of(prompt, true, false, true).ask, Some(PROMPT.to_string()));
+        assert_eq!(faced(prompt, false, false, true).ask, None);
+        assert_eq!(faced(prompt, true, false, true).ask, Some(PROMPT.to_string()));
     }
 
     #[test]
-    fn the_two_tag_states_never_read_the_same() {
-        assert_ne!(words_for(Tag::Pending), words_for(Tag::Scanned));
+    fn a_page_rebuilt_mid_walk_remembers_the_steps() {
+        const PROMPT: &str = "Scan the tag in the hall";
+        let prompt = Some(PROMPT);
+        let part = Walk { walked: 12, needed: 20, marked: false };
+        let full = Walk { walked: 20, needed: 20, marked: false };
+        let face = |waiting, scanned, walk| face_of(prompt, waiting, scanned, true, false, walk);
+
+        // No walk in this break: no second badge, whatever else is going on.
+        assert!(face(true, true, Walk::default()).walk.is_none());
+        // With one, the count survives every rebuild -- and the page must never
+        // come back at zero, which would read as steps that did not count.
+        assert_eq!(face(false, false, part).walk, Some(part));
+        assert_eq!(face(true, true, part).walk, Some(part));
+
+        // Scanned, still walking: asking for the tag again would send somebody
+        // back down the hall for a thing they have already done.
+        assert_eq!(face(true, true, part).ask, Some("8 more steps".to_string()));
+        assert_eq!(
+            face(true, true, Walk { walked: 19, needed: 20, marked: false }).ask,
+            Some("One more step".to_string())
+        );
+        // Not scanned: the tag is what is being waited for, steps or no steps.
+        assert_eq!(face(true, false, part).ask, Some(PROMPT.to_string()));
+        // Walked but not scanned, and the tag is still the ask.
+        assert_eq!(face(true, false, full).ask, Some(PROMPT.to_string()));
+
+        // Only the gate opening says the page is done -- not the walk on its
+        // own, and not the scan on its own.
+        assert!(!face(true, true, full).done, "the engine has not opened it yet");
+        assert!(face_of(prompt, true, true, true, true, full).done);
+    }
+
+    #[test]
+    fn the_squares_wrap_at_fifty_and_a_square_stays_one_step() {
+        // One square per step for any walk anybody actually asks for, so the
+        // block is the count itself and not a proportion of it.
+        assert_eq!(Meter::pips(50), 50);
+        assert_eq!(Meter::grid(50), (50, 1));
+        assert_eq!(Meter::grid(100), (50, 2));
+        assert_eq!(Meter::grid(200), (50, 4));
+        // A short last row, left-aligned under the full ones: 120 steps is two
+        // full rows and twenty, not three rows of forty.
+        assert_eq!(Meter::grid(120), (50, 3));
+        assert_eq!(Meter::grid(20), (20, 1));
+        assert_eq!(Meter::grid(1), (1, 1));
+        // A walk of nought steps is not a walk, but the page must not be asked
+        // to draw a block with no rows in it either.
+        assert_eq!(Meter::grid(0), (1, 1));
+
+        // Past four rows a square goes back to meaning a share of the walk,
+        // because twenty rows of them is a texture rather than a count.
+        assert_eq!(Meter::pips(1_000), PIPS_MOST);
+        assert_eq!(Meter::grid(1_000), (50, 4));
+    }
+
+    #[test]
+    fn no_two_badges_ever_read_the_same() {
+        let words = |m| words_for(m);
+        let all = [
+            words(Mark::Tag(Tag::Pending)),
+            words(Mark::Tag(Tag::Scanned)),
+            words(Mark::Tag(Tag::Unseen)),
+            words(Mark::Walk(Walk { walked: 0, needed: 20, marked: false })),
+            words(Mark::Walk(Walk { walked: 0, needed: 20, marked: true })),
+            words(Mark::Walk(Walk { walked: 20, needed: 20, marked: false })),
+        ];
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        // Green is for a half of the gate that is in, and nothing else.
+        assert!(Mark::Walk(Walk { walked: 20, needed: 20, marked: false }).done());
+        assert!(!Mark::Walk(Walk { walked: 19, needed: 20, marked: false }).done());
+        assert!(!Mark::Tag(Tag::Unseen).done());
+    }
+
+    #[test]
+    fn the_prompt_gets_one_line_of_its_own() {
+        // The shipped prompt, and the one on this machine, on the smallest
+        // screen anybody runs this on. Both have to arrive whole.
+        for prompt in ["Scan the tag to get your desk back", "Scan the tag in the living room"] {
+            let (size, fits) = ask_size(1280.0, prompt.chars().count());
+            assert!(
+                fits >= prompt.chars().count() as i32,
+                "{prompt:?} wraps at {size}pt: {fits} characters fit of {}",
+                prompt.chars().count()
+            );
+        }
+
+        // A short one is not blown up past the size the page is designed at...
+        assert_eq!(ask_size(3840.0, 12).0, ASK_BIGGEST);
+        // ...and a long one shrinks to fit rather than wrapping.
+        let (small, _) = ask_size(1280.0, 70);
+        assert!(small < ASK_BIGGEST, "{small}pt");
+        assert!(small >= ASK_SMALLEST);
+
+        // Somebody's paragraph stops shrinking and wraps instead: unreadable
+        // on one line is worse than readable on three.
+        let (floored, fits) = ask_size(1280.0, 400);
+        assert_eq!(floored, ASK_SMALLEST);
+        assert!(fits > 1 && fits < 400);
+    }
+
+    #[test]
+    fn the_ring_repaints_from_its_very_first_look() {
+        const RADIUS: f64 = 150.0;
+
+        // The seed has to read as "moved", because `painted` is only written
+        // when this says so: a seed that answers no on the first look answers
+        // no for ever, and the ring stops dead on every page born without an
+        // entrance to play -- one rebuilt mid-break, or any page at all with
+        // the animation switched off. NaN answers no to everything, which is
+        // exactly how it went wrong.
+        // Asserted against the seed a page is actually built with, not against
+        // a value spelled out here -- the seed is the thing that was wrong.
+        for arc in [0.0, 0.5, 1.0] {
+            assert!(worth_repainting(arc, NEVER_PAINTED, RADIUS), "the first look must paint");
+        }
+        assert!(!worth_repainting(1.0, f64::NAN, RADIUS), "which is what NaN never did");
+
+        // After that it is a real threshold: a hair of creep is not worth a
+        // frame, a pixel of it is.
+        assert!(!worth_repainting(0.5, 0.5, RADIUS));
+        assert!(!worth_repainting(0.500_000_1, 0.5, RADIUS));
+        assert!(worth_repainting(0.51, 0.5, RADIUS));
     }
 
     #[test]
@@ -1439,38 +2262,38 @@ mod tests {
     /// The layout has one job: the words go outside the ring, on every screen.
     #[test]
     fn the_text_always_clears_the_dial() {
-        // The subtitle, the gap, and the tag badge under it -- the tallest the
-        // lower slot ever gets, since the badge is the only thing that can be
-        // added to it. Generous on purpose: it is the number that decides
-        // whether the words land on the ring.
-        const SUB_HEIGHT: f64 = 64.0;
+        // Every depth of foot there can be: one row of squares, and up to the
+        // four a two-hundred-step walk wraps onto.
+        for rows in 1..=PIPS_MOST.div_ceil(PIPS_ROW) {
+            for (w, h) in [(1280, 720), (1366, 768), (1920, 1080), (2560, 1440), (3840, 2160)] {
+                let slot = slot_height(w, h, rows) as f64;
+                let radius = ring_radius(w, h);
 
-        for (w, h) in [(1280, 720), (1366, 768), (1920, 1080), (2560, 1440), (3840, 2160)] {
-            let slot = slot_height(w, h) as f64;
-            let radius = ring_radius(w, h);
+                // What matters is the edge nearest the ring, not the middle of
+                // the slot it sits in: above, the subtitle at the bottom of the
+                // chip - title - subtitle stack; below, the badges at the top
+                // of theirs.
+                let sub_bottom = COUNT_HEIGHT / 2.0 + slot / 2.0 - head_height() / 2.0;
+                let badges_top = COUNT_HEIGHT / 2.0 + slot / 2.0 - foot_height(rows) / 2.0;
 
-            // What matters is the edge of the text nearest the ring, not the
-            // middle of the slot it sits in. The title is the bottom of the
-            // mark-and-title stack; the subtitle is centred in its own slot.
-            let title_bottom = COUNT_HEIGHT / 2.0 + slot / 2.0 - head_height(radius) / 2.0;
-            let sub_top = COUNT_HEIGHT / 2.0 + slot / 2.0 - SUB_HEIGHT / 2.0;
+                // On a short screen the slot gets capped and the air narrows,
+                // but it must never run out.
+                for (what, edge) in [("subtitle", sub_bottom), ("badges", badges_top)] {
+                    assert!(
+                        edge >= radius + 24.0,
+                        "{w}x{h}, {rows} rows: {what} reaches {edge:.0}px from centre, \
+                         ring reaches {radius:.0}px"
+                    );
+                }
 
-            // On a short screen the slot gets capped and the air narrows, but
-            // it must never run out.
-            for (what, edge) in [("title", title_bottom), ("subtitle", sub_top)] {
+                // If the column outgrows the screen, GTK squeezes the slots and
+                // the text lands back on the ring.
                 assert!(
-                    edge >= radius + 24.0,
-                    "{w}x{h}: {what} reaches {edge:.0}px from centre, ring reaches {radius:.0}px"
+                    slot * 2.0 + COUNT_HEIGHT <= h as f64,
+                    "{w}x{h}: column is {:.0}px on a {h}px screen",
+                    slot * 2.0 + COUNT_HEIGHT
                 );
             }
-
-            // If the column outgrows the screen, GTK squeezes the slots and the
-            // text lands back on the ring.
-            assert!(
-                slot * 2.0 + COUNT_HEIGHT <= h as f64,
-                "{w}x{h}: column is {:.0}px on a {h}px screen",
-                slot * 2.0 + COUNT_HEIGHT
-            );
         }
     }
 }

@@ -1,6 +1,7 @@
 //! P0 host: drives the scheduler on a real clock and prints what it would do.
 //! No overlay yet — this exists to shake out the timing before any GTK lands.
 
+mod clock;
 mod config;
 mod nfc;
 mod overlay;
@@ -54,6 +55,12 @@ fn main() {
     let mut probe = false;
     let mut show_status = false;
     let mut show_config = false;
+    /// The default `tea off` with no duration named. Long enough to be worth
+    /// asking for, short enough that forgetting to say `tea on` costs you one
+    /// afternoon rather than the habit.
+    const OFF_FOR: Duration = Duration::from_secs(60 * 60);
+    let mut off_for: Option<Duration> = None;
+    let mut back_on = false;
     let mut set_key: Option<(&str, String)> = None;
     let mut set_sound: Option<String> = None;
     let mut set_nfc: Option<String> = None;
@@ -99,6 +106,22 @@ fn main() {
             "--headless" => headless = true,
             "--probe" => probe = true,
             "reload" => reload = true,
+            "off" => {
+                // A bare `tea off` is an hour. Anything that parses as a
+                // duration after it is taken as one, so `tea off 20m` reads
+                // the way it looks.
+                off_for = Some(match argv.get(i + 1) {
+                    Some(v) => {
+                        let d = config::parse(v).unwrap_or_else(|| {
+                            fail(&format!("off: {v:?} is not a duration like 1h or 20m"))
+                        });
+                        i += 1;
+                        d
+                    }
+                    None => OFF_FOR,
+                });
+            }
+            "on" => back_on = true,
             "status" => show_status = true,
             "config" => show_config = true,
             "run" | "--test-overlay" => {
@@ -153,6 +176,31 @@ fn main() {
 
     if reload {
         return run_reload();
+    }
+
+    // Neither of these touches the config file or needs the daemon restarted:
+    // the running service reads the switch on its next tick, which is within a
+    // second, and the page comes down with it.
+    if let Some(how_long) = off_for {
+        return match state::off::set(how_long) {
+            Ok(()) => {
+                println!(
+                    "tea: off for {} — nothing will interrupt you until then.",
+                    human(how_long)
+                );
+                println!("     `tea on` starts it again sooner.");
+            }
+            Err(e) => fail(&e),
+        };
+    }
+    if back_on {
+        return match (state::off::left(), state::off::clear()) {
+            (_, Err(e)) => fail(&e),
+            (Some(left), Ok(())) => {
+                println!("tea: back on, {} early. The work timer starts from here.", human(left))
+            }
+            (None, Ok(())) => println!("tea: already on."),
+        };
     }
 
     if let Some(file) = set_sound {
@@ -226,13 +274,15 @@ fn main() {
     }
 
     if show_status {
-        let mut cfg = if path.exists() {
-            config::load(&path).unwrap_or_else(|e| fail(&e)).into()
+        let file = if path.exists() {
+            config::load(&path).unwrap_or_else(|e| fail(&e))
         } else {
-            tea_core::Config::default()
+            config::FileConfig::default()
         };
+        let hours = file.hours.clone();
+        let mut cfg: tea_core::Config = file.into();
         let _ = config::reconcile(&mut cfg);
-        return status::show(cfg, &path, boottime());
+        return status::show(cfg, &hours, &path, boottime());
     }
 
     // An explicit --config that isn't there is a typo, not an invitation to
@@ -261,6 +311,7 @@ fn main() {
     let anim_cfg = file.animation.clone();
     let hold_cfg = file.hold;
     let nfc_cfg = file.nfc.clone();
+    let hours_cfg = file.hours.clone();
     let mut cfg: tea_core::Config = file.into();
     let Overrides { work, brk, warn_before, idle_credit, idle_pause, postpone, postpone_budget } =
         over;
@@ -288,6 +339,11 @@ fn main() {
     for note in config::reconcile(&mut cfg).unwrap_or_else(|e| fail(&e)) {
         eprintln!("tea: note: {note}");
     }
+    // Said on every path, preview included: a switch that is on in the file and
+    // silently off in the process is the worst kind of setting.
+    if let Some(why) = nfc_cfg.steps_misconfigured() {
+        eprintln!("tea: note: {why}");
+    }
 
     if unlock {
         if !nfc_cfg.on() {
@@ -312,6 +368,12 @@ fn main() {
                 "tea: the tag is on — after the countdown the page waits for a real scan,\n\
                  \x20    exactly like a break would."
             );
+            if nfc_cfg.counts_steps() {
+                println!(
+                    "tea: and for {} real steps, counted from wherever you are standing now.",
+                    nfc_cfg.steps.count
+                );
+            }
         }
         return preview(total, sound_cfg, anim_cfg, hold_cfg, nfc_cfg);
     }
@@ -331,9 +393,32 @@ fn main() {
         path.display()
     );
 
+    if hours_cfg.set() {
+        println!("hours: awake {}", hours_cfg.describe());
+    }
+    if let Some(left) = state::off::left() {
+        println!("off: switched off for another {} — `tea on` to start again", human(left));
+    }
+    if cfg.long_every > 0 {
+        println!(
+            "long: every {} break runs {} instead of {}",
+            match cfg.long_every {
+                2 => "2nd".to_string(),
+                3 => "3rd".to_string(),
+                n => format!("{n}th"),
+            },
+            human(cfg.long_brk),
+            human(cfg.brk)
+        );
+    }
+
     if nfc_cfg.on() {
         println!(
-            "nfc: on — the page waits for the tag, {}",
+            "nfc: on — the page waits for {}, {}",
+            match nfc_cfg.counts_steps() {
+                true => format!("the tag and {} steps", nfc_cfg.steps.count),
+                false => "the tag".to_string(),
+            },
             match cfg.release_grace {
                 g if g.is_zero() => "for as long as it takes".to_string(),
                 g => format!("giving up after {}", human(g)),
@@ -342,9 +427,9 @@ fn main() {
     }
 
     if headless {
-        run_headless(cfg, sound_cfg, nfc_cfg);
+        run_headless(cfg, sound_cfg, nfc_cfg, hours_cfg);
     } else {
-        run_gtk(cfg, sound_cfg, anim_cfg, hold_cfg, nfc_cfg);
+        run_gtk(cfg, sound_cfg, anim_cfg, hold_cfg, nfc_cfg, hours_cfg);
     }
 }
 
@@ -409,8 +494,13 @@ fn tag_instructions(cfg: &nfc::Config) {
 }
 
 /// Terminal-only: no GTK, no display needed. Works over SSH.
-fn run_headless(cfg: tea_core::Config, sound: sound::Config, nfc: nfc::Config) {
-    let mut engine = Engine::start(cfg, sound, nfc);
+fn run_headless(
+    cfg: tea_core::Config,
+    sound: sound::Config,
+    nfc: nfc::Config,
+    hours: config::Hours,
+) {
+    let mut engine = Engine::start(cfg, sound, nfc, hours);
     let mut ui = TerminalBlocker;
     // There is no GTK main loop out here, but the socket that listens for the
     // tag still dispatches on glib's. Pumping whatever is pending each second
@@ -433,6 +523,7 @@ fn run_gtk(
     anim: overlay::Anim,
     hold: overlay::Hold,
     nfc: nfc::Config,
+    hours: config::Hours,
 ) {
     let app = gtk::Application::builder().application_id(APP_ID).build();
 
@@ -450,7 +541,8 @@ fn run_gtk(
         // Nothing is on screen between breaks, and GtkApplication quits when
         // its last window closes -- so keep it open explicitly.
         let keep_open = app.hold();
-        let engine = RefCell::new(Engine::start(cfg.clone(), sound.clone(), nfc.clone()));
+        let engine =
+            RefCell::new(Engine::start(cfg.clone(), sound.clone(), nfc.clone(), hours.clone()));
         let ui = RefCell::new(GtkBlocker::new(
             app,
             engine.borrow().postpone_flag(),
@@ -520,12 +612,19 @@ fn preview(
                 Err(_) => {}
             }
             if nfc.asks() {
-                match nfc::watch(&nfc.home_assistant, Rc::clone(&link)) {
+                match nfc::watch(&nfc, Rc::clone(&link)) {
                     Ok(w) => {
                         println!(
                             "nfc: watching {} — scan the tag to lift the page",
                             nfc.home_assistant.entity.trim()
                         );
+                        if nfc.counts_steps() {
+                            println!(
+                                "nfc: and counting {} steps of {} — the page wants both",
+                                nfc.steps.count,
+                                nfc.steps.entity.trim()
+                            );
+                        }
                         watch = Some(w);
                     }
                     Err(why) => eprintln!("tea: {why}"),
@@ -546,6 +645,11 @@ fn preview(
         )));
         let mut player = sound::Player::new(sound.clone());
         player.break_starts();
+        // Before the page is built, so it is born with the walk on it: the
+        // watch above has already said how far this break is asking you to go.
+        if let Some(w) = link.walk() {
+            ui.borrow_mut().steps_seen(w.walked, w.needed, w.marked);
+        }
         ui.borrow_mut().engage(total);
 
         let grace = nfc.grace.0;
@@ -553,7 +657,10 @@ fn preview(
         let waited = Cell::new(Duration::ZERO);
         let shown = Cell::new(Duration::ZERO);
         let asked = Cell::new(false);
-        let scanned = Cell::new(false);
+        // The tag half of the gate, and the whole of it: with steps counted
+        // too, the second is not the first.
+        let tag_in = Cell::new(false);
+        let opened = Cell::new(false);
         let late = Cell::new(false);
         let app = app.clone();
         glib::timeout_add_seconds_local(1, move || {
@@ -563,11 +670,22 @@ fn preview(
 
             // A scan lands between ticks, exactly as it does in the daemon.
             // Early ones bank: the countdown still runs out.
-            if link.take_scan() && !scanned.replace(true) {
+            if link.take_scan() && !tag_in.replace(true) {
                 println!("[scan]  the tag was scanned");
+                ui.borrow_mut().tag_seen();
+                player.scanned();
+            }
+            // And the walk, read the same way the daemon reads it.
+            let walk = link.walk();
+            if let Some(w) = walk {
+                ui.borrow_mut().steps_seen(w.walked, w.needed, w.marked);
+            }
+            if tag_in.get() && walk.is_none_or(|w| w.done()) && !opened.replace(true) {
+                if let Some(w) = walk {
+                    println!("[scan]  {} steps walked — that is the gate", w.walked);
+                }
                 late.set(asked.get());
                 ui.borrow_mut().release_seen();
-                player.scanned();
             }
 
             let remaining = left.get().saturating_sub(TICK);
@@ -578,7 +696,7 @@ fn preview(
                 false
             } else if !asking {
                 true
-            } else if scanned.get() {
+            } else if opened.get() {
                 // A scan that ended the wait gets a moment on screen before
                 // the page lifts — flashing straight past "scanned" reads as a
                 // glitch, not a walk that registered.
@@ -608,9 +726,11 @@ fn preview(
                     lost || gave_up
                 } else {
                     // Nothing is listening, so the scan is acted out instead.
-                    if waited.get() + THEN_LIFT_AFTER >= LOOK_AT_IT_FOR && !scanned.replace(true) {
+                    if waited.get() + THEN_LIFT_AFTER >= LOOK_AT_IT_FOR && !opened.replace(true) {
                         println!("[scan]  (preview) somebody pretends to scan the tag");
                         late.set(true);
+                        tag_in.set(true);
+                        ui.borrow_mut().tag_seen();
                         ui.borrow_mut().release_seen();
                         player.scanned();
                     }
@@ -633,8 +753,13 @@ fn preview(
             link.post(nfc::Desk {
                 breaking: true,
                 remaining,
-                waiting: asked.get() && !scanned.get(),
-                released: scanned.get(),
+                waiting: asked.get() && !opened.get(),
+                released: opened.get(),
+                tag_in: tag_in.get(),
+                steps_left: match opened.get() {
+                    true => 0,
+                    false => walk.map_or(0, |w| w.left()),
+                },
             });
             glib::ControlFlow::Continue
         });
@@ -697,16 +822,42 @@ struct Engine {
     _ear: Option<nfc::Ear>,
     /// The poll that asks Home Assistant about the tag, same lifetime.
     _watch: Option<nfc::Watch>,
+    /// The tag has been scanned for the break on screen.
+    ///
+    /// Held here rather than handed straight to the scheduler, because with
+    /// steps counted too a scan is only half of what ends a break. Not
+    /// persisted: a service restarted mid-break loses the step count as well --
+    /// the poll starts a fresh baseline -- and keeping half a gate across a
+    /// restart would let the other half be walked twice.
+    tag_in: bool,
+    /// When tea is awake at all, and why it is not.
+    ///
+    /// Two switches, one behaviour: `[hours]` is the standing one and
+    /// `tea off 1h` is the afternoon one. The reason is held as the sentence
+    /// that will be printed, so waking and sleeping are announced once rather
+    /// than every second of a Sunday.
+    hours: config::Hours,
+    asleep: Option<String>,
+    /// What today came to. Read back out of the state file at startup, so a
+    /// restart at four o'clock does not lose the morning.
+    tally: state::Tally,
 }
 
 impl Engine {
-    fn start(cfg: tea_core::Config, sound: sound::Config, nfc_cfg: nfc::Config) -> Self {
+    fn start(
+        cfg: tea_core::Config,
+        sound: sound::Config,
+        nfc_cfg: nfc::Config,
+        hours: config::Hours,
+    ) -> Self {
         let now = boottime();
         let store = state::Store::new();
         let restored = store.as_ref().and_then(|s| s.load(now));
 
+        let mut tally = state::Tally::default();
         let (sched, catchup) = match restored {
             Some(r) => {
+                tally = r.tally.clone();
                 println!(
                     "tea: resuming — {} banked, away {} ({})",
                     human(r.snapshot.worked),
@@ -736,13 +887,20 @@ impl Engine {
 
         // Asking is the tidier half of this: nothing has to be forwarded in, and
         // an unreachable hub is a thing tea finds out about by itself.
-        let watch = nfc_cfg.asks().then(|| nfc::watch(&nfc_cfg.home_assistant, Rc::clone(&link)))
+        let watch = nfc_cfg.asks().then(|| nfc::watch(&nfc_cfg, Rc::clone(&link)))
             .and_then(|r| match r {
                 Ok(watch) => {
                     println!(
                         "nfc: watching {} on {}",
                         nfc_cfg.home_assistant.entity, nfc_cfg.home_assistant.url
                     );
+                    if nfc_cfg.counts_steps() {
+                        println!(
+                            "nfc: and {} steps of {}, walked while the page is up",
+                            nfc_cfg.steps.count,
+                            nfc_cfg.steps.entity.trim()
+                        );
+                    }
                     Some(watch)
                 }
                 Err(e) => {
@@ -767,7 +925,39 @@ impl Engine {
             link,
             _ear: ear,
             _watch: watch,
+            tag_in: false,
+            hours,
+            asleep: None,
+            tally,
         }
+    }
+
+    /// Why tea should be doing nothing at all right now, said the way it will
+    /// be printed. `None` means get on with it.
+    ///
+    /// Both answers freeze everything rather than merely hiding the page: an
+    /// evening film is not a work session with the timer paused, and coming
+    /// back on Monday to a break that fell due on Saturday is exactly the
+    /// ambush the idle rules exist to prevent.
+    fn dormant(&self) -> Option<String> {
+        if let Some(left) = state::off::left() {
+            return Some(format!("off for another {}", human(left)));
+        }
+        if !self.hours.awake(clock::now()) {
+            return Some(format!("outside working hours — {}", self.hours.opens()));
+        }
+        None
+    }
+
+    /// One more break in the bag, and however far it was walked.
+    ///
+    /// The walk is read from the value the page was last shown rather than
+    /// asked for again: by the time a break ends the poll has already been
+    /// told to forget it, and a day's walking should not depend on which of
+    /// the two happened first.
+    fn count_break(&mut self, walk: Option<nfc::Walk>) {
+        self.tally.breaks += 1;
+        self.tally.steps += walk.map_or(0, |w| w.walked);
     }
 
     fn postpone_flag(&self) -> Rc<Cell<bool>> {
@@ -794,28 +984,138 @@ impl Engine {
     }
 
     fn step(&mut self, ui: &mut dyn Blocker) {
+        // Before anything else: whether tea is supposed to be awake. Off, or
+        // out of hours, means the clock does not run -- time spent here is
+        // neither work banked nor rest credited, it simply did not happen.
+        match self.dormant() {
+            Some(why) => {
+                if self.asleep.is_none() {
+                    println!("[off]   {why}");
+                    // An afternoon off that begins in the middle of a break
+                    // takes the page with it. "Leave me alone" starting with
+                    // five minutes of not being left alone is a joke.
+                    if self.sched.snapshot().breaking {
+                        self.sched.skip_break();
+                        ui.release();
+                    }
+                    ui.clear_warning();
+                }
+                self.asleep = Some(why);
+                // The downtime is dropped rather than banked: coming back from
+                // an hour off to a break that fell due during it would be the
+                // whole feature undone on the second tick.
+                self.catchup = None;
+                let now = boottime();
+                self.last = now;
+                // No break on screen and no scan outstanding, said out loud:
+                // the Home Assistant poll runs only while a page is up, and a
+                // desk left saying "breaking" would have it asking the hub
+                // about a tag once a second for the whole of a Sunday.
+                self.tag_in = false;
+                self.link.post(nfc::Desk::default());
+                // Still written, though nothing moved. The state file is how
+                // `tea status` knows the service is alive at all, and a tea
+                // that is deliberately quiet must not read as a tea that has
+                // fallen over.
+                if let Some(store) = &mut self.store {
+                    store.save(self.sched.snapshot(), &self.tally, now, false);
+                }
+                return;
+            }
+            None => {
+                if self.asleep.take().is_some() {
+                    println!("[on]    back on — the clock is running again");
+                    self.catchup = None;
+                    self.last = boottime();
+                }
+            }
+        }
+
+        // Yesterday's four breaks are not today's.
+        self.tally.roll(&clock::today());
+
         // The server never touches the scheduler; this is where a scan that
         // arrived between ticks actually lands.
         let mut celebrated = false;
-        if self.link.take_scan() {
-            match self.sched.released() {
+        // Whether the scan landed on this very tick. With steps counted too the
+        // scan and the gate opening are separate moments, sometimes minutes
+        // apart, and each wants its own sound; without them they are the same
+        // moment, which must not be chimed at twice.
+        let mut scanned_now = false;
+        let desk = self.sched.snapshot();
+        let walk = self.link.walk();
+        if self.link.take_scan() && !self.tag_in {
+            if desk.breaking {
+                // Banked only against a break that already exists. A tag
+                // touched on the way past while still working must not sit here
+                // waiting to half-open the break that starts on this very tick.
+                self.tag_in = true;
+                // The scan is acknowledged the moment it lands, whether or not
+                // it is the thing that ends the break: a walk to the tag that
+                // changes nothing on screen is a walk somebody makes twice.
+                ui.tag_seen();
+                self.sound.scanned();
+                scanned_now = true;
+                match walk {
+                    Some(w) if !w.done() => {
+                        println!("[nfc]   tag scanned — {} more steps to walk", w.left());
+                    }
+                    _ => println!("[nfc]   tag scanned"),
+                }
+            } else {
+                println!("[nfc]   tag scanned — no break to end");
+            }
+        }
+
+        // Painted before the gate is tested, not after: the step that opens it
+        // is the one worth seeing land, and a page told about it only on the
+        // next tick would celebrate while the badge still said nineteen. And
+        // between breaks as well as during them, because this is also how the
+        // page learns there is a walk in this break at all -- a page built by
+        // the tick below has to be born with the badge on it.
+        if let Some(w) = self.link.walk() {
+            ui.steps_seen(w.walked, w.needed, w.marked);
+        }
+
+        // Both halves, or neither. The tag says you got up; the steps say you
+        // went somewhere -- and a tag within reach of the chair is exactly the
+        // hole this closes.
+        let walked = walk.is_none_or(|w| w.done());
+        if self.tag_in && walked && !desk.released {
+            let opened = self.sched.released();
+            let landed = matches!(opened, ReleaseResult::Freed | ReleaseResult::Banked { .. });
+            // The gate opening is the moment worth hearing, and with steps
+            // counted it is not the moment the tag was scanned -- that may have
+            // been minutes ago, and had its own chime then. Only when the two
+            // fall on the same tick has this already been played.
+            if landed && !scanned_now {
+                self.sound.scanned();
+            }
+            match opened {
                 ReleaseResult::Freed => {
-                    println!("[nfc]   tag scanned — the desk is yours");
+                    println!("[nfc]   the walk is in — the desk is yours");
                     // Told now, not via the next snapshot: the break resets on
                     // this very tick, and a page torn down without ever
                     // acknowledging the walk reads as a scan that was
                     // swallowed. This is also what starts the celebration.
                     ui.release_seen();
-                    self.sound.scanned();
                     celebrated = true;
                 }
                 ReleaseResult::Banked { remaining } => {
-                    println!("[nfc]   tag scanned — {} of the break still to run", human(remaining));
+                    println!(
+                        "[nfc]   the walk is in — {} of the break still to run",
+                        human(remaining)
+                    );
                     ui.release_seen();
-                    self.sound.scanned();
                 }
-                ReleaseResult::NotBreaking => println!("[nfc]   tag scanned — no break to end"),
-                ReleaseResult::NotRequired => println!("[nfc]   tag scanned — nothing was waiting"),
+                ReleaseResult::NotBreaking => {}
+                ReleaseResult::NotRequired => {
+                    // Nothing can reach this while the ear and the watch both
+                    // need the gate switched on -- but a scan that changes
+                    // nothing must not say so once a second if one ever does.
+                    self.tag_in = false;
+                    println!("[nfc]   tag scanned — nothing was waiting");
+                }
             }
         }
 
@@ -823,6 +1123,7 @@ impl Engine {
             match self.sched.postpone() {
                 PostponeResult::Granted { remaining_budget } => {
                     println!("[snooze] postponed, {remaining_budget} left this window");
+                    self.tally.postponed += 1;
                     ui.clear_warning();
                 }
                 other => println!("[snooze] refused: {other:?}"),
@@ -866,11 +1167,17 @@ impl Engine {
                     }
                 }
                 tea_core::Command::ShowOverlay { .. } => self.sound.break_starts(),
+                // Counted where it ends rather than where it starts: a break
+                // that was interrupted by a shutdown was not a break you took.
+                tea_core::Command::CreditedIdle { .. } => self.tally.credited += 1,
                 // The scan that just freed this break has its own sound; the
                 // ordinary end-of-break one stacked on top would turn the
                 // celebration into a clatter.
-                tea_core::Command::HideOverlay if !celebrated => self.sound.break_ends(),
-                tea_core::Command::HideOverlay => {}
+                tea_core::Command::HideOverlay if !celebrated => {
+                    self.count_break(walk);
+                    self.sound.break_ends();
+                }
+                tea_core::Command::HideOverlay => self.count_break(walk),
                 _ => {}
             }
         }
@@ -880,6 +1187,12 @@ impl Engine {
         // walk was already made. The blocker does the work once.
         if after.breaking && after.released {
             ui.release_seen();
+        }
+
+        // A break that has ended takes its half-open gate with it, or the next
+        // one would start already scanned for.
+        if !after.breaking {
+            self.tag_in = false;
         }
 
         if after.breaking && !after.released {
@@ -904,6 +1217,11 @@ impl Engine {
             remaining: self.sched.config().brk.saturating_sub(after.rested),
             waiting: self.sched.awaiting_release(),
             released: after.released,
+            tag_in: self.tag_in,
+            steps_left: match after.breaking && !after.released {
+                true => self.link.walk().map_or(0, |w| w.left()),
+                false => 0,
+            },
         });
 
         if let Some(store) = &mut self.store {
@@ -912,7 +1230,7 @@ impl Engine {
             let notable = before.breaking != after.breaking
                 || before.postpones_used != after.postpones_used
                 || after.worked < before.worked;
-            store.save(after, now, notable);
+            store.save(after, &self.tally, now, notable);
         }
     }
 }
@@ -922,10 +1240,22 @@ impl Engine {
 fn run_probe(nfc_cfg: &nfc::Config) {
     if nfc_cfg.asks() {
         let ha = &nfc_cfg.home_assistant;
-        print!("tea: asking {} about {} ... ", ha.url, ha.entity);
-        match nfc::probe(ha) {
-            Ok(state) => println!("{state:?}"),
-            Err(e) => println!("\ntea: {e}"),
+        // Which slot the name came from, not what it says: a steps sensor that
+        // happens to be spelled the same as the tag must not decide whether the
+        // tag gets probed at all.
+        let asked = [(ha.entity.trim(), true), (nfc_cfg.steps.entity.trim(), nfc_cfg.counts_steps())];
+        for (entity, wanted) in asked {
+            // The steps sensor is the one that is easiest to get wrong and the
+            // hardest to notice: a mistyped tag is a break that will not lift,
+            // a mistyped sensor is the same thing with no obvious culprit.
+            if !wanted || entity.is_empty() {
+                continue;
+            }
+            print!("tea: asking {} about {} ... ", ha.url, entity);
+            match nfc::probe(ha, entity) {
+                Ok(state) => println!("{state:?}"),
+                Err(e) => println!("\ntea: {e}"),
+            }
         }
         println!();
     }
@@ -999,6 +1329,8 @@ fn usage() {
         ("status", "what the background service is doing"),
         ("config", "show every setting"),
         ("reload", "pick up changed settings"),
+        ("off [dur]", "no breaks for a while (an hour by default)"),
+        ("on", "start again, now"),
         ("set-work <dur>", "change the work interval"),
         ("set-break <dur>", "change the break length"),
         ("set-warn <dur>", "change the warning time"),

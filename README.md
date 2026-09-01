@@ -1,6 +1,6 @@
 # tea
 
-![The break page: a countdown ring that drains as the break runs](assets/break-page.png)
+![The break page: a countdown ring that drains as the break runs, with the tag and the walk still owed at the foot of it](assets/break-page.png)
 
 You mean to take breaks. You don't.
 
@@ -16,6 +16,9 @@ It tries not to be daft about it:
   than dropping a black screen over your face.
 - If you genuinely can't stop right now, there's a button for that. Twice an
   hour, so it stays a reprieve and not a habit.
+- If you genuinely can't stop *this afternoon*, `tea off 2h` is the honest
+  version of that, and `[hours]` is the standing one: outside your working
+  hours nothing is counted and nothing appears.
 
 By default it can't physically hold you there — you can still switch away if
 you're determined. The aim is for stopping to be easier than dodging. If that
@@ -49,6 +52,15 @@ matching flag that overrides the file (`tea --help`).
     budget = 2
     window = "1h"
 
+    [hours]
+    from = "off"
+    to = "off"
+    days = "all"
+
+    [long]
+    every = 0
+    length = "15m"
+
     [hold]
     mode = "soft"
     recheck = "400ms"
@@ -71,6 +83,52 @@ matching flag that overrides the file (`tea --help`).
 Durations are `"90s"`, `"25m"`, `"1h"`; a bare number means minutes. Unknown
 keys are a hard error — a silently ignored typo in a config you edit twice a
 year is worse than a crash on startup.
+
+## When tea is awake
+
+Everything else here is about how long you have been working. This is the one
+setting that cares what time it is.
+
+    [hours]
+    from = "09:00"
+    to = "18:00"
+    days = "mon-fri"
+
+Outside those, tea is asleep: no warning, no page, and the clock stops. Not
+paused — *stopped*. An evening film is not a work session with the timer held,
+and coming back on Monday to a break that fell due on Saturday afternoon is
+exactly the ambush the idle rules exist to prevent.
+
+Either end can be `"off"` for no limit there; setting only `from` means "not
+before nine" and runs to midnight. A window that reads backwards wraps it —
+`from = "22:00"`, `to = "06:00"` is one night shift, not an empty set. Days
+take names, lists or ranges, and ranges may wrap: `"fri-mon"` is a long
+weekend.
+
+The same idea for one afternoon:
+
+    tea off 2h      # nothing until then. Bare `tea off` is an hour.
+    tea on          # back, now
+
+No restart and no reload: the running service reads the switch on its next
+tick, and a break already on screen comes down with it — "leave me alone"
+that starts with five minutes of not leaving you alone is a joke. Time spent
+off is neither work banked nor rest credited. It simply did not happen.
+
+## A longer one, every so often
+
+    [long]
+    every = 4
+    length = "15m"
+
+Four five-minute breaks in a row are four chances to stand up and no chance to
+go anywhere. Every fourth one runs for fifteen instead: the walk, the coffee,
+the thing that does not fit in three hundred seconds. `every = 0` turns it off,
+and a `length` shorter than `break` is read as the typo it is and ignored.
+
+Counted in breaks rather than in hours, so a morning spent in meetings does not
+quietly spend your long one. The break on screen carries its own length in the
+state file, so a restart mid-way through a long break resumes a long break.
 
 ## Holding the screen
 
@@ -125,7 +183,9 @@ typing.
 `nfc.mode = "on"` makes the page wait for evidence instead. Put an NFC tag
 somewhere you have to stand up and walk to — the kitchen, the hall, the other
 end of the flat. The page now lifts when two things are true: the time has run
-out, **and** the tag has been scanned. `tea set-nfc on` switches that on.
+out, **and** the tag has been scanned. `tea set-nfc on` switches that on. If
+your hub knows your step count, [a third](#and-twenty-steps) can be added: that
+the walk actually happened.
 
 How the scan gets from the tag to here is a separate question, with two answers:
 tea can **ask** something that already knows, or it can **listen** for something
@@ -215,6 +275,79 @@ quietly pay for the four o'clock break. And a hub that restarts hands out
 `unknown` again — a change, and emphatically not somebody walking to the hall —
 so those states are never read as one.
 
+### And twenty steps
+
+A tag proves you stood up. It does not prove you went anywhere, and a tag stuck
+within arm's reach of the chair proves nothing at all — the walk is the part
+that matters, and the tag is only the thing that can witness it. If your hub
+already knows your step count, it can witness the walk too:
+
+    [nfc.steps]
+    mode = "on"
+    count = 20
+    entity = "sensor.pixel_daily_steps"
+
+Now the page lifts when *three* things are true: the time has run out, the tag
+has been scanned, and twenty steps have been walked since the page appeared.
+Neither half of the gate ends a break on its own.
+
+Counted from where you were standing when the break started, so a running daily
+total is exactly the right kind of sensor — the value at the first poll is the
+yardstick, and only what accumulates on top of it counts.
+
+The *first* rise is not credited either, and that is deliberate. A phone reports
+steps when it syncs, not when they were walked, so the reading a break starts
+from is whatever was last uploaded — minutes or hours old — and the next sync
+arrives carrying everything walked since then, most of it from before the page
+went up. Counting that would open the gate from the chair, which is the hole the
+steps exist to close. So the first sync of a break moves the mark instead, the
+walk is counted from there, and the badge says *Counting from here* rather
+than *0 of 20 steps* — a page reporting nothing to somebody who has just
+crossed the flat is a page that sends them across it again. The cost is whatever you
+walked between the break starting and that sync; if your phone syncs rarely
+enough that no second one arrives, `grace` ends the break on the clock. A total
+that goes
+*down* — midnight, a phone that re-pairs, a duplicate source dropped — is never
+credited as steps: the new reading simply becomes the mark to measure from, and
+the walk so far stands. Telling a rollover from a correction on one reading is
+guesswork, and guessing generously would hand out a day's steps at once, so
+neither is credited; at a real rollover that costs whatever was walked between
+two polls, which is a couple of seconds of it. The same sensor is read on the same
+beat as the tag, from the same hub, so this costs one more request every couple
+of seconds while a page is up and nothing at all the rest of the time.
+
+The page grows a second badge under the tag's: a small figure mid-stride, and
+*12 of 20 steps* beside it, which becomes a green tick and *20 steps walked*
+when the walk is in. Under the badges is a row of squares, one lighting per
+step — the same count again, in the one form that can be read from the doorway
+without your glasses on. Fifty to a row, so a `count` of a hundred is two rows
+and a hundred and twenty is two rows and twenty, and a filled row is worth
+exactly fifty steps wherever you are standing. Once the tag is scanned and only the steps are
+left, the big text stops asking for the tag and starts counting down what is
+actually outstanding — *8 more steps* — because a page still saying "scan the
+tag" to somebody who has just scanned it is a page that sends them back down
+the hall for nothing.
+
+**This half degrades like everything else.** A step sensor that cannot be read
+at all — renamed, deleted, a hub that has gone away — is a gate with a half
+that can never close, so the break ends on its countdown. (The page says the
+source is gone only while the tag is still outstanding: once a scan is in, the
+badge that would carry the bad news is already green and stays that way, so the
+first you hear of it is the page lifting early. Worth knowing, and the reason
+`tea --probe` is the thing to run after renaming a sensor.) A sensor that simply
+has nothing new to say is different and
+treated differently: phones report steps in batches, and a count that has not
+arrived yet must not undo steps already counted. If it never arrives, `grace`
+does what it always does and hands the desk back. Worth knowing which one you
+have before you rely on this: `tea --probe` prints the step sensor's current
+value along with the tag's, and a value with a timestamp hours old is a phone
+that syncs when it feels like it, not a gate you want in front of your screen.
+
+Both halves are lost if the service restarts mid-break — the scan and the step
+baseline together — because half a gate carried across a restart would let the
+other half be walked twice. That is a deliberate difference from a plain tag
+break, where the scan does survive.
+
 ### The ear
 
 If nothing on your network already knows about the tag, tea can listen instead,
@@ -276,6 +409,8 @@ nothing else. A header is a claim, never an authorisation.
                 15m of 25m — next break in 10m
 
       postpone  1 of 2 left — resets in 40m
+      today     3 breaks · 1 away from the desk · 187 steps walked
+      long      15m — after 2 more ordinary breaks
       now       idle 4s · nothing is holding a break
       service   running · saved 2s ago
       config    ~/.config/tea/config.toml
@@ -283,6 +418,13 @@ nothing else. A header is a claim, never an authorisation.
 Read from the state file the service already writes, so it is accurate to
 within one save interval. It shows the config file's values — if you edit the
 config while the service is running, restart it before trusting the numbers.
+
+The `today` row is the only line here that says whether any of this is
+working; everything above it is about the next five minutes. It counts breaks
+that ran, absences credited as breaks, postpones spent and steps walked, and
+it starts again at local midnight. While tea is off or out of hours the gauges
+are replaced by the reason, because a work bar that has not moved since Friday
+is worse than no bar at all.
 
 ## Layout
 
@@ -326,6 +468,11 @@ five minutes for anything. Everything platform-shaped stays outside it.
   once.
 - **Postpone is budgeted** — 2 per hour, only once a break is imminent.
   Unlimited snooze is the same as no tool.
+- **One bad answer is not an outage** — the hub is asked for the tag once every
+  couple of seconds, so a dropped packet or a Home Assistant mid-reload is
+  routine. It takes three unanswered polls in a row to call the source gone and
+  end the break on its countdown. Acting on the first would have the gate that
+  exists to make you walk quietly opening itself, a few times a week.
 - **A scan is proof of going, not a way out** — with the tag on, an early scan
   never shortens a break and a late one never lengthens it. All it decides is
   whether the page lifts when the countdown does.
@@ -337,6 +484,7 @@ five minutes for anything. Everything platform-shaped stays outside it.
 - [x] **P2a** real idle via `org.gnome.Mutter.IdleMonitor` + inhibitor detection
 - [x] **P2b** break debt persisted to `$XDG_STATE_HOME`
 - [x] **P2c** the tag on the wall — a break the countdown alone cannot end
+- [x] **P2d** and the walk to it, counted in steps
 - [ ] **P3** *only if you keep dodging it* — GNOME Shell extension for a real
       input grab
 

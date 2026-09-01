@@ -5,7 +5,8 @@
 //! the live bits. Accurate to within one save interval, which is close enough
 //! to read off a terminal.
 
-use crate::config::human;
+use crate::clock;
+use crate::config::{Hours, human};
 use crate::session::Session;
 use crate::state;
 use tea_core::Config;
@@ -18,7 +19,7 @@ const FRESH: Duration = Duration::from_secs(15);
 pub const WIDTH: usize = 68;
 const BAR: usize = 24;
 
-pub fn show(cfg: Config, config_path: &std::path::Path, boottime: Duration) {
+pub fn show(cfg: Config, hours: &Hours, config_path: &std::path::Path, boottime: Duration) {
     let s = Style::new();
     let store = state::Store::new();
     let saved = store.as_ref().and_then(|st| st.load(boottime));
@@ -33,6 +34,19 @@ pub fn show(cfg: Config, config_path: &std::path::Path, boottime: Duration) {
 
     let running = saved.gap <= FRESH;
     let snap = saved.snapshot;
+    // The break on screen is not always `cfg.brk`: every so often it is the
+    // long one, and a gauge that measured it against the short one would show
+    // a break three hundred percent through.
+    let brk = match snap.breaking && !snap.break_len.is_zero() {
+        true => snap.break_len,
+        false => cfg.brk,
+    };
+    // Switched off by hand, or out of hours: either way nothing is counting,
+    // and a work gauge creeping along beside it would be a lie.
+    let off = state::off::left();
+    let asleep = !hours.awake(clock::now());
+    let mut today = saved.tally.clone();
+    today.roll(&clock::today());
 
     // Project forward over the seconds since the last save. Within one save
     // interval this is exact enough; when nothing is running it would be a lie,
@@ -45,6 +59,10 @@ pub fn show(cfg: Config, config_path: &std::path::Path, boottime: Duration) {
     // ---- headline ----------------------------------------------------------
     let state = if !running {
         "tea — not running".to_string()
+    } else if let Some(left) = off {
+        s.yellow(&format!("tea — off for another {}", human(left)))
+    } else if asleep {
+        s.yellow(&format!("tea — asleep, {}", hours.opens()))
     } else if snap.breaking && cfg.require_release && !snap.released
         && (snap.rested + elapsed) >= cfg.brk
     {
@@ -60,17 +78,29 @@ pub fn show(cfg: Config, config_path: &std::path::Path, boottime: Duration) {
     println!();
 
     // ---- the main gauge ----------------------------------------------------
-    if snap.breaking {
-        let rested = (snap.rested + elapsed).min(cfg.brk);
-        let left = cfg.brk.saturating_sub(rested);
-        println!("  {}  {}", s.dim("rest    "), bar(rested, cfg.brk, &s));
+    if off.is_some() || asleep {
+        // Neither gauge means anything while the clock is stopped, and a work
+        // bar that has not moved since Friday is worse than no bar at all.
+        let why = match off {
+            Some(_) => "switched off by hand — `tea on` starts it again".to_string(),
+            None => format!("outside {} — nothing is being counted", hours.describe()),
+        };
+        println!("  {}  {}", s.dim("paused  "), s.dim(&why));
+    } else if snap.breaking {
+        let rested = (snap.rested + elapsed).min(brk);
+        let left = brk.saturating_sub(rested);
+        println!("  {}  {}", s.dim("rest    "), bar(rested, brk, &s));
         // Time served and still up means it is waiting on the tag, and "back to
         // work in 0s" beside a page that is plainly still there reads as a bug.
         let waiting = cfg.require_release && left.is_zero() && !snap.released;
         println!(
-            "            {} of {} — {}",
+            "            {} of {}{} — {}",
             human(rested),
-            human(cfg.brk),
+            human(brk),
+            match brk != cfg.brk {
+                true => " (the long one)",
+                false => "",
+            },
             if waiting {
                 s.bold("waiting for the tag")
             } else {
@@ -106,6 +136,33 @@ pub fn show(cfg: Config, config_path: &std::path::Path, boottime: Duration) {
     };
     row(&s, "postpone", &postpone);
 
+    // The day, which is the only row here that says whether any of this is
+    // working. Everything else is about the next five minutes.
+    let day = match today.quiet() {
+        true => "nothing yet today".to_string(),
+        false => {
+            let mut parts = vec![match today.breaks {
+                1 => "1 break".to_string(),
+                n => format!("{n} breaks"),
+            }];
+            if today.credited > 0 {
+                parts.push(format!("{} away from the desk", today.credited));
+            }
+            if today.postponed > 0 {
+                parts.push(format!("{} postponed", today.postponed));
+            }
+            if today.steps > 0 {
+                parts.push(format!("{} steps walked", today.steps));
+            }
+            parts.join(" · ")
+        }
+    };
+    row(&s, "today", &day);
+
+    if let Some(until) = long_break(&cfg, snap.breaks_done) {
+        row(&s, "long", &until);
+    }
+
     let idle = match session.idle() {
         Some(d) => format!("idle {}", human(d)),
         None => "idle unknown".to_string(),
@@ -126,6 +183,21 @@ pub fn show(cfg: Config, config_path: &std::path::Path, boottime: Duration) {
         },
     );
     println!();
+}
+
+/// When the long break falls due, if there is one. Worked out here rather than
+/// asked of the scheduler because `tea status` has a state file and no
+/// scheduler -- there is no daemon in this process to ask.
+fn long_break(cfg: &Config, breaks_done: u32) -> Option<String> {
+    if cfg.long_every == 0 || cfg.long_brk.is_zero() {
+        return None;
+    }
+    let until = (cfg.long_every - 1) - (breaks_done % cfg.long_every);
+    Some(match until {
+        0 => format!("{} — the next break is the long one", human(cfg.long_brk)),
+        1 => format!("{} — after one more ordinary break", human(cfg.long_brk)),
+        n => format!("{} — after {n} more ordinary breaks", human(cfg.long_brk)),
+    })
 }
 
 /// A bold title with something dim pushed out to the right margin.

@@ -1,5 +1,6 @@
 //! Config file loading. Defaults < config.toml < command-line flags.
 
+use crate::clock::{self, Clock, Days, Now};
 use serde::{Deserialize, de};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -25,6 +26,31 @@ pause = "1m"
 duration = "1m"       # how much time one postpone buys
 budget = 2            # postpones allowed per window (0 disables postponing)
 window = "1h"
+
+# When tea is awake at all. Outside these hours nothing is counted and nothing
+# appears: an evening film is not a work session with the timer paused, it is
+# not a work session. `tea off 1h` is the same idea for one afternoon.
+#
+#   from/to  local times, "09:00". "off" for no limit at either end. Setting
+#            only one means the other end of the day. A window that runs
+#            backwards -- from "22:00" to "06:00" -- wraps midnight, for
+#            anybody who works those hours.
+#   days     "all", "mon-fri", "mon,wed,fri", or any mixture. Ranges may wrap:
+#            "fri-mon" is a long weekend.
+[hours]
+from = "off"
+to = "off"
+days = "all"
+
+# Every so often, a longer break. Four five-minute breaks in a row are four
+# chances to stand up and no chance to go anywhere; the long one is the walk,
+# the coffee, the thing that does not fit in three hundred seconds.
+#
+#   every   every this-many-th break is the long one. 0 for none.
+#   length  how long that one runs. Must be longer than `break`.
+[long]
+every = 0
+length = "15m"
 
 [hold]
 # What the break page does when you switch away from it.
@@ -82,6 +108,26 @@ url = ""              # e.g. "http://homeassistant.local:8123"
 token = ""            # a long-lived access token, from your profile page
 entity = ""           # e.g. "tag.living_room"
 poll = "2s"           # how often to ask, while a break is up
+
+# The other half of the gate. A tag proves you stood up; it does not prove you
+# went anywhere, and a tag within reach of the chair proves nothing at all. With
+# this on the page waits for both -- the scan *and* the steps -- and neither one
+# alone ends the break. Steps are counted from where you were when the page went
+# up, so a phone's daily total is a perfectly good sensor to point at.
+#
+# Read from the same hub as the tag above, on the same beat, and only while a
+# break is on screen. A step count that never arrives -- a phone that syncs late,
+# a sensor that is renamed -- ends the break on `grace` like anything else here:
+# nothing in this file is allowed to lock a screen.
+#
+#   mode    "off" (default) or "on". "enabled"/"active" also read as on.
+#   count   steps this break wants. 20 is out of the room and back.
+#   entity  the sensor holding the count. Any entity whose state is a rising
+#           number will do -- a phone, a watch, a Health Connect feed.
+[nfc.steps]
+mode = "off"
+count = 20
+entity = ""           # e.g. "sensor.pixel_daily_steps"
 "#;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -94,6 +140,8 @@ pub struct FileConfig {
     pub idle: Idle,
     pub postpone: Postpone,
     pub calls: Calls,
+    pub hours: Hours,
+    pub long: Long,
     pub sound: crate::sound::Config,
     pub animation: crate::overlay::Anim,
     pub hold: crate::overlay::Hold,
@@ -111,6 +159,81 @@ pub struct Idle {
 #[serde(deny_unknown_fields, default)]
 pub struct Calls {
     pub warn_after: Dur,
+}
+
+/// When tea is awake at all.
+///
+/// Everything else here is about how long you have been working; this is the
+/// one setting that cares what time it is. Outside these hours nothing is
+/// counted and nothing appears -- an evening film is not a work session with
+/// the timer paused, it is not a work session.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Hours {
+    pub from: Clock,
+    pub to: Clock,
+    pub days: Days,
+}
+
+/// Every so often, a longer break.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Long {
+    /// Every this-many-th break is the long one. Zero for none.
+    pub every: u32,
+    pub length: Dur,
+}
+
+impl Hours {
+    /// Whether tea should be doing anything at all at this moment.
+    pub fn awake(&self, now: Now) -> bool {
+        if !self.days.includes(now.weekday) {
+            return false;
+        }
+        match (self.from.minute(), self.to.minute()) {
+            (None, None) => true,
+            // One end set and not the other means the other end of the day:
+            // `from = "09:00"` on its own is "from nine until midnight", which
+            // is what anybody writing only that line means.
+            (from, to) => {
+                let (from, to) = (from.unwrap_or(0), to.unwrap_or(24 * 60));
+                match from < to {
+                    true => (from..to).contains(&now.minute),
+                    // Wrapped past midnight: 22:00 to 06:00 is one window, not
+                    // an empty one, and somebody works those hours.
+                    false => now.minute >= from || now.minute < to,
+                }
+            }
+        }
+    }
+
+    /// Whether any of this is switched on.
+    pub fn set(&self) -> bool {
+        !self.days.every_day() || self.from.minute().is_some() || self.to.minute().is_some()
+    }
+
+    /// When tea wakes up again, as a phrase that follows whatever said it is
+    /// asleep -- "asleep, back at 09:00", "outside hours — back on mon–fri".
+    pub fn opens(&self) -> String {
+        match (self.from.minute(), self.days.every_day()) {
+            (Some(from), true) => format!("back at {}", clock::oclock(from)),
+            (Some(from), false) => format!("back at {} on {}", clock::oclock(from), self.days),
+            (None, _) => format!("back on {}", self.days),
+        }
+    }
+
+    /// How it reads in `tea config`.
+    pub fn describe(&self) -> String {
+        match (self.from.minute(), self.to.minute()) {
+            (None, None) => self.days.to_string(),
+            (from, to) => format!(
+                "{}–{}, {}",
+                clock::oclock(from.unwrap_or(0)),
+                clock::oclock(to.unwrap_or(24 * 60)),
+                self.days
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -135,6 +258,8 @@ impl Default for FileConfig {
                 window: Dur(d.postpone_window),
             },
             calls: Calls { warn_after: Dur(d.defer_warn_after) },
+            hours: Hours { from: Clock(None), to: Clock(None), days: Days::all() },
+            long: Long { every: d.long_every, length: Dur(d.long_brk) },
             sound: crate::sound::Config::default(),
             animation: crate::overlay::Anim::default(),
             hold: crate::overlay::Hold::default(),
@@ -161,6 +286,18 @@ impl Default for Calls {
     }
 }
 
+impl Default for Hours {
+    fn default() -> Self {
+        FileConfig::default().hours
+    }
+}
+
+impl Default for Long {
+    fn default() -> Self {
+        FileConfig::default().long
+    }
+}
+
 impl From<FileConfig> for tea_core::Config {
     fn from(f: FileConfig) -> Self {
         Self {
@@ -178,6 +315,8 @@ impl From<FileConfig> for tea_core::Config {
             // you configure a break nothing on earth could end.
             require_release: f.nfc.on(),
             release_grace: f.nfc.grace.0,
+            long_every: f.long.every,
+            long_brk: f.long.length.0,
         }
     }
 }
@@ -234,6 +373,17 @@ pub fn reconcile(c: &mut tea_core::Config) -> Result<Vec<String>, String> {
     clamp("warn_before", &mut c.warn_before, c.work);
     if c.postpone_budget > 0 {
         clamp("postpone.duration", &mut c.postpone, c.work);
+    }
+
+    // A long break of nothing is not a long break, and one shorter than the
+    // ordinary break is a punishment for good behaviour. Either is a typo.
+    if c.long_every > 0 && c.long_brk < c.brk {
+        notes.push(format!(
+            "long.length {} is shorter than break {} — ignoring it",
+            human(c.long_brk),
+            human(c.brk)
+        ));
+        c.long_every = 0;
     }
 
     if c.idle_pause > c.idle_credit {
@@ -336,6 +486,85 @@ pub fn human(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn at(hour: u32, weekday: u32) -> Now {
+        Now { minute: hour * 60, weekday }
+    }
+
+    fn hours(from: &str, to: &str, days: &str) -> Hours {
+        Hours {
+            from: Clock::parse(from).unwrap(),
+            to: Clock::parse(to).unwrap(),
+            days: Days::parse(days).unwrap(),
+        }
+    }
+
+    #[test]
+    fn working_hours_are_off_until_they_are_set() {
+        let always = Hours::default();
+        assert!(!always.set());
+        for hour in [0, 3, 9, 17, 23] {
+            for day in 0..7 {
+                assert!(always.awake(at(hour, day)), "{hour}:00 on day {day}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_working_day_has_two_ends_and_a_weekend() {
+        let nine_to_six = hours("09:00", "18:00", "mon-fri");
+        assert!(nine_to_six.set());
+        assert!(nine_to_six.awake(at(9, 0)), "nine is inside");
+        assert!(nine_to_six.awake(at(17, 4)));
+        assert!(!nine_to_six.awake(at(8, 0)), "before it starts");
+        assert!(!nine_to_six.awake(at(18, 0)), "six is the end, not the last hour");
+        assert!(!nine_to_six.awake(at(20, 2)), "an evening film is not a work session");
+        assert!(!nine_to_six.awake(at(11, 5)), "Saturday");
+        assert!(!nine_to_six.awake(at(11, 6)), "Sunday");
+    }
+
+    #[test]
+    fn a_window_that_runs_backwards_wraps_midnight() {
+        // Somebody works these hours, and reading it as an empty window would
+        // switch tea off for them entirely.
+        let night = hours("22:00", "06:00", "all");
+        assert!(night.awake(at(23, 0)));
+        assert!(night.awake(at(2, 0)));
+        assert!(!night.awake(at(12, 0)));
+        assert!(!night.awake(at(6, 0)), "six is the end");
+    }
+
+    #[test]
+    fn one_end_of_the_day_means_the_other_end_is_the_day() {
+        // `from = "09:00"` on its own is what somebody writes for "not before
+        // nine", and reading the missing end as midnight-to-midnight would
+        // make the line do nothing at all.
+        let after_nine = hours("09:00", "off", "all");
+        assert!(!after_nine.awake(at(8, 0)));
+        assert!(after_nine.awake(at(9, 0)) && after_nine.awake(at(23, 0)));
+
+        let before_six = hours("off", "18:00", "all");
+        assert!(before_six.awake(at(0, 0)) && before_six.awake(at(17, 0)));
+        assert!(!before_six.awake(at(18, 0)));
+
+        // Days on their own, with no hours at all, still count as set.
+        let weekdays = hours("off", "off", "mon-fri");
+        assert!(weekdays.set());
+        assert!(weekdays.awake(at(3, 0)) && !weekdays.awake(at(11, 6)));
+    }
+
+    #[test]
+    fn a_long_break_shorter_than_the_short_one_is_a_typo() {
+        let mut cfg = tea_core::Config {
+            brk: Duration::from_secs(300),
+            long_every: 4,
+            long_brk: Duration::from_secs(60),
+            ..tea_core::Config::default()
+        };
+        let notes = reconcile(&mut cfg).unwrap();
+        assert_eq!(cfg.long_every, 0, "a shorter long break is switched off, not honoured");
+        assert!(notes.iter().any(|n| n.contains("long.length")), "and said out loud: {notes:?}");
+    }
 
     #[test]
     fn shipped_default_file_parses_to_the_code_defaults() {

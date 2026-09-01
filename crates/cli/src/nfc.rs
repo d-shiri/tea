@@ -62,6 +62,8 @@ pub struct Config {
     pub prompt: String,
     /// Ask Home Assistant about the tag instead of waiting to be told.
     pub home_assistant: HomeAssistant,
+    /// The other half of the gate: steps walked while the page is up.
+    pub steps: Steps,
     /// Where the tag's URL actually points, when tea is not reached directly.
     ///
     /// Nothing has to listen on your network for a tag to work: a reverse proxy
@@ -81,6 +83,7 @@ impl Default for Config {
             prompt: "Scan the tag to get your desk back".into(),
             url: String::new(),
             home_assistant: HomeAssistant::default(),
+            steps: Steps::default(),
         }
     }
 }
@@ -114,6 +117,100 @@ impl Config {
     /// Whether something else is the front door.
     pub fn fronted(&self) -> bool {
         !self.url.trim().is_empty()
+    }
+
+    /// Whether this break also has to be walked off.
+    ///
+    /// Steps are read from the same hub as the tag and nowhere else, so asking
+    /// is a precondition: with no hub there is no step count, and a gate whose
+    /// second half can never be satisfied is a locked screen.
+    pub fn counts_steps(&self) -> bool {
+        self.on() && self.asks() && self.steps.on()
+    }
+
+    /// Set and switched on, but with nothing to read it from. Worth saying out
+    /// loud at startup: the alternative is a setting that looks on in the file
+    /// and silently is not.
+    pub fn steps_misconfigured(&self) -> Option<String> {
+        if self.steps.mode != Mode::On || !self.on() {
+            return None;
+        }
+        if !self.asks() {
+            return Some(
+                "nfc.steps is on, but no hub is being watched — steps come from Home \
+                 Assistant, so nfc.home_assistant needs a url and an entity"
+                    .into(),
+            );
+        }
+        if self.steps.entity.trim().is_empty() {
+            return Some("nfc.steps is on, but nfc.steps.entity is empty — nothing to count".into());
+        }
+        if self.steps.count == 0 {
+            return Some("nfc.steps.count is 0, so no walk is being asked for".into());
+        }
+        None
+    }
+}
+
+/// How far you have to go before the page lifts.
+///
+/// A tag on the wall proves you stood up; it does not prove you went anywhere,
+/// and a tag within reach of the chair proves nothing at all. The step count
+/// is the part that cannot be leaned over to reach. Both halves have to be in
+/// -- the scan and the walk -- and neither one alone ends the break.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Steps {
+    /// Off by default, for the same reason the tag is: an upgrade must never
+    /// quietly add a second thing standing between you and your desk.
+    pub mode: Mode,
+    /// How many steps the break wants. Counted from where you were when the
+    /// page went up, so a daily total is a perfectly good sensor to point at.
+    pub count: u32,
+    /// The sensor holding the count -- a phone's daily step total, a watch, a
+    /// Health Connect feed. Any entity whose state is a rising number will do.
+    pub entity: String,
+}
+
+impl Default for Steps {
+    fn default() -> Self {
+        // Twenty steps is a walk out of the room and back to the doorway. Small
+        // enough that nobody games it by shuffling, large enough that it cannot
+        // be done from the chair.
+        Self { mode: Mode::Off, count: 20, entity: String::new() }
+    }
+}
+
+impl Steps {
+    pub fn on(&self) -> bool {
+        self.mode == Mode::On && self.count > 0 && !self.entity.trim().is_empty()
+    }
+}
+
+/// How the walk is going: steps counted since this break began, and how many
+/// the gate is holding out for. A `needed` of zero means steps are not part of
+/// this break at all, which is what every ungated break looks like.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Walk {
+    pub walked: u32,
+    pub needed: u32,
+    /// The count has been re-based since the page went up: the first thing the
+    /// phone reported mid-break was steps from before it, so it moved the mark
+    /// instead of paying for the break.
+    ///
+    /// Carried to the page rather than left in the log, because until it is
+    /// said out loud the page reads *0 of 50* at somebody who has just walked
+    /// across the flat, and they walk it again.
+    pub marked: bool,
+}
+
+impl Walk {
+    pub fn done(&self) -> bool {
+        self.walked >= self.needed
+    }
+
+    pub fn left(&self) -> u32 {
+        self.needed.saturating_sub(self.walked)
     }
 }
 
@@ -265,12 +362,25 @@ pub struct Desk {
     pub waiting: bool,
     /// A scan has already been counted for this break.
     pub released: bool,
+    /// The tag has been scanned for this break, whether or not that was the
+    /// whole of the gate. Not the same as `released`: where a walk is counted
+    /// too the tag is half of it, and anything still answering "waiting for
+    /// the tag" once the tag is in sends somebody back down the hall for a
+    /// thing they have already done.
+    pub tag_in: bool,
+    /// Steps still owed before the page will lift. Zero when the walk is done,
+    /// and zero when no walk was being asked for -- the difference does not
+    /// matter to anything that reads this.
+    pub steps_left: u32,
 }
 
 /// The one-way letterbox between the scheduler and the server.
 pub struct Link {
     desk: Cell<Desk>,
     scan: Cell<bool>,
+    /// How far the walk has got. Left here by the poll, read by the tick, the
+    /// same one-way arrangement as everything else in this letterbox.
+    walk: Cell<Walk>,
     /// Whether whatever watches for scans could be reached, last time it was
     /// asked. `None` until something has looked. A break cannot be gated on a
     /// signal that has no way of arriving, so this decides whether the gate
@@ -283,6 +393,7 @@ impl Link {
         Rc::new(Self {
             desk: Cell::new(Desk::default()),
             scan: Cell::new(false),
+            walk: Cell::new(Walk::default()),
             reachable: Cell::new(None),
         })
     }
@@ -292,6 +403,17 @@ impl Link {
     /// often as not.
     pub fn post_scan(&self) {
         self.scan.set(true);
+    }
+
+    /// Called from the poll: this is how much of the walk has been seen.
+    pub fn post_walk(&self, walk: Walk) {
+        self.walk.set(walk);
+    }
+
+    /// What the walk looks like, or `None` when this break has no walk in it.
+    pub fn walk(&self) -> Option<Walk> {
+        let walk = self.walk.get();
+        (walk.needed > 0).then_some(walk)
     }
 
     pub fn set_reachable(&self, ok: bool) {
@@ -473,7 +595,12 @@ fn answer(raw: &[u8], token: &str, link: &Link, who: &str) -> String {
             let body = if !desk.breaking {
                 "working\n".to_string()
             } else if desk.waiting {
-                "waiting for the tag\n".to_string()
+                match (desk.tag_in, desk.steps_left) {
+                    (false, 0) => "waiting for the tag\n".to_string(),
+                    (false, n) => format!("waiting for the tag, and {n} more steps\n"),
+                    (true, 0) => "waiting\n".to_string(),
+                    (true, n) => format!("waiting for {n} more steps\n"),
+                }
             } else {
                 format!("on a break, {} left\n", human(desk.remaining))
             };
@@ -499,6 +626,27 @@ fn unlock(link: &Link, html: bool, who: &str) -> String {
 
     // Post it once; the tick that follows is what actually tells the scheduler.
     link.post_scan();
+
+    // The page the phone shows after a scan is the last chance to say that a
+    // scan was not the whole of it. Somebody who walks back to the desk on the
+    // strength of "Unlocked" and finds the page still up has been lied to.
+    if desk.steps_left > 0 {
+        let steps = desk.steps_left;
+        println!("[nfc]   scan from {who} — counted, {steps} steps still to walk");
+        // Only once the countdown is spent do the steps become the last thing
+        // between you and your desk. Said any earlier it is a promise the page
+        // will not keep: walk the twenty, come back, and find four minutes of
+        // break still to run. The branch below is careful about exactly this
+        // for a break with no walk in it, and this one has to be too.
+        let note = match desk.waiting {
+            true => format!("Counted. {steps} more steps and the page lifts — keep going."),
+            false => format!(
+                "Counted. {steps} more steps, and the page lifts in {}.",
+                human(desk.remaining)
+            ),
+        };
+        return page(html, 200, "Counted", &note);
+    }
 
     if desk.waiting {
         println!("[nfc]   scan from {who} — desk unlocked");
@@ -651,6 +799,10 @@ struct Ask {
     path: String,
     token: String,
     entity: String,
+    /// The step sensor, when the break is also being walked off. Asked on the
+    /// same beat as the tag and from the same hub, so one poll answers both
+    /// halves of the gate.
+    legs: Option<Legs>,
     link: Rc<Link>,
     /// The entity's value when this break started. A *change* is the scan;
     /// comparing against a remembered value rather than a clock means the two
@@ -661,6 +813,118 @@ struct Ask {
     busy: Cell<bool>,
     /// Complain once per outage, not once per poll.
     complained: Cell<bool>,
+    /// Consecutive unanswered questions about the tag, and whether there have
+    /// been enough of them to call it an outage. See `MISSES_BEFORE_LOST`.
+    misses: Cell<u32>,
+    lost: Cell<bool>,
+}
+
+/// How many polls in a row have to go unanswered before the hub counts as
+/// gone -- and the break therefore ends on its countdown.
+///
+/// One is far too few. A hub answers a request a second for the length of a
+/// break; a single malformed reply, a dropped packet, a Home Assistant that is
+/// mid-reload, and the gate that exists to make you walk quietly opens itself.
+/// Three in a row at the default two-second poll is six seconds of real silence,
+/// which is an outage rather than a blip.
+const MISSES_BEFORE_LOST: u32 = 3;
+
+/// The walk half of the gate: which sensor, how far, and how far you have got.
+struct Legs {
+    entity: String,
+    path: String,
+    needed: u32,
+    walker: RefCell<Walker>,
+    /// Its own outage latch, not the tag's: sharing one would have a hub that
+    /// answers about the tag and not about the sensor announcing that it is
+    /// back, once every couple of seconds, for the whole break.
+    complained: Cell<bool>,
+    /// And its own run of silence, for the same reason.
+    misses: Cell<u32>,
+    lost: Cell<bool>,
+}
+
+/// Steps taken since the break began, from a sensor that only ever reports a
+/// running total.
+///
+/// The first reading of a break is the yardstick, never a walk in itself --
+/// the same bargain the tag makes with its baseline, and for the same reason:
+/// yesterday's ten thousand steps must not pay for this afternoon's break.
+#[derive(Debug, Default)]
+struct Walker {
+    last: Option<f64>,
+    walked: f64,
+    /// Whether the mark being measured from is one the phone reported during
+    /// this break. Until it is, a rise in the total is ground covered before
+    /// the page went up: see `saw`.
+    settled: bool,
+}
+
+impl Walker {
+    /// One reading from the sensor. Says whether it was taken as this break's
+    /// mark rather than credited as a walk -- worth a line in the log, because
+    /// steps that visibly do not count are steps somebody walks twice.
+    fn saw(&mut self, value: f64) -> bool {
+        let mut yardstick = false;
+        match self.last {
+            // The first reading of a break is the mark to measure from, never
+            // a walk in itself: yesterday's ten thousand steps must not pay
+            // for this afternoon's break.
+            None => {}
+            Some(before) if value > before => {
+                // Nor is the first *rise*, however big. A daily total reports
+                // steps when the phone syncs, not when they were walked, so the
+                // reading a break starts from is whatever was last synced --
+                // minutes or hours old -- and everything between it and the
+                // next sync covers ground from before the page went up. That is
+                // the batch landing mid-break with a morning's walking in it,
+                // and crediting it opens the gate from the chair, which is the
+                // one thing this half of the gate exists to prevent. What comes
+                // after is clean: it is measured from a total the phone
+                // reported while the page was up.
+                //
+                // The cost is whatever was walked between the break starting
+                // and the first sync after it. That is what `grace` is for.
+                match self.settled {
+                    true => self.walked += value - before,
+                    false => yardstick = true,
+                }
+                self.settled = true;
+            }
+            // Backwards, which a step count never really goes. Either the
+            // counter started again -- midnight, a phone that re-paired -- or
+            // the total corrected itself, a duplicate source dropped or a sync
+            // reconciled. Telling those apart from one reading is guesswork,
+            // and guessing wrong in the generous direction credits a whole
+            // day's steps at once and opens the gate from the chair. So
+            // neither is credited: the new reading simply becomes the mark to
+            // measure from. At a real rollover that costs the steps taken
+            // between two polls, which is a couple of seconds of walking. It is
+            // also a total reported during this break, so what follows it can
+            // be counted.
+            Some(before) if value < before => self.settled = true,
+            Some(_) => {}
+        }
+        self.last = Some(value);
+        yardstick
+    }
+
+    /// Whether the mark being measured from was laid down mid-break -- which
+    /// is to say, whether a report has already been taken and not credited.
+    fn marked(&self) -> bool {
+        self.settled
+    }
+
+    fn walked(&self) -> u32 {
+        // Sensors report floats, people walk in whole steps, and rounding up
+        // would hand out a step nobody took.
+        self.walked as u32
+    }
+
+    /// Between breaks there is nothing to count and nothing worth remembering.
+    fn forget(&mut self) {
+        *self = Self::default();
+    }
 }
 
 /// The poll, for as long as this is held.
@@ -677,12 +941,38 @@ impl Drop for Watch {
 }
 
 /// Start asking Home Assistant about the tag, every `poll`, while a break is up.
-pub fn watch(cfg: &HomeAssistant, link: Rc<Link>) -> Result<Watch, String> {
-    let token = cfg.secret().map_err(|e| {
+///
+/// The whole nfc config rather than just the hub: the steps sensor is asked on
+/// the same beat, and splitting the two would mean two timers waking up a
+/// couple of seconds apart to talk to the same machine.
+pub fn watch(cfg: &Config, link: Rc<Link>) -> Result<Watch, String> {
+    let ha = &cfg.home_assistant;
+    let token = ha.secret().map_err(|e| {
         format!("{e} (a long-lived access token, from the bottom of your profile page)")
     })?;
-    let (host, port, tls, base) = split_url(&cfg.url)?;
-    let entity = cfg.entity.trim().to_string();
+    let (host, port, tls, base) = split_url(&ha.url)?;
+    let entity = ha.entity.trim().to_string();
+
+    let legs = cfg.counts_steps().then(|| {
+        let entity = cfg.steps.entity.trim().to_string();
+        Legs {
+            path: format!("{base}/api/states/{entity}"),
+            entity,
+            needed: cfg.steps.count,
+            walker: RefCell::new(Walker::default()),
+            complained: Cell::new(false),
+            misses: Cell::new(0),
+            lost: Cell::new(false),
+        }
+    });
+    // Posted before the first poll so that a page built in the same tick knows
+    // there is a walk in this break, rather than showing no badge for a second
+    // and then growing one.
+    link.post_walk(Walk {
+        walked: 0,
+        needed: legs.as_ref().map_or(0, |l| l.needed),
+        marked: false,
+    });
 
     let ask = Rc::new(Ask {
         host,
@@ -691,20 +981,32 @@ pub fn watch(cfg: &HomeAssistant, link: Rc<Link>) -> Result<Watch, String> {
         path: format!("{base}/api/states/{entity}"),
         token,
         entity,
+        legs,
         link,
         baseline: RefCell::new(None),
         busy: Cell::new(false),
         complained: Cell::new(false),
+        misses: Cell::new(0),
+        lost: Cell::new(false),
     });
 
-    let source = glib::timeout_add_local(cfg.every(), move || {
+    let source = glib::timeout_add_local(ha.every(), move || {
         // Only while the page is up. Between breaks there is nothing a scan
         // could mean, and a hub polled all day for no reason is a hub whose
         // owner turns this off.
         if !ask.link.desk().breaking {
             *ask.baseline.borrow_mut() = None;
             ask.complained.set(false);
+            ask.misses.set(0);
+            ask.lost.set(false);
             ask.link.reachable.set(None);
+            if let Some(legs) = &ask.legs {
+                legs.walker.borrow_mut().forget();
+                legs.complained.set(false);
+                legs.misses.set(0);
+                legs.lost.set(false);
+                ask.link.post_walk(Walk { walked: 0, needed: legs.needed, marked: false });
+            }
             return glib::ControlFlow::Continue;
         }
         poll(Rc::clone(&ask));
@@ -717,10 +1019,10 @@ pub fn watch(cfg: &HomeAssistant, link: Rc<Link>) -> Result<Watch, String> {
 /// Ask once, now, and hand back whatever the hub says — for `tea --probe`,
 /// which is where a mistyped token or entity name gets caught before it becomes
 /// a break page that will not lift.
-pub fn probe(cfg: &HomeAssistant) -> Result<String, String> {
+pub fn probe(cfg: &HomeAssistant, entity: &str) -> Result<String, String> {
     let token = cfg.secret()?;
     let (host, port, tls, base) = split_url(&cfg.url)?;
-    let entity = cfg.entity.trim().to_string();
+    let entity = entity.trim().to_string();
     let ask = Ask {
         path: format!("{base}/api/states/{entity}"),
         host,
@@ -728,12 +1030,17 @@ pub fn probe(cfg: &HomeAssistant) -> Result<String, String> {
         tls,
         token,
         entity,
+        legs: None,
         link: Link::new(),
         baseline: RefCell::new(None),
         busy: Cell::new(false),
         complained: Cell::new(false),
+        misses: Cell::new(0),
+        lost: Cell::new(false),
     };
-    glib::MainContext::default().block_on(fetch(&ask))
+    let path = ask.path.clone();
+    let entity = ask.entity.clone();
+    glib::MainContext::default().block_on(fetch(&ask, &path, &entity))
 }
 
 /// One question, asked on the main loop.
@@ -746,13 +1053,20 @@ fn poll(ask: Rc<Ask>) {
         return;
     }
     glib::MainContext::default().spawn_local(async move {
-        let answer = fetch(&ask).await;
+        let tag = fetch(&ask, &ask.path, &ask.entity).await;
+        // One after the other, not both at once: two sockets to the same hub
+        // every couple of seconds, for a number that changes at walking pace,
+        // is not a trade worth making.
+        let steps = match &ask.legs {
+            Some(legs) => Some(fetch(&ask, &legs.path, &legs.entity).await),
+            None => None,
+        };
         ask.busy.set(false);
-        settle(&ask, answer);
+        settle(&ask, tag, steps);
     });
 }
 
-async fn fetch(ask: &Ask) -> Result<String, String> {
+async fn fetch(ask: &Ask, path: &str, entity: &str) -> Result<String, String> {
     let client = gio::SocketClient::new();
     client.set_tls(ask.tls);
     client.set_timeout(ASK_TIMEOUT);
@@ -767,7 +1081,7 @@ async fn fetch(ask: &Ask) -> Result<String, String> {
     let request = format!(
         "GET {} HTTP/1.0\r\nHost: {}\r\nAuthorization: Bearer {}\r\n\
          Accept: application/json\r\nConnection: close\r\n\r\n",
-        ask.path, ask.host, ask.token
+        path, ask.host, ask.token
     );
     conn.output_stream()
         .write_all_future(request.into_bytes(), glib::Priority::DEFAULT)
@@ -788,7 +1102,7 @@ async fn fetch(ask: &Ask) -> Result<String, String> {
     }
     let _ = conn.close(gio::Cancellable::NONE);
 
-    read_state(&raw, &ask.entity)
+    read_state(&raw, entity)
 }
 
 /// Pull the entity's state out of the reply, and say something useful about
@@ -822,13 +1136,88 @@ fn read_state(raw: &[u8], entity: &str) -> Result<String, String> {
 }
 
 /// What one answer means for the break on screen.
-fn settle(ask: &Ask, answer: Result<String, String>) {
+fn settle(ask: &Ask, answer: Result<String, String>, steps: Option<Result<String, String>>) {
+    settle_tag(ask, answer);
+    if let (Some(legs), Some(answer)) = (&ask.legs, steps) {
+        settle_steps(ask, legs, answer);
+    }
+}
+
+/// The walk half. Anything the sensor cannot answer for leaves the count where
+/// it was: a hub that goes quiet mid-break must not undo steps already walked,
+/// and a sensor that says `unknown` has not said zero.
+fn settle_steps(ask: &Ask, legs: &Legs, answer: Result<String, String>) {
+    match answer {
+        Ok(value) => {
+            legs.misses.set(0);
+            legs.lost.set(false);
+            if legs.complained.replace(false) {
+                println!("[ha]    the step count is answering again");
+            }
+            // Only this half was ever in doubt, so only this half clears it.
+            if !ask.lost.get() {
+                ask.link.set_reachable(true);
+            }
+            if let Ok(count) = value.trim().parse::<f64>()
+                && count.is_finite()
+            {
+                let mut walker = legs.walker.borrow_mut();
+                let before = walker.walked();
+                let yardstick = walker.saw(count);
+                let walked = walker.walked();
+                if yardstick {
+                    println!("[ha]    the step count caught up — the walk counts from here");
+                }
+                let marked = walker.marked();
+                if walked != before {
+                    let left = legs.needed.saturating_sub(walked);
+                    match left {
+                        0 if before < legs.needed => println!("[ha]    {walked} steps — that's the walk"),
+                        0 => {}
+                        left => println!("[ha]    {walked} steps, {left} to go"),
+                    }
+                }
+                ask.link.post_walk(Walk { walked, needed: legs.needed, marked });
+            }
+            // A sensor that has nothing to say yet (`unknown`, `unavailable`,
+            // a phone that has not synced) is not an error and not a zero. It
+            // is the reason `grace` exists: the break ends on the clock rather
+            // than on a step count that is never going to arrive.
+        }
+        Err(why) => {
+            // Unlike the tag, this one cannot be worked around by walking to
+            // the hall and trying again: if the step sensor cannot be read, the
+            // gate has a half that will never close. Say the source is gone,
+            // which is what the engine reads to hand the desk back -- but only
+            // once a run of them says it is gone rather than slow.
+            legs.misses.set(legs.misses.get() + 1);
+            if legs.misses.get() < MISSES_BEFORE_LOST {
+                return;
+            }
+            legs.lost.set(true);
+            if !legs.complained.replace(true) {
+                eprintln!("tea: cannot ask Home Assistant about your steps — {why}");
+            }
+            ask.link.set_reachable(false);
+        }
+    }
+}
+
+/// The tag half.
+fn settle_tag(ask: &Ask, answer: Result<String, String>) {
     let value = match answer {
         Ok(value) => value,
         Err(why) => {
             // Not fatal, and not even unusual -- a hub reboots, a laptop moves
-            // to another network. It matters only because a gate nobody can
-            // open is a gate that has to come off, which the engine sees to.
+            // to another network, a reply arrives malformed. It matters only
+            // because a gate nobody can open is a gate that has to come off,
+            // which the engine sees to -- so it takes a run of silence rather
+            // than one bad answer to say so. One is a packet; three is a hub.
+            ask.misses.set(ask.misses.get() + 1);
+            if ask.misses.get() < MISSES_BEFORE_LOST {
+                return;
+            }
+            ask.lost.set(true);
             if !ask.complained.replace(true) {
                 eprintln!("tea: cannot ask Home Assistant about the tag — {why}");
             }
@@ -837,10 +1226,16 @@ fn settle(ask: &Ask, answer: Result<String, String>) {
         }
     };
 
+    ask.misses.set(0);
+    ask.lost.set(false);
     if ask.complained.replace(false) {
         println!("[ha]    Home Assistant is answering again");
     }
-    ask.link.set_reachable(true);
+    // The other half may still be out; saying the hub is there when the step
+    // sensor is not would paint a gate that cannot close as a working one.
+    if !ask.legs.as_ref().is_some_and(|legs| legs.lost.get()) {
+        ask.link.set_reachable(true);
+    }
 
     let state = value.trim().to_ascii_lowercase();
     let blank = NOT_A_SCAN.contains(&state.as_str());
@@ -1082,6 +1477,43 @@ mod tests {
     }
 
     #[test]
+    fn the_phone_is_never_told_the_page_lifts_when_it_does_not() {
+        // Steps still owed, but the countdown has minutes to run: walking them
+        // off does not give the desk back, and a page that says it does sends
+        // somebody back to the chair to find the break still up.
+        let early = link_with(Desk {
+            breaking: true,
+            remaining: Duration::from_secs(190),
+            steps_left: 20,
+            ..Desk::default()
+        });
+        let reply = get(&early, "/unlock?token=s3cret");
+        assert!(reply.contains("20 more steps"), "{reply}");
+        assert!(reply.contains("3m10s"), "the countdown is the other half: {reply}");
+
+        // Once the time is served the steps really are the last of it.
+        let waiting = link_with(Desk {
+            breaking: true,
+            waiting: true,
+            steps_left: 20,
+            ..Desk::default()
+        });
+        let reply = get(&waiting, "/unlock?token=s3cret");
+        assert!(reply.contains("20 more steps and the page lifts"), "{reply}");
+    }
+
+    #[test]
+    fn status_stops_asking_for_a_tag_that_is_already_in() {
+        let desk = Desk { breaking: true, waiting: true, steps_left: 8, ..Desk::default() };
+        assert!(get(&link_with(desk), "/status?token=s3cret").contains("waiting for the tag, and 8"));
+
+        let scanned = Desk { tag_in: true, ..desk };
+        let reply = get(&link_with(scanned), "/status?token=s3cret");
+        assert!(reply.contains("waiting for 8 more steps"), "{reply}");
+        assert!(!reply.contains("the tag"), "the tag is in — stop asking for it: {reply}");
+    }
+
+    #[test]
     fn junk_gets_a_refusal_rather_than_a_panic() {
         let link = link_with(Desk { breaking: true, waiting: true, ..Desk::default() });
         for raw in ["", "\r\n\r\n", "GET", "PUT /unlock?token=s3cret HTTP/1.1\r\n\r\n", "%%%"] {
@@ -1135,10 +1567,29 @@ mod tests {
             path: "/api/states/tag.hall".into(),
             token: "t".into(),
             entity: "tag.hall".into(),
+            legs: None,
             link: Rc::clone(link),
             baseline: RefCell::new(None),
             busy: Cell::new(false),
             complained: Cell::new(false),
+            misses: Cell::new(0),
+            lost: Cell::new(false),
+        }
+    }
+
+    /// The same, with a walk to be counted alongside the tag.
+    fn asking_with_legs(link: &Rc<Link>, needed: u32) -> Ask {
+        Ask {
+            legs: Some(Legs {
+                misses: Cell::new(0),
+                lost: Cell::new(false),
+                entity: "sensor.steps".into(),
+                path: "/api/states/sensor.steps".into(),
+                needed,
+                walker: RefCell::new(Walker::default()),
+                complained: Cell::new(false),
+            }),
+            ..asking(link)
         }
     }
 
@@ -1149,20 +1600,20 @@ mod tests {
 
         // Whatever it says when the break starts is the "not yet" value --
         // otherwise a tag touched at three would pay for the four o'clock break.
-        settle(&ask, Ok("2026-08-31T09:00:00+00:00".into()));
+        settle_tag(&ask, Ok("2026-08-31T09:00:00+00:00".into()));
         assert!(!link.take_scan(), "the first look is a baseline, never a scan");
         assert_eq!(link.reachable(), Some(true));
 
         // Same value, over and over, while nobody goes anywhere.
-        settle(&ask, Ok("2026-08-31T09:00:00+00:00".into()));
+        settle_tag(&ask, Ok("2026-08-31T09:00:00+00:00".into()));
         assert!(!link.take_scan());
 
-        settle(&ask, Ok("2026-08-31T09:26:31+00:00".into()));
+        settle_tag(&ask, Ok("2026-08-31T09:26:31+00:00".into()));
         assert!(link.take_scan(), "it changed — somebody went");
 
         // Reported once. The new value is the new normal, not a scan repeated
         // every two seconds for the rest of the break.
-        settle(&ask, Ok("2026-08-31T09:26:31+00:00".into()));
+        settle_tag(&ask, Ok("2026-08-31T09:26:31+00:00".into()));
         assert!(!link.take_scan());
     }
 
@@ -1170,18 +1621,18 @@ mod tests {
     fn a_hub_that_restarts_does_not_end_your_break() {
         let link = link_with(Desk { breaking: true, ..Desk::default() });
         let ask = asking(&link);
-        settle(&ask, Ok("2026-08-31T09:00:00+00:00".into()));
+        settle_tag(&ask, Ok("2026-08-31T09:00:00+00:00".into()));
         assert!(!link.take_scan());
 
         // Home Assistant comes back up and hands out `unknown` again. That is a
         // change, and it is emphatically not somebody walking to the hall.
         for empty in ["unknown", "unavailable", ""] {
-            settle(&ask, Ok(empty.into()));
+            settle_tag(&ask, Ok(empty.into()));
             assert!(!link.take_scan(), "{empty:?} is not a scan");
         }
 
         // ...and a real scan after that still counts.
-        settle(&ask, Ok("2026-08-31T09:31:02+00:00".into()));
+        settle_tag(&ask, Ok("2026-08-31T09:31:02+00:00".into()));
         assert!(link.take_scan());
     }
 
@@ -1189,19 +1640,19 @@ mod tests {
     fn an_entity_that_blinks_and_comes_back_unchanged_is_not_a_scan() {
         let link = link_with(Desk { breaking: true, ..Desk::default() });
         let ask = asking(&link);
-        settle(&ask, Ok("2026-08-31T09:00:00+00:00".into()));
+        settle_tag(&ask, Ok("2026-08-31T09:00:00+00:00".into()));
         assert!(!link.take_scan());
 
         // A Zigbee blip, an integration reload: the entity vanishes for a few
         // polls and then comes back holding the very state it had before.
         // Nobody walked anywhere, and the page must not lift.
-        settle(&ask, Ok("unavailable".into()));
+        settle_tag(&ask, Ok("unavailable".into()));
         assert!(!link.take_scan());
-        settle(&ask, Ok("2026-08-31T09:00:00+00:00".into()));
+        settle_tag(&ask, Ok("2026-08-31T09:00:00+00:00".into()));
         assert!(!link.take_scan(), "recovering to the old state is not a scan");
 
         // A state it never had before is still somebody at the tag.
-        settle(&ask, Ok("2026-08-31T09:26:31+00:00".into()));
+        settle_tag(&ask, Ok("2026-08-31T09:26:31+00:00".into()));
         assert!(link.take_scan());
     }
 
@@ -1212,12 +1663,12 @@ mod tests {
 
         // The watcher is down when the break starts; whatever it recovers to
         // is old news, not a walk made during the outage.
-        settle(&ask, Ok("unavailable".into()));
+        settle_tag(&ask, Ok("unavailable".into()));
         assert!(!link.take_scan());
-        settle(&ask, Ok("2026-08-31T09:00:00+00:00".into()));
+        settle_tag(&ask, Ok("2026-08-31T09:00:00+00:00".into()));
         assert!(!link.take_scan());
 
-        settle(&ask, Ok("2026-08-31T09:26:31+00:00".into()));
+        settle_tag(&ask, Ok("2026-08-31T09:26:31+00:00".into()));
         assert!(link.take_scan());
     }
 
@@ -1225,13 +1676,27 @@ mod tests {
     fn an_unanswered_question_is_reported_not_guessed_at() {
         let link = link_with(Desk { breaking: true, ..Desk::default() });
         let ask = asking(&link);
+        let quiet = || Err::<String, String>("cannot reach 192.168.2.50:8123".to_string());
 
-        settle(&ask, Err("cannot reach 192.168.2.50:8123".into()));
-        assert_eq!(link.reachable(), Some(false));
+        // One unanswered question is a packet, not an outage. Acting on it
+        // would end a break early every time a reply came back malformed --
+        // and the gate that exists to make somebody walk would be opening
+        // itself, quietly, a few times a week.
+        for miss in 1..MISSES_BEFORE_LOST {
+            settle_tag(&ask, quiet());
+            assert_eq!(link.reachable(), None, "miss {miss} is not an outage yet");
+        }
+        settle_tag(&ask, quiet());
+        assert_eq!(link.reachable(), Some(false), "a run of them is");
         assert!(!link.take_scan(), "silence is never a scan");
 
-        settle(&ask, Ok("2026-08-31T09:00:00+00:00".into()));
+        // And one good answer is enough to be back: the run has to be
+        // consecutive or a hub that drops one reply an hour is never trusted
+        // again.
+        settle_tag(&ask, Ok("2026-08-31T09:00:00+00:00".into()));
         assert_eq!(link.reachable(), Some(true));
+        settle_tag(&ask, quiet());
+        assert_eq!(link.reachable(), Some(true), "the count started again");
     }
 
     #[test]
@@ -1329,6 +1794,209 @@ mod tests {
         let ten: Holder = toml::from_str(r#"grace = "10m""#).unwrap();
         assert_eq!(ten.grace.0, Duration::from_secs(600));
         assert!(toml::from_str::<Holder>(r#"grace = "soon""#).is_err());
+    }
+
+    #[test]
+    fn the_walk_is_counted_from_where_the_break_found_you() {
+        let link = link_with(Desk { breaking: true, ..Desk::default() });
+        let ask = asking_with_legs(&link, 20);
+        let steps = |value: &str| settle(&ask, Ok("9:00".into()), Some(Ok(value.into())));
+
+        // The daily total when the page went up: no walk yet, but the page has
+        // to know a walk is being asked for.
+        steps("4812.0");
+        assert_eq!(link.walk(), Some(Walk { walked: 0, needed: 20, marked: false }));
+
+        // The first sync of the break is the phone catching up. Whatever it
+        // brings was walked before the page went up, so it moves the mark
+        // instead of paying for the break.
+        steps("4824.0");
+        // And the page is told so, rather than left saying *0 of 20* to
+        // somebody who has just walked across the flat.
+        assert_eq!(link.walk(), Some(Walk { walked: 0, needed: 20, marked: true }));
+
+        steps("4836.0");
+        assert_eq!(link.walk(), Some(Walk { walked: 12, needed: 20, marked: true }));
+        assert!(!link.walk().unwrap().done());
+
+        steps("4844.0");
+        assert_eq!(link.walk(), Some(Walk { walked: 20, needed: 20, marked: true }));
+        assert!(link.walk().unwrap().done());
+    }
+
+    #[test]
+    fn a_step_sensor_with_nothing_to_say_is_not_zero_steps() {
+        let link = link_with(Desk { breaking: true, ..Desk::default() });
+        let ask = asking_with_legs(&link, 20);
+        settle(&ask, Ok("9:00".into()), Some(Ok("4812.0".into())));
+        // The catch-up sync, and then a walk that actually counts.
+        settle(&ask, Ok("9:00".into()), Some(Ok("4820.0".into())));
+        settle(&ask, Ok("9:00".into()), Some(Ok("4840.0".into())));
+        assert!(link.walk().unwrap().done());
+
+        // A phone that has not synced, an integration reloading: the walk
+        // already counted stands, and the hub is still perfectly reachable.
+        for quiet in ["unknown", "unavailable", ""] {
+            settle(&ask, Ok("9:00".into()), Some(Ok(quiet.into())));
+            assert!(link.walk().unwrap().done(), "{quiet:?} must not undo the walk");
+        }
+        assert_eq!(link.reachable(), Some(true));
+    }
+
+    #[test]
+    fn a_step_sensor_that_cannot_be_read_hands_the_desk_back() {
+        // The half of the gate nobody can walk to. Unlike the tag, there is no
+        // trying again in the hall: if the sensor cannot be read the page has
+        // to come down on the clock, which is what `reachable` tells the engine.
+        let link = link_with(Desk { breaking: true, ..Desk::default() });
+        let ask = asking_with_legs(&link, 20);
+        let gone = || Some(Err::<String, String>("no entity called that".to_string()));
+
+        // Same debounce as the tag, and it has to be the *steps* that decide
+        // it: the tag is answering perfectly well throughout.
+        for _ in 1..MISSES_BEFORE_LOST {
+            settle(&ask, Ok("9:00".into()), gone());
+            assert_ne!(link.reachable(), Some(false), "one miss is not an outage");
+        }
+        settle(&ask, Ok("9:00".into()), gone());
+        assert_eq!(link.reachable(), Some(false));
+
+        // A tag that keeps answering must not paint over a walk that can never
+        // be counted -- the gate still has a half that will not close.
+        settle_tag(&ask, Ok("9:01".into()));
+        assert_eq!(link.reachable(), Some(false), "the steps are still gone");
+        settle(&ask, Ok("9:01".into()), Some(Ok("4812.0".into())));
+        assert_eq!(link.reachable(), Some(true), "and back when both answer");
+    }
+
+    #[test]
+    fn the_first_reading_of_a_break_is_a_yardstick_not_a_walk() {
+        // Yesterday's ten thousand steps must not pay for this afternoon.
+        let mut w = Walker::default();
+        assert!(!w.saw(9_412.0), "the first reading is only the mark");
+        assert_eq!(w.walked(), 0);
+        // Nor is the first rise: see below.
+        assert!(w.saw(9_432.0));
+        assert_eq!(w.walked(), 0);
+        assert!(!w.saw(9_452.0));
+        assert_eq!(w.walked(), 20);
+    }
+
+    #[test]
+    fn the_batch_a_phone_syncs_mid_break_is_not_a_walk() {
+        // The property the whole step gate rests on. A daily total reports
+        // steps when the phone syncs, not when they were walked: sit down at
+        // 10:00 having walked all morning, and the first sync of the break can
+        // arrive carrying two thousand of them. Credited, that opens the gate
+        // from the chair -- which is the exact hole the steps were added to
+        // close, so it must stay shut.
+        let mut w = Walker::default();
+        w.saw(4_000.0);
+        assert!(w.saw(6_000.0), "the morning's walking is the phone catching up");
+        assert_eq!(w.walked(), 0, "two thousand steps from a chair are not a walk");
+
+        // And from there the gate works normally: this is measured from a total
+        // the phone reported while the page was up.
+        w.saw(6_020.0);
+        assert_eq!(w.walked(), 20);
+    }
+
+    #[test]
+    fn a_total_that_corrects_itself_downwards_is_not_a_walk() {
+        // A duplicate source dropped, a sync reconciled: the daily total steps
+        // back a little. Read as a fresh counter it would credit the whole of
+        // itself and open the gate from the chair.
+        let mut w = Walker::default();
+        w.saw(4_812.0);
+        w.saw(4_800.0);
+        assert_eq!(w.walked(), 0, "a correction is not four thousand steps");
+        // And the walk carries on from the corrected total.
+        w.saw(4_820.0);
+        assert_eq!(w.walked(), 20);
+    }
+
+    #[test]
+    fn a_counter_that_rolls_over_keeps_the_walk_and_carries_on_from_zero() {
+        // Midnight, or a phone that re-pairs: the daily total starts again.
+        // The walk so far stands, the new total is the new mark, and only one
+        // poll's worth of steps falls down the gap between them.
+        let mut w = Walker::default();
+        w.saw(9_990.0);
+        // The catch-up sync, then ten steps that count.
+        w.saw(10_000.0);
+        w.saw(10_010.0);
+        assert_eq!(w.walked(), 10);
+        w.saw(4.0);
+        assert_eq!(w.walked(), 10, "the walk survives the reset");
+        w.saw(9.0);
+        assert_eq!(w.walked(), 15, "and counting resumes from the new total");
+    }
+
+    #[test]
+    fn nothing_a_sensor_says_backwards_is_ever_credited() {
+        // The property the feature rests on: only ground the sensor says was
+        // covered is counted, and a total that drops is never itself a walk.
+        let mut w = Walker::default();
+        // 5000 sets the mark; 4999 and 12 both drop, and both credit nothing.
+        for value in [5_000.0, 4_999.0, 12.0] {
+            w.saw(value);
+        }
+        assert_eq!(w.walked(), 0, "two drops are not five thousand steps");
+
+        // From 12 the total climbs 8, drops to 3, then climbs 5.
+        for value in [20.0, 3.0, 8.0] {
+            w.saw(value);
+        }
+        assert_eq!(w.walked(), 8 + 5);
+    }
+
+    #[test]
+    fn a_sensor_that_repeats_itself_adds_nothing() {
+        let mut w = Walker::default();
+        for _ in 0..10 {
+            w.saw(120.0);
+        }
+        assert_eq!(w.walked(), 0);
+    }
+
+    #[test]
+    fn steps_are_only_counted_when_there_is_somewhere_to_count_them_from() {
+        // On, but with no hub to ask and no sensor named: the gate must not
+        // grow a half that nothing on earth could close.
+        let mut cfg = Config { mode: Mode::On, ..Config::default() };
+        cfg.steps.mode = Mode::On;
+        cfg.steps.entity = "sensor.steps".into();
+        assert!(!cfg.counts_steps(), "no hub, no steps");
+        assert!(cfg.steps_misconfigured().is_some());
+
+        cfg.home_assistant.url = "http://ha.example".into();
+        cfg.home_assistant.entity = "tag.hall".into();
+        assert!(cfg.counts_steps());
+        assert_eq!(cfg.steps.count, 20, "twenty unless the file says otherwise");
+        assert!(cfg.steps_misconfigured().is_none());
+
+        cfg.steps.entity = String::new();
+        assert!(!cfg.counts_steps());
+        assert!(cfg.steps_misconfigured().is_some(), "on with nothing to read is worth saying");
+
+        // And with the tag itself off, steps are not a gate of their own.
+        cfg.steps.entity = "sensor.steps".into();
+        cfg.mode = Mode::Off;
+        assert!(!cfg.counts_steps());
+        assert!(cfg.steps_misconfigured().is_none());
+    }
+
+    #[test]
+    fn the_walk_reads_the_words_people_actually_write() {
+        let cfg: Config =
+            toml::from_str("mode = \"on\"\n[steps]\nmode = \"active\"\ncount = 40\nentity = \"sensor.s\"\n")
+                .unwrap();
+        assert_eq!(cfg.steps.mode, Mode::On);
+        assert_eq!(cfg.steps.count, 40);
+
+        let off: Config = toml::from_str("mode = \"on\"\n[steps]\nmode = \"inactive\"\n").unwrap();
+        assert_eq!(off.steps.mode, Mode::Off);
+        assert_eq!(off.steps.count, 20, "the default survives a table that only says off");
     }
 
     #[test]
