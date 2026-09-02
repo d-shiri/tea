@@ -378,6 +378,9 @@ fn main() {
     if let Some(why) = nfc_cfg.moving_misconfigured() {
         eprintln!("tea: note: {why}");
     }
+    if let Some(why) = nfc_cfg.chores_misconfigured() {
+        eprintln!("tea: note: {why}");
+    }
     if let Some(why) = nfc_cfg.home_assistant.publish_misconfigured() {
         eprintln!("tea: note: {why}");
     }
@@ -677,9 +680,14 @@ fn preview(
                 Err(why) if !nfc.asks() => eprintln!("tea: {why}"),
                 Err(_) => {}
             }
-            if nfc.asks() {
-                match nfc::watch(&nfc, Rc::clone(&link)) {
-                    Ok(w) => {
+        }
+        // The hub is asked whether or not the tag is part of this: the list in
+        // the corner is read off the same poll, and it holds nothing back, so a
+        // page with jobs on it and no gate at all is an ordinary way to run.
+        if nfc.asks() && (asking || nfc.shows_chores()) {
+            match nfc::watch(&nfc, Rc::clone(&link)) {
+                Ok(w) => {
+                    if asking {
                         println!(
                             "nfc: watching {} — scan the tag to lift the page",
                             nfc.home_assistant.entity.trim()
@@ -691,14 +699,17 @@ fn preview(
                                 nfc.steps.entity.trim()
                             );
                         }
-                        watch = Some(w);
                     }
-                    Err(why) => eprintln!("tea: {why}"),
+                    if nfc.shows_chores() {
+                        println!("nfc: reading {}", nfc.chores.entity.trim());
+                    }
+                    watch = Some(w);
                 }
+                Err(why) => eprintln!("tea: {why}"),
             }
-            if ear.is_none() && watch.is_none() {
-                println!("nfc: nothing can hear a real scan, so the preview will act one out");
-            }
+        }
+        if asking && ear.is_none() && watch.is_none() {
+            println!("nfc: nothing can hear a real scan, so the preview will act one out");
         }
         let wired = ear.is_some() || watch.is_some();
 
@@ -757,6 +768,16 @@ fn preview(
             let motion = link.motion();
             if let Some(m) = motion {
                 ui.borrow_mut().motion_seen(m.secs, m.needed, m.lost);
+            }
+            // And the list, so a preview shows the corner as a real break will.
+            // A preview is not a day, so the only jobs it knows about are the
+            // ones ticked off while it has been on screen.
+            let done = link.chores_done();
+            match link.board() {
+                Some(board) => {
+                    ui.borrow_mut().chores_seen(&board.title, &board.chores(), board.hidden, done)
+                }
+                None => ui.borrow_mut().chores_seen("", &[], 0, 0),
             }
             // The same verdict the daemon gives, so the teasing can be seen
             // without waiting out a work interval -- and without a tally,
@@ -1118,11 +1139,13 @@ impl Engine {
         &mut self,
         walk: Option<nfc::Walk>,
         motion: Option<nfc::Motion>,
+        chores: u32,
         ran: Duration,
         gate: history::Gate,
     ) {
         self.tally.breaks += 1;
         self.tally.steps += walk.map_or(0, |w| w.walked);
+        self.tally.chores += chores;
         history::append(&history::Event::Break {
             t: clock::unix_now(),
             len: ran.as_secs(),
@@ -1130,6 +1153,7 @@ impl Engine {
             moved: motion.map_or(0, |m| m.secs),
             cheated: self.busted,
             needed: walk.map_or(0, |w| w.needed),
+            chores,
             gate,
             long: !ran.is_zero() && ran != self.sched.config().brk,
         });
@@ -1140,6 +1164,7 @@ impl Engine {
                 "steps": walk.map_or(0, |w| w.walked),
                 "moved": motion.map_or(0, |m| m.secs),
                 "cheated": self.busted,
+                "chores": chores,
                 "gate": gate,
                 "long": !ran.is_zero() && ran != self.sched.config().brk,
             }),
@@ -1217,9 +1242,11 @@ impl Engine {
             postpones_left: self.sched.postpones_left(),
             breaks_today: self.tally.breaks,
             steps_today: self.tally.steps,
+            chores_today: self.tally.chores,
             credited_today: self.tally.credited,
             postponed_today: self.tally.postponed,
             cheats_today: self.tally.cheats,
+            worked_today_min: self.tally.worked_ms / 60_000,
             why_off,
         });
     }
@@ -1311,6 +1338,11 @@ impl Engine {
         let desk = self.sched.snapshot();
         let walk = self.link.walk();
         let motion = self.link.motion();
+        // Read here rather than at the end of the break, like the walk and for
+        // the same reason: by the time a break is counted the poll has already
+        // been told to forget it, and a day's jobs should not depend on which
+        // of the two happened first.
+        let chores = self.link.chores_done();
         if self.link.take_scan() && !self.tag_in {
             if desk.breaking {
                 // Banked only against a break that already exists. A tag
@@ -1347,6 +1379,18 @@ impl Engine {
         // the tick below has to be born with the badge on it.
         if let Some(w) = self.link.walk() {
             ui.steps_seen(w.walked, w.needed, w.marked);
+        }
+        // The list in the corner, told every tick for the same reason the
+        // badges are: a page rebuilt by `insist` has to come back carrying the
+        // same jobs, and the blocker does the work only when something moved.
+        // Today's count is the breaks already banked plus what this one has
+        // done so far: the tally only takes a break's jobs when the page comes
+        // down, and a corner that waited for that would sit there saying two
+        // while you watched a third line go green.
+        let today = self.tally.chores + chores;
+        match self.link.board() {
+            Some(board) => ui.chores_seen(&board.title, &board.chores(), board.hidden, today),
+            None => ui.chores_seen("", &[], 0, 0),
         }
         if let Some(m) = motion {
             ui.motion_seen(m.secs, m.needed, m.lost);
@@ -1465,6 +1509,11 @@ impl Engine {
         let before = self.sched.snapshot();
         let commands = tea_core::drive(&mut self.sched, ui, delta, idle, inhibited);
         let after = self.sched.snapshot();
+        // Work banked this tick goes on the day's total. Only rises count: the
+        // fall to zero at a break is the same time counted once already.
+        if after.worked > before.worked {
+            self.tally.worked_ms += (after.worked - before.worked).as_millis() as u64;
+        }
         // Asked of the whole batch rather than tracked as the loop goes, so it
         // does not matter which order the two commands come out in.
         let gave_up =
@@ -1517,10 +1566,12 @@ impl Engine {
                 // ordinary end-of-break one stacked on top would turn the
                 // celebration into a clatter.
                 tea_core::Command::HideOverlay if !celebrated => {
-                    self.count_break(walk, motion, before.break_len, gate);
+                    self.count_break(walk, motion, chores, before.break_len, gate);
                     self.sound.break_ends();
                 }
-                tea_core::Command::HideOverlay => self.count_break(walk, motion, before.break_len, gate),
+                tea_core::Command::HideOverlay => {
+                    self.count_break(walk, motion, chores, before.break_len, gate)
+                }
                 _ => {}
             }
         }

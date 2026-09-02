@@ -104,7 +104,9 @@ fn gather(
             "credited": t.credited,
             "postponed": t.postponed,
             "steps": t.steps,
+            "chores": t.chores,
             "cheats": t.cheats,
+            "worked_min": t.worked_ms / 60_000,
         })),
         "settings": {
             "work": cfg.work.as_secs(),

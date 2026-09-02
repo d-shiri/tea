@@ -101,6 +101,12 @@ matching flag that overrides the file (`tea --help`).
     for = "auto"
     states = ["walking", "on_foot", "running"]
 
+    [nfc.chores]
+    mode = "off"
+    entity = ""
+    title = ""
+    show = 8
+
 Durations are `"90s"`, `"25m"`, `"1h"`; a bare number means minutes. Unknown
 keys are a hard error — a silently ignored typo in a config you edit twice a
 year is worse than a crash on startup.
@@ -463,6 +469,78 @@ Android reports it lazily, a minute behind at times, so `for` is a floor and
 not a stopwatch, and a sensor that cannot be read turns the badge amber and
 ends the break on the clock, the way the tag does. `tea --probe` reads it.
 
+### And something to do with it
+
+Everything above is about making you get up. This is the only part about what
+to do once you have — because a page that says *stand up* and nothing else
+leaves you standing in the kitchen wondering why you are there. Point tea at a
+Home Assistant to-do list:
+
+    [nfc.chores]
+    mode = "on"
+    entity = "todo.household"
+    title = "While you're up"
+    show = 8
+
+and the break page grows a list in the top-left corner:
+
+    While you're up
+    ├─ Luft
+    ├─ Tidy up the kitchen
+    ├─ Clean the rack
+    ├─ 2 more
+    ├─ Clean windows
+    └─ Take out the bins
+    ─────────────
+    today · 2 jobs done
+
+The open ones first, in the list's own order, then the ones already done —
+struck through, green, and fading as they go down. The last two lines are kept
+for finished jobs whenever there are any, so a list with eleven things still on
+it cannot fill the corner with nothing but work; when there is little left to
+do, the finished ones take the slack instead of leaving the page half empty.
+`title` is what goes above them, and defaults to the entity id, which is what
+the list is called and nobody's idea of a heading.
+
+Whatever does not fit is counted on a line of its own — *3 more*, in the same
+grey as the branches, so it reads as arithmetic rather than as a job you could
+go and do. That line is what keeps the corner honest: what you can see plus what
+it says it is hiding **is** the list, and no number on the page can disagree with
+the rows beneath it. It costs no job its place, so `show = 8` means eight jobs.
+
+Under a hairline, once the day has something to report, the day itself: *today ·
+2 jobs done*, the count in the same green the finished jobs are struck through
+in. The rule and the leading word are doing a job — above the line is this list
+now, below it is you today — because a bare number beside a sample of a list
+invites you to count the rows, and the rows will not add up to it. It says
+nothing at all until the first job goes green; a corner opening with *0 done
+today* would be nagging you before you had stood up. When there is genuinely
+nothing left it says *list clear* instead, which is the one moment the corner
+gets to be pleased with you. The first line is the only
+bright one on the page besides the clock: it is the job you would pick, and the
+page has exactly one thing to catch an eye that is supposed to be leaving the
+screen.
+
+It is read *live*, every few seconds, and it is read-only. Tick a job off on
+your phone while you are standing at the window and the line goes green behind
+you; tea will not tick anything off on your behalf, because a job marked done
+from the laptop you were just sent away from is a claim nothing here can check.
+
+The rows are fixed the moment the page first gets an answer and are never
+re-ordered afterwards — only their statuses change. A panel that re-sorted
+itself as you ticked things off would move the next job out from under the eye
+reading it. A job deleted mid-break keeps its line for the same reason, and a
+job that never fit on screen still counts if you do it.
+
+None of this is part of the gate. The list holds nothing back, ends no break
+early, and a hub that cannot be asked about it costs one line on stderr and an
+empty corner — there is no error text on a page whose whole job is to be
+restful.
+
+Whatever gets ticked off while a page is up is counted. `tea status` says how
+many today, `tea dash` has them per day and in total, and the hub gets
+`sensor.tea_chores_today` beside the rest.
+
 ### Telling Home Assistant
 
 Everything above is the hub talking to tea. This is tea talking back:
@@ -491,10 +569,13 @@ for them: `sensor.tea_worked` (minutes towards the next break),
 `binary_sensor.tea_break` (on while the page is up). Named after
 `publish_entity`, so `sensor.desk` gets `sensor.desk_steps_today`.
 
-`dist/home-assistant/tea-dashboard.yaml` is a dashboard built on them — what
-tea is doing in a sentence, two gauges for the clock and the walk, today's
-tally, the day as a timeline, and a month of bars — for Settings → Dashboards
-→ Add dashboard → raw configuration editor. `dist/home-assistant/automations.yaml`
+`dist/home-assistant/tea-dashboard.yaml` is a dashboard built on them, kept
+to five numbers and two pictures: breaks, steps in breaks, all steps, and
+work today; the day's walking as two rising lines, steps in breaks against
+the phone's own count; breaks as a bar a day for a month; and the same three
+numbers added up since tea started reporting. The phone's step sensor is the
+one entity in it that is yours to fill in. For Settings → Dashboards → Add
+dashboard → raw configuration editor, or `push.py` below. `dist/home-assistant/automations.yaml`
 is the hall light, the speaker, and the phone, on the events above. Neither
 needs the clipboard: `dist/home-assistant/push.py dashboard` creates or
 replaces the dashboard over the hub's API, `push.py list` says what the hub
@@ -579,7 +660,7 @@ nothing else. A header is a claim, never an authorisation.
                 15m of 25m — next break in 10m
 
       postpone  1 of 2 left — resets in 40m
-      today     3 breaks · 1 away from the desk · 187 steps walked
+      today     3 breaks · 1 away from the desk · 187 steps walked · 2 jobs done
       long      15m — after 2 more ordinary breaks
       now       idle 4s · nothing is holding a break
       service   running · saved 2s ago
@@ -591,8 +672,8 @@ config while the service is running, restart it before trusting the numbers.
 
 The `today` row is the only line here that says whether any of this is
 working; everything above it is about the next five minutes. It counts breaks
-that ran, absences credited as breaks, postpones spent and steps walked, and
-it starts again at local midnight. While tea is off or out of hours the gauges
+that ran, absences credited as breaks, postpones spent, steps walked and jobs
+ticked off the list, and it starts again at local midnight. While tea is off or out of hours the gauges
 are replaced by the reason, because a work bar that has not moved since Friday
 is worse than no bar at all.
 

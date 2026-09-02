@@ -13,7 +13,7 @@ use gtk::prelude::*;
 use crate::config::Dur;
 use crate::nfc::{Motion, Walk};
 use crate::session::Session;
-use tea_core::{Blocker, Snooze};
+use tea_core::{Blocker, Chore, Snooze};
 use serde::Deserialize;
 use std::cell::{Cell, RefCell};
 use std::f64::consts::{FRAC_PI_2, TAU};
@@ -67,6 +67,24 @@ window.tea-toast button:hover { background-color: rgba(ACCENT,0.18); }
 .tea-tag.unseen { color: #d8b06a; }
 .tea-warn-text { font-size: 15pt; color: #e6e9f0; }
 .tea-warn-sub  { font-size: 11pt; color: #78849c; letter-spacing: 1px; }
+
+/* The list in the corner. Four greys and a green, and none of them competes
+   with the clock: this is something to read once on the way out of the chair,
+   not a second page. */
+.tea-todo-list { font-size: 10pt; color: #4d5666; letter-spacing: 1px; }
+.tea-todo-limb { font-size: 11pt; color: #333c4a; }
+.tea-todo-job  { font-size: 11pt; color: #8b95a5; }
+/* The one you would do first, and the only line here bright enough to catch
+   an eye that is meant to be leaving the screen. */
+.tea-todo-job.next { color: #e6ebf5; }
+.tea-todo-job.done { color: #4ade80; }
+/* The jobs that did not fit. Drawn in the branches' own grey, because it is a
+   piece of arithmetic and not something you can go and do. */
+.tea-todo-job.more { color: #333c4a; }
+/* And the line between the list and the day. Everything above it is this list
+   now; everything below it is you today. */
+.tea-todo-rule { background-color: #2a323e; }
+.tea-todo-day  { font-size: 10pt; color: #4d5666; letter-spacing: 1px; }
 ";
 
 pub struct GtkBlocker {
@@ -114,6 +132,11 @@ pub struct GtkBlocker {
     motion: Rc<Cell<Motion>>,
     /// The steps came from a hand: see `cheat_seen`. Shared like the rest.
     busted: Rc<Cell<bool>>,
+    /// The list in the corner: what it is called, and what is on it. Shared
+    /// for the reason all of these are -- a page rebuilt by `insist` has to
+    /// come back with the same five jobs on it, in the same order, or escaping
+    /// and coming back would deal somebody a different list.
+    board: Rc<RefCell<Corner>>,
     /// Both halves are in and the break is ending. Distinct from `scanned`,
     /// which is only the tag: the celebration belongs to the moment the page is
     /// actually about to lift, not to the first of two things that had to
@@ -167,6 +190,7 @@ impl GtkBlocker {
             walk: Rc::new(Cell::new(Walk::default())),
             motion: Rc::new(Cell::new(Motion::default())),
             busted: Rc::new(Cell::new(false)),
+            board: Rc::new(RefCell::new(Corner::default())),
             open: Rc::new(Cell::new(false)),
             live: Rc::new(Cell::new(false)),
             session: Rc::new(RefCell::new(Session::connect())),
@@ -197,6 +221,11 @@ struct Face {
     /// The line under the title while the clock runs, when `[page].prompts`
     /// has given the page something to say. `None` keeps the line it ships with.
     sub: Option<String>,
+    /// The list, the jobs on it, and the day. Empty when there is no list, or
+    /// when the hub has not answered about it yet -- the page shows nothing
+    /// for both, because "the list could not be read" is not news to anybody
+    /// standing in their kitchen.
+    corner: Corner,
 }
 
 /// Whether the walk has been made yet.
@@ -225,6 +254,7 @@ impl GtkBlocker {
         let open = Rc::clone(&self.open);
         let ask = self.ask.clone();
         let prompter = Rc::clone(&self.prompter);
+        let board = Rc::clone(&self.board);
         move || {
             let mut face = face_of(
                 ask.as_deref(),
@@ -237,6 +267,7 @@ impl GtkBlocker {
                 busted.get(),
             );
             face.sub = prompter.borrow().current();
+            face.corner.clone_from(&board.borrow());
             face
         }
     }
@@ -321,6 +352,7 @@ fn face_of(
         motion: ask.and(motion),
         busted: busted && ask.and(walk).is_some(),
         sub: None,
+        corner: Corner::default(),
     }
 }
 
@@ -664,6 +696,21 @@ impl Blocker for GtkBlocker {
             }
         }
         self.retext();
+    }
+
+    fn chores_seen(&mut self, list: &str, jobs: &[Chore], hidden: u32, today: u32) {
+        // Told every tick, and almost always the same answer: the hub is only
+        // asked about the list every few seconds, and a household to-do list
+        // changes rather less often than that.
+        let corner =
+            Corner { list: list.to_string(), jobs: jobs.to_vec(), hidden, today };
+        if *self.board.borrow() == corner {
+            return;
+        }
+        for page in self.pages.borrow().iter() {
+            page.todo.show(&corner);
+        }
+        *self.board.borrow_mut() = corner;
     }
 
     fn cheat_seen(&mut self, busted: bool) {
@@ -1164,6 +1211,13 @@ struct Page {
     motion: Option<Badge>,
     /// The block of squares under the badges, same condition as `walk`.
     meter: Option<Meter>,
+    /// The list in the corner. Always built, empty until a hub answers -- the
+    /// page goes up before anything has been asked, and a page that could not
+    /// grow one afterwards would show the list only from the second break on.
+    /// Shared rather than owned: a `Page` is cloned in places, and two copies
+    /// of the same window's panel with two ideas of what it is showing would
+    /// repaint each other's lines.
+    todo: Rc<Todo>,
     dial: Rc<RefCell<Dial>>,
 }
 
@@ -1359,6 +1413,400 @@ impl Meter {
         self.state.set(walk);
         self.area.queue_draw();
     }
+}
+
+/// How far in from the corner the list sits. Far enough that it reads as
+/// pinned to the page rather than falling off it, and nowhere near the column
+/// down the middle, which is centred and stays centred whatever is over here.
+const TODO_INSET: i32 = 52;
+/// Between one job and the next: about six tenths of a line, which is the gap
+/// that makes five lines scan as a list instead of as a paragraph.
+const TODO_GAP: i32 = 9;
+/// And between the name of the list and the first job under it.
+const TODO_HEAD_GAP: i32 = 6;
+/// Between the last job and the hairline, and again under it. Wider than the
+/// gap between jobs, because what is below the rule is a different subject and
+/// has to look like one.
+const TODO_FOOT_GAP: i32 = 13;
+/// How wide the hairline runs. Short of the longest job on purpose: a rule
+/// that reached the full width would read as a box being drawn around the
+/// list rather than as a line under it.
+const TODO_RULE_WIDTH: i32 = 168;
+/// Between the branch and the words.
+const TODO_LIMB_GAP: i32 = 10;
+/// Past this a job is cut short with an ellipsis. A to-do list is written for
+/// the person who wrote it, not for this page, and one long enough to reach
+/// the countdown has to give way -- the clock is what the page is for.
+const TODO_WIDTH: i32 = 30;
+/// The entrance, in seconds: the name of the list fades, and the jobs come in
+/// from the edge one after another, quickly enough that the whole thing has
+/// landed before anyone has finished standing up.
+const TODO_HEAD_FADE: f64 = 0.5;
+const TODO_ROW_FADE: f64 = 0.45;
+const TODO_ROW_STAGGER: f64 = 0.08;
+const TODO_ROW_DELAY: f64 = 0.1;
+/// How far a job slides, and from which side.
+const TODO_ROW_SLIDE: i32 = 10;
+/// What a finished job fades to by the bottom of the list. Not to nothing: it
+/// is still worth seeing that it was done, just not worth reading twice.
+const TODO_DONE_FADE: f64 = 0.65;
+
+/// Everything the corner shows, as one value that can be compared with the
+/// last one: it is repainted when it differs and not otherwise.
+///
+/// The four are deliberately kept apart, because two of them are facts about
+/// *this list right now* and two are not. `hidden` exists so the rows can
+/// account for themselves; `today` is a fact about the day, and the panel
+/// draws a line between the two rather than letting a number sit next to rows
+/// it does not describe.
+#[derive(Clone, Default, PartialEq, Eq)]
+struct Corner {
+    list: String,
+    jobs: Vec<Chore>,
+    hidden: u32,
+    today: u32,
+}
+
+impl Corner {
+    fn nothing_to_show(&self) -> bool {
+        self.jobs.is_empty()
+    }
+
+    /// Whether there is genuinely nothing left to do -- not one open job on
+    /// the list, on the page or off it.
+    fn clear(&self) -> bool {
+        self.hidden == 0 && self.jobs.iter().all(|job| job.done)
+    }
+}
+
+/// One row of the corner. Mostly jobs, and at most one line of arithmetic.
+#[derive(Clone, PartialEq, Eq)]
+enum Line {
+    Job(Chore),
+    /// The open jobs that did not fit. Furniture, not a job: it is drawn in
+    /// the branches' own grey, and it is never the bright first line.
+    More(u32),
+}
+
+/// The rows, in the order they are drawn: the open jobs, then the count of the
+/// ones that did not fit, then the finished ones.
+///
+/// The marker goes where the jobs it stands for would have gone, and it does
+/// not cost a job its place -- `show = 5` means five jobs, not four jobs and a
+/// note about the rest.
+fn lines_of(jobs: &[Chore], hidden: u32) -> Vec<Line> {
+    let open = jobs.iter().take_while(|job| !job.done).count();
+    let mut lines: Vec<Line> = jobs[..open].iter().cloned().map(Line::Job).collect();
+    if hidden > 0 {
+        lines.push(Line::More(hidden));
+    }
+    lines.extend(jobs[open..].iter().cloned().map(Line::Job));
+    lines
+}
+
+/// The line under the rule, or `None` when the day has nothing to say yet.
+///
+/// A corner that opened with *0 done today* would be nagging somebody who has
+/// not stood up yet, so the day only speaks once it has something to report.
+/// It leads with the word `today` on purpose: the subject is set before the
+/// number arrives, and a number that has already been told what it counts
+/// cannot be read as a count of the rows above it.
+/// Comes back with the line and the byte the green starts at: the subject is
+/// grey like the header, and the score is the same green the finished jobs are
+/// struck through in, so the eye joins the two without a word being spent on it.
+fn day_line(today: u32, clear: bool) -> Option<(String, usize)> {
+    /// What "today · " measures, so the green starts after it rather than at
+    /// a byte someone counted by hand.
+    const SUBJECT: &str = "today · ";
+    match (clear, today) {
+        (false, 0) => None,
+        (false, 1) => Some((format!("{SUBJECT}1 job done"), SUBJECT.len())),
+        (false, n) => Some((format!("{SUBJECT}{n} jobs done"), SUBJECT.len())),
+        // An empty list is worth saying outright. "0 to go" is the same fact
+        // told as an absence, and this is the one moment the corner gets to be
+        // pleased with somebody -- so the whole line is green, not just a
+        // number in it.
+        (true, 0) => Some(("list clear".to_string(), 0)),
+        (true, n) => Some((format!("list clear · {n} today"), 0)),
+    }
+}
+
+/// The green the finished jobs are drawn in, as Pango wants it: sixteen bits a
+/// channel, which is `#4ade80` with each byte carried into both halves.
+const DONE_RGB: (u16, u16, u16) = (0x4a4a, 0xdede, 0x8080);
+
+/// The list in the corner: the one thing on this page that is not about the
+/// break itself.
+///
+/// The page says stand up. This says what to do once you have -- which is the
+/// difference between a break spent standing in the kitchen wondering, and a
+/// break with the bins out at the end of it. It is read off a to-do list kept
+/// somewhere else entirely, and it is read-only: ticking a job off from the
+/// laptop you have just been sent away from would be a lie the page has no way
+/// of checking, and the list is one tap away on the phone in your hand.
+///
+/// Built empty and filled when the hub answers, because the page goes up
+/// before anything has been asked. Every page carries one, on every monitor:
+/// which screen you are looking at when you decide to get up is not something
+/// this can know.
+struct Todo {
+    root: gtk::Box,
+    header: gtk::Label,
+    /// One per job, in the order the list came in. Rebuilt only when the
+    /// number of jobs changes, which within one break it does not.
+    limbs: RefCell<Vec<Limb>>,
+    /// The hairline between the list and the day. Everything below it is about
+    /// you rather than about the rows, and the rule is what says so.
+    rule: gtk::Box,
+    /// The day's count, under the rule.
+    foot: gtk::Label,
+    /// What was last painted, so a status that has not moved is not repainted.
+    last: RefCell<Vec<Line>>,
+    /// And the last day line, for the same reason.
+    said: RefCell<Option<(String, usize)>>,
+    /// Whether the entrance has been played on this page.
+    dealt: Cell<bool>,
+    /// Zero on a page rebuilt mid-break by `insist`, which must come back with
+    /// the list already there rather than dealing it out again.
+    arrival: f64,
+}
+
+/// One line: the branch, and the words.
+struct Limb {
+    row: gtk::Box,
+    glyph: gtk::Label,
+    job: gtk::Label,
+}
+
+impl Todo {
+    fn new(arrival: f64) -> Self {
+        let root = gtk::Box::new(gtk::Orientation::Vertical, TODO_GAP);
+        root.set_halign(gtk::Align::Start);
+        root.set_valign(gtk::Align::Start);
+        root.set_margin_start(TODO_INSET);
+        root.set_margin_top(TODO_INSET);
+        // Nothing to say until the hub says it, and an empty box would still
+        // take the click-through space in the corner.
+        root.set_visible(false);
+
+        let header = gtk::Label::new(None);
+        header.add_css_class("tea-todo-list");
+        header.set_halign(gtk::Align::Start);
+        header.set_margin_bottom(TODO_HEAD_GAP);
+        root.append(&header);
+
+        // Built with the rest and shown only when the day has something to
+        // report: a page that grew a rule halfway through a break would be
+        // moving furniture around somebody who is trying to rest.
+        let rule = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        rule.add_css_class("tea-todo-rule");
+        rule.set_halign(gtk::Align::Start);
+        rule.set_size_request(TODO_RULE_WIDTH, 1);
+        rule.set_margin_top(TODO_FOOT_GAP);
+        rule.set_visible(false);
+        root.append(&rule);
+
+        let foot = gtk::Label::new(None);
+        foot.add_css_class("tea-todo-day");
+        foot.set_halign(gtk::Align::Start);
+        foot.set_margin_top(TODO_FOOT_GAP - 3);
+        foot.set_visible(false);
+        root.append(&foot);
+
+        Self {
+            root,
+            header,
+            rule,
+            foot,
+            limbs: RefCell::new(Vec::new()),
+            last: RefCell::new(Vec::new()),
+            said: RefCell::new(None),
+            dealt: Cell::new(false),
+            arrival,
+        }
+    }
+
+    /// Put the list up, or bring what is up to date.
+    ///
+    /// The first call of a break deals the lines out; every call after it
+    /// repaints the ones whose status has moved and leaves the rest completely
+    /// alone. Nothing here re-orders anything: a panel that re-sorted itself as
+    /// you ticked things off would move the next job out from under the eye
+    /// reading it.
+    fn show(&self, corner: &Corner) {
+        if corner.nothing_to_show() {
+            self.root.set_visible(false);
+            return;
+        }
+
+        let lines = lines_of(&corner.jobs, corner.hidden);
+        let mut limbs = self.limbs.borrow_mut();
+        // True on the first list of a break, on a page built to replace one
+        // that already had it, and on the one other occasion the row count can
+        // move: the last job the page had no room for being ticked off
+        // elsewhere, which takes the marker away with it.
+        if limbs.len() != lines.len() {
+            for limb in limbs.drain(..) {
+                self.root.remove(&limb.row);
+            }
+            self.last.borrow_mut().clear();
+            for _ in &lines {
+                let row = gtk::Box::new(gtk::Orientation::Horizontal, TODO_LIMB_GAP);
+                row.set_halign(gtk::Align::Start);
+                let glyph = gtk::Label::new(None);
+                glyph.add_css_class("tea-todo-limb");
+                let job = gtk::Label::new(None);
+                job.add_css_class("tea-todo-job");
+                job.set_halign(gtk::Align::Start);
+                job.set_xalign(0.0);
+                job.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                job.set_max_width_chars(TODO_WIDTH);
+                row.append(&glyph);
+                row.append(&job);
+                // Ahead of the rule and the day, which are the last two
+                // children and have to stay that way -- and behind the header,
+                // which `None` here would put the first job above.
+                let after: &gtk::Widget = match limbs.last() {
+                    Some(limb) => limb.row.upcast_ref(),
+                    None => self.header.upcast_ref(),
+                };
+                self.root.insert_child_after(&row, Some(after));
+                limbs.push(Limb { row, glyph, job });
+            }
+        }
+
+        self.header.set_text(&corner.list);
+        self.root.set_visible(true);
+
+        let mut last = self.last.borrow_mut();
+        let dealt = self.dealt.replace(true);
+        let finished = lines.iter().filter(|line| matches!(line, Line::Job(job) if job.done)).count();
+        let mut done_so_far = 0;
+        for (i, (limb, line)) in limbs.iter().zip(&lines).enumerate() {
+            let fade = match line {
+                Line::Job(job) if job.done => {
+                    let dim = fade_of(done_so_far, finished);
+                    done_so_far += 1;
+                    dim
+                }
+                _ => 1.0,
+            };
+            let moved = last.get(i) != Some(line);
+            if moved {
+                paint_line(limb, line, i == 0, i + 1 == lines.len(), fade);
+            }
+            // A job going green while you are out of the room is the one thing
+            // this panel does that is worth catching the eye on the way back.
+            // Only ever the line that changed, and only once it is already up:
+            // a fade on every line every ten seconds is a flicker in the corner
+            // of a page whose whole job is to be restful.
+            if moved && dealt && matches!(line, Line::Job(job) if job.done) {
+                animate_in(&limb.row, 0.25, 0, 0.0);
+            }
+        }
+        last.clone_from(&lines);
+
+        // And the day, below the rule, where nothing claims to be counting the
+        // rows above it.
+        let day = day_line(corner.today, corner.clear());
+        let mut said = self.said.borrow_mut();
+        if *said != day {
+            self.rule.set_visible(day.is_some());
+            self.foot.set_visible(day.is_some());
+            if let Some((line, green)) = &day {
+                self.foot.set_text(line);
+                let attrs = gtk::pango::AttrList::new();
+                let (r, g, b) = DONE_RGB;
+                let mut colour = gtk::pango::AttrColor::new_foreground(r, g, b);
+                colour.set_start_index(*green as u32);
+                attrs.insert(colour);
+                self.foot.set_attributes(Some(&attrs));
+                // Somebody has just ticked something off while the page was
+                // up: worth the same quarter-second the line itself gets.
+                if dealt {
+                    animate_in(&self.foot, 0.25, 0, 0.0);
+                }
+            }
+            said.clone_from(&day);
+        }
+
+        if !dealt {
+            animate_in(&self.header, self.arrival.min(TODO_HEAD_FADE), 0, 0.0);
+            for (i, limb) in limbs.iter().enumerate() {
+                slide_in(
+                    &limb.row,
+                    self.arrival.min(TODO_ROW_FADE),
+                    Slide::Left(TODO_ROW_SLIDE),
+                    TODO_ROW_DELAY + TODO_ROW_STAGGER * i as f64,
+                );
+            }
+            // The day arrives after the last job, as the closing beat.
+            let after = TODO_ROW_DELAY + TODO_ROW_STAGGER * limbs.len() as f64;
+            animate_in(&self.rule, self.arrival.min(TODO_ROW_FADE), 0, after);
+            animate_in(&self.foot, self.arrival.min(TODO_ROW_FADE), 0, after);
+        }
+    }
+}
+
+/// How far the `nth` of `total` finished jobs has faded. The first one done is
+/// full strength and the last is [`TODO_DONE_FADE`] of it, so a list read from
+/// the top gets quieter as it gets older.
+fn fade_of(nth: usize, total: usize) -> f64 {
+    if total <= 1 {
+        return 1.0;
+    }
+    let share = nth as f64 / (total - 1) as f64;
+    1.0 - (1.0 - TODO_DONE_FADE) * share
+}
+
+/// One line, in the state it is in: the branch it hangs off, what it says, and
+/// whether it has been struck through.
+fn paint_line(limb: &Limb, line: &Line, first: bool, last: bool, fade: f64) {
+    // The last line closes the branch. Nothing else says "and that is the whole
+    // list" as cheaply as one character.
+    limb.glyph.set_text(match last {
+        true => "└─",
+        false => "├─",
+    });
+
+    limb.job.remove_css_class("next");
+    limb.job.remove_css_class("done");
+    limb.job.remove_css_class("more");
+
+    let attrs = gtk::pango::AttrList::new();
+    match line {
+        // Not a job, and it must not look like one: the branches' own grey, no
+        // strike, and never the bright first line even when it is first.
+        Line::More(n) => {
+            limb.job.set_text(&format!("{n} more"));
+            limb.job.add_css_class("more");
+        }
+        Line::Job(job) => {
+            limb.job.set_text(&job.summary);
+            // Only the first line is bright, and only while it is still to do:
+            // it is the one you would pick, and the page has exactly one thing
+            // to draw an eye that is supposed to be leaving the screen.
+            if job.done {
+                limb.job.add_css_class("done");
+            } else if first {
+                limb.job.add_css_class("next");
+            }
+
+            // The strike and the fade go on as text attributes rather than as
+            // widget opacity, because opacity is what the entrance animates --
+            // a line dimmed that way would brighten back to full the moment
+            // anything faded it in.
+            if job.done {
+                attrs.insert(gtk::pango::AttrInt::new_strikethrough(true));
+                if fade < 1.0 {
+                    attrs.insert(gtk::pango::AttrInt::new_foreground_alpha(
+                        (fade * u16::MAX as f64) as u16,
+                    ));
+                }
+            }
+        }
+    }
+    limb.job.set_attributes(Some(&attrs));
 }
 
 fn draw_meter(cr: &gtk::cairo::Context, width: i32, height: i32, walk: Walk, palette: &Palette) {
@@ -1805,13 +2253,20 @@ fn build_page(
     column.set_halign(gtk::Align::Center);
     column.set_valign(gtk::Align::Center);
 
+    // The list hangs in the top-left corner, pinned to it rather than packed
+    // into the column: the countdown has to land on the exact centre of the
+    // screen, and nothing over here is allowed to have an opinion about that.
+    let todo = Rc::new(Todo::new(arrival));
+
     // Bottom to top: the dark, the ring around where the clock will be, the
-    // blast over both, and the words over everything.
+    // blast over both, the words over everything -- and the list in the corner
+    // over all of it, where nothing else ever reaches.
     let layers = gtk::Overlay::new();
     layers.set_child(Some(&stage.backdrop));
     layers.add_overlay(&stage.ring);
     layers.add_overlay(&stage.burst);
     layers.add_overlay(&column);
+    layers.add_overlay(&todo.root);
     win.set_child(Some(&layers));
 
     // The words arrive after the blast has passed over them. Every
@@ -1880,8 +2335,13 @@ fn build_page(
         walk,
         motion: moving,
         meter,
+        todo,
         dial: state,
     };
+    // A page built mid-break -- by `insist`, or by a monitor arriving -- is
+    // born with the list already on it. Only a page built before the hub has
+    // answered gets it later, through `chores_seen`.
+    page.todo.show(&face.corner);
     if let Some(ask) = &face.ask {
         ask_for_the_tag(&page, ask);
     }
@@ -2672,6 +3132,108 @@ fn draw_celebration(
     }
 }
 
+/// The corner's arithmetic: what the rows say, and what the day says.
+#[cfg(test)]
+mod corner_tests {
+    use super::*;
+
+    fn open(summary: &str) -> Chore {
+        Chore { summary: summary.into(), done: false }
+    }
+
+    fn done(summary: &str) -> Chore {
+        Chore { summary: summary.into(), done: true }
+    }
+
+    fn words(lines: &[Line]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| match line {
+                Line::Job(job) => job.summary.clone(),
+                Line::More(n) => format!("{n} more"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn what_did_not_fit_is_counted_where_it_would_have_gone() {
+        // Four open jobs shown of six, and one done: the marker sits between
+        // them, so four lines plus two more is the six the list actually has.
+        let lines = lines_of(&[open("Luft"), open("Vacuum"), done("Make tea")], 2);
+        assert_eq!(words(&lines), ["Luft", "Vacuum", "2 more", "Make tea"]);
+    }
+
+    #[test]
+    fn a_list_that_fits_says_nothing_about_what_it_is_hiding() {
+        let lines = lines_of(&[open("Luft"), done("Make tea")], 0);
+        assert_eq!(words(&lines), ["Luft", "Make tea"], "no marker when nothing is hidden");
+    }
+
+    #[test]
+    fn the_marker_closes_the_branch_when_it_is_last() {
+        // Nothing done, so the count of what did not fit is the final row --
+        // and the row that has to draw the corner of the tree.
+        let lines = lines_of(&[open("Luft")], 3);
+        assert_eq!(words(&lines), ["Luft", "3 more"]);
+        assert!(matches!(lines.last(), Some(Line::More(3))));
+    }
+
+    #[test]
+    fn the_day_says_nothing_until_it_has_something_to_say() {
+        // A corner opening with "0 done today" is a nag at somebody who has
+        // not stood up yet.
+        assert_eq!(day_line(0, false), None);
+    }
+
+    #[test]
+    fn the_day_names_its_subject_before_its_number() {
+        let (line, green) = day_line(1, false).unwrap();
+        assert_eq!(line, "today · 1 job done");
+        // The green starts at the number, not at the word that says what the
+        // number is about.
+        assert_eq!(&line[green..], "1 job done");
+
+        let (line, _) = day_line(4, false).unwrap();
+        assert_eq!(line, "today · 4 jobs done");
+    }
+
+    #[test]
+    fn an_empty_list_is_said_outright() {
+        assert_eq!(day_line(0, true).unwrap(), ("list clear".to_string(), 0));
+        assert_eq!(day_line(3, true).unwrap(), ("list clear · 3 today".to_string(), 0));
+    }
+
+    #[test]
+    fn a_list_is_only_clear_when_nothing_is_hiding_behind_it() {
+        let cleared = Corner { jobs: vec![done("Make tea")], ..Corner::default() };
+        assert!(cleared.clear());
+
+        // Two open jobs off the bottom of the page. The visible rows are all
+        // struck through and the list is emphatically not clear.
+        let more = Corner { jobs: vec![done("Make tea")], hidden: 2, ..Corner::default() };
+        assert!(!more.clear());
+
+        let working = Corner { jobs: vec![open("Luft"), done("Make tea")], ..Corner::default() };
+        assert!(!working.clear());
+    }
+
+    #[test]
+    fn nothing_to_show_is_not_the_same_as_a_clear_list() {
+        // No answer from the hub yet. The panel stays away entirely rather
+        // than congratulating anybody on an empty list.
+        let quiet = Corner::default();
+        assert!(quiet.nothing_to_show());
+    }
+
+    #[test]
+    fn finished_jobs_fade_down_the_list_but_never_out() {
+        assert_eq!(fade_of(0, 1), 1.0, "the only one done is at full strength");
+        assert_eq!(fade_of(0, 3), 1.0);
+        assert_eq!(fade_of(2, 3), TODO_DONE_FADE, "the oldest is the faintest");
+        assert!(fade_of(1, 3) > TODO_DONE_FADE);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3099,6 +3661,36 @@ fn ease_out_back(t: f64) -> f64 {
 /// Driven by the frame clock rather than a timer, so it stays smooth when the
 /// machine is busy and costs nothing when it is not being drawn.
 fn animate_in(widget: &impl IsA<gtk::Widget>, seconds: f64, slide: i32, delay: f64) {
+    slide_in(widget, seconds, Slide::Down(slide), delay);
+}
+
+/// Which way a thing arrives from. The page's own furniture drops in; the list
+/// in the corner comes in from the edge it is pinned to, which reads as the
+/// page dealing it out rather than as another thing falling from the top.
+#[derive(Clone, Copy)]
+enum Slide {
+    Down(i32),
+    Left(i32),
+}
+
+impl Slide {
+    fn distance(self) -> i32 {
+        match self {
+            Slide::Down(px) | Slide::Left(px) => px,
+        }
+    }
+
+    /// Where the widget sits, `share` of the way back to nothing.
+    fn margins(self, share: f64) -> (i32, i32) {
+        let offset = (self.distance() as f64 * share).round() as i32;
+        match self {
+            Slide::Down(_) => (offset, 0),
+            Slide::Left(_) => (0, offset),
+        }
+    }
+}
+
+fn slide_in(widget: &impl IsA<gtk::Widget>, seconds: f64, slide: Slide, delay: f64) {
     let widget = widget.as_ref().clone();
     // Switched off: arrive already arrived, with no frame of opacity 0 first.
     if seconds <= 0.0 {
@@ -3106,8 +3698,10 @@ fn animate_in(widget: &impl IsA<gtk::Widget>, seconds: f64, slide: i32, delay: f
         return;
     }
     widget.set_opacity(0.0);
-    if slide != 0 {
-        widget.set_margin_top(slide);
+    if slide.distance() != 0 {
+        let (top, start) = slide.margins(1.0);
+        widget.set_margin_top(top);
+        widget.set_margin_start(start);
     }
 
     let started = Cell::new(0i64);
@@ -3122,8 +3716,10 @@ fn animate_in(widget: &impl IsA<gtk::Widget>, seconds: f64, slide: i32, delay: f
         let eased = 1.0 - (1.0 - progress).powi(3);
 
         w.set_opacity(eased);
-        if slide != 0 {
-            w.set_margin_top((slide as f64 * (1.0 - eased)).round() as i32);
+        if slide.distance() != 0 {
+            let (top, start) = slide.margins(1.0 - eased);
+            w.set_margin_top(top);
+            w.set_margin_start(start);
         }
 
         if progress >= 1.0 { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }

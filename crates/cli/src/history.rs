@@ -66,6 +66,11 @@ pub enum Event {
         /// still throughout. Absent from older files.
         #[serde(default)]
         cheated: bool,
+        /// Jobs ticked off the to-do list while the page was up. Absent from
+        /// files written before the list existed, and read as none -- which is
+        /// true of them: nothing was showing a list to tick anything off.
+        #[serde(default)]
+        chores: u32,
         /// How many it wanted. Zero means steps were not part of this break.
         needed: u32,
         gate: Gate,
@@ -186,7 +191,7 @@ mod tests {
     use super::*;
 
     fn a_break() -> Event {
-        Event::Break { t: 1_756_819_511, len: 300, steps: 47, moved: 0, cheated: false, needed: 20, gate: Gate::Walked, long: false }
+        Event::Break { t: 1_756_819_511, len: 300, steps: 47, moved: 0, cheated: false, needed: 20, chores: 2, gate: Gate::Walked, long: false }
     }
 
     #[test]

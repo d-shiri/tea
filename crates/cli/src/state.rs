@@ -64,6 +64,10 @@ struct Saved {
     steps_today: u32,
     #[serde(default)]
     cheats_today: u32,
+    #[serde(default)]
+    chores_today: u32,
+    #[serde(default)]
+    worked_today_ms: u64,
 }
 
 /// What today came to: how much of this actually worked.
@@ -83,10 +87,17 @@ pub struct Tally {
     pub credited: u32,
     /// Steps walked during breaks, where a walk is counted at all.
     pub steps: u32,
+    /// Work banked towards breaks today, in milliseconds. Idle pauses and time
+    /// off are not in it: this is the clock the timer actually ran.
+    pub worked_ms: u64,
     /// Breaks in which the steps arrived and the phone said `still` the whole
     /// time: the count came from a hand, not a walk. Kept because shame is a
     /// feature.
     pub cheats: u32,
+    /// Jobs ticked off the list while a break was on screen. The number that
+    /// says what the breaks were actually *for*: everything else here counts
+    /// what the timer did, and this counts what came of it.
+    pub chores: u32,
 }
 
 impl Tally {
@@ -256,6 +267,8 @@ impl Store {
                 credited: saved.credited_today,
                 steps: saved.steps_today,
                 cheats: saved.cheats_today,
+                chores: saved.chores_today,
+                worked_ms: saved.worked_today_ms,
             },
         })
     }
@@ -290,6 +303,8 @@ impl Store {
             credited_today: tally.credited,
             steps_today: tally.steps,
             cheats_today: tally.cheats,
+            chores_today: tally.chores,
+            worked_today_ms: tally.worked_ms,
         };
 
         if let Err(e) = self.write(&saved) {

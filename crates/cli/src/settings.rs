@@ -286,8 +286,23 @@ pub fn show(cfg: &Config, file: &FileConfig, path: &Path) {
 
     section(&s, "the tag");
     let nfc = &file.nfc;
+    // Said whether or not the tag is on, because the list is not part of the
+    // gate: a page can perfectly well show jobs and end on its own countdown.
+    let jobs = || {
+        if nfc.shows_chores() {
+            field(
+                &s,
+                "jobs",
+                &nfc.chores.cap().to_string(),
+                &format!("from {}, shown in the corner of the page", nfc.chores.entity.trim()),
+            );
+        } else if let Some(why) = nfc.chores_misconfigured() {
+            field(&s, "jobs", "off", &why);
+        }
+    };
     if !nfc.on() {
         field(&s, "nfc", "off", "breaks end when the countdown does");
+        jobs();
     } else {
         field(&s, "nfc", "on", "the page waits to be released by a scan");
         if nfc.asks() {
@@ -331,6 +346,7 @@ pub fn show(cfg: &Config, file: &FileConfig, path: &Path) {
         } else {
             field(&s, "gives up after", &human(nfc.grace.0), "then hands the desk back anyway");
         }
+        jobs();
         field(&s, "page says", "", &format!("\"{}\"", nfc.prompt));
         // Never the token itself: this output gets pasted into terminals that
         // other people read over.

@@ -125,6 +125,10 @@ pub struct Report {
     pub postponed_today: u32,
     /// Breaks today in which the steps came from a hand.
     pub cheats_today: u32,
+    /// Jobs ticked off the to-do list during today's breaks.
+    pub chores_today: u32,
+    /// Work banked today, in whole minutes.
+    pub worked_today_min: u64,
     /// Why tea is asleep, when it is, in the words it printed.
     pub why_off: Option<String>,
 }
@@ -149,6 +153,8 @@ impl Report {
             "credited_today": self.credited_today,
             "postponed_today": self.postponed_today,
             "cheats_today": self.cheats_today,
+            "chores_today": self.chores_today,
+            "worked_today_min": self.worked_today_min,
         });
         // Timestamps as ISO 8601 rather than seconds: that is what the hub's
         // own `as_datetime` and every timestamp card expect, and a number
@@ -235,6 +241,16 @@ impl Report {
                 ),
             ),
             (
+                format!("sensor.{name}_chores_today"),
+                number(
+                    u64::from(self.chores_today),
+                    "jobs",
+                    "total_increasing",
+                    "tea chores today",
+                    "mdi:clipboard-check-outline",
+                ),
+            ),
+            (
                 format!("sensor.{name}_cheats_today"),
                 number(
                     u64::from(self.cheats_today),
@@ -242,6 +258,16 @@ impl Report {
                     "total_increasing",
                     "tea nice tries",
                     "mdi:emoticon-devil-outline",
+                ),
+            ),
+            (
+                format!("sensor.{name}_worked_today"),
+                number(
+                    self.worked_today_min,
+                    "min",
+                    "total_increasing",
+                    "tea worked today",
+                    "mdi:briefcase-clock",
                 ),
             ),
         ]
@@ -621,6 +647,8 @@ mod tests {
             breaks_today: 4,
             postponed_today: 1,
             cheats_today: 2,
+            chores_today: 3,
+            worked_today_min: 250,
             ..Report::default()
         };
         let bodies = report.bodies("sensor.desk", "desk");
@@ -641,6 +669,8 @@ mod tests {
         assert_eq!(of("sensor.desk_breaks_today")["state"], "4");
         assert_eq!(of("sensor.desk_postpones_today")["state"], "1");
         assert_eq!(of("sensor.desk_cheats_today")["state"], "2");
+        assert_eq!(of("sensor.desk_worked_today")["state"], "250");
+        assert_eq!(of("sensor.desk_worked_today")["attributes"]["state_class"], "total_increasing");
         // Between breaks the binary sensor is off, whatever else is going on.
         let working = Report { state: State::Warning, ..Report::default() };
         let bodies = working.bodies("sensor.tea", "tea");

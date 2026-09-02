@@ -107,6 +107,18 @@ pub struct Snooze {
     pub left: u32,
 }
 
+/// One line of the list the page shows in the corner: what it says, and
+/// whether it has been ticked off.
+///
+/// Here rather than beside the hub code for the same reason [`Snooze`] is: it
+/// is part of what a blocker is told, and the engine must not have to know
+/// where a to-do list comes from.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Chore {
+    pub summary: String,
+    pub done: bool,
+}
+
 /// Whatever actually stands between you and the keyboard.
 ///
 /// The scheduler decides *when*; this decides *how*. Keeping it a trait is what
@@ -162,6 +174,22 @@ pub trait Blocker {
     /// half will not close by itself. Same contract as `steps_seen`: called
     /// every tick, must do nothing when nothing has changed.
     fn motion_seen(&mut self, _secs: u32, _needed: u32, _lost: bool) {}
+    /// What to do with the break: a handful of jobs off a list kept elsewhere,
+    /// and which of them are already done. `list` is what the list is called,
+    /// for the page to put at the top of them.
+    ///
+    /// `hidden` is how many open jobs did not fit, so the page can say so
+    /// rather than leave a count somewhere else contradicting the rows; and
+    /// `today` is how many jobs have been ticked off during today's breaks,
+    /// this one included, which is a fact about the day rather than about the
+    /// rows and has to be shown as one.
+    ///
+    /// Not part of the gate and never called as if it were: an empty slice
+    /// means there is nothing to show, which is what a page with no list
+    /// configured, and a page whose hub has not answered yet, both look like.
+    /// Called on every tick like the three above, so it must do nothing when
+    /// nothing has changed.
+    fn chores_seen(&mut self, _list: &str, _jobs: &[Chore], _hidden: u32, _today: u32) {}
     /// The steps arrived and the phone said `still` the whole time: the count
     /// came from a hand, not a walk. `busted` goes back to false the moment
     /// the phone reports moving, so the page can stop teasing. Called every

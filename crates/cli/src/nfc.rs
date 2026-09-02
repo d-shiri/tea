@@ -18,6 +18,7 @@ use gtk::glib;
 use gtk::prelude::*;
 use serde::{Deserialize, de};
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -28,6 +29,15 @@ use std::time::Duration;
 const REQUEST_CAP: usize = 8 * 1024;
 /// A connection that has not finished asking by now never will.
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the list gets to answer before the poll gives up on it for this
+/// beat. Much shorter than the gate's own timeout on purpose: nothing waits on
+/// this, and a slow hub must cost the page a stale panel rather than a late
+/// step count.
+const JOBS_TIMEOUT: u32 = 2;
+/// How often the list is actually asked for, whatever the poll interval is.
+/// Household jobs do not change between one second and the next, and this is a
+/// service call rather than a state lookup.
+const JOBS_EVERY: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -66,6 +76,9 @@ pub struct Config {
     pub steps: Steps,
     /// And a third: the phone's own word that its owner is on the move.
     pub moving: Moving,
+    /// Not part of the gate at all: what to *do* with the break, read off a
+    /// to-do list on the same hub.
+    pub chores: Chores,
     /// Where the tag's URL actually points, when tea is not reached directly.
     ///
     /// Nothing has to listen on your network for a tag to work: a reverse proxy
@@ -87,6 +100,7 @@ impl Default for Config {
             home_assistant: HomeAssistant::default(),
             steps: Steps::default(),
             moving: Moving::default(),
+            chores: Chores::default(),
         }
     }
 }
@@ -135,6 +149,43 @@ impl Config {
     /// from the hub like the steps, and needs it for the same reason.
     pub fn counts_moving(&self) -> bool {
         self.on() && self.asks() && self.moving.on()
+    }
+
+    /// Whether the page shows a list of jobs to do with the break.
+    ///
+    /// Read off the same hub as everything else here, so asking is a
+    /// precondition -- but *not* gated on the tag: a list is something the page
+    /// shows, not something that holds the desk, and it is perfectly reasonable
+    /// to want the jobs without wanting the walk.
+    pub fn shows_chores(&self) -> bool {
+        self.asks() && self.chores.on()
+    }
+
+    /// Why the list is on in the file and off in the process, if it is.
+    pub fn chores_misconfigured(&self) -> Option<String> {
+        if self.chores.mode != Mode::On {
+            return None;
+        }
+        if !self.asks() {
+            return Some(
+                "nfc.chores is on, but no hub is being watched — the list comes from Home \
+                 Assistant (nfc.home_assistant.url and entity)"
+                    .into(),
+            );
+        }
+        if self.chores.entity.trim().is_empty() {
+            return Some("nfc.chores is on, but nfc.chores.entity is empty — no list to read".into());
+        }
+        if !self.chores.entity.trim().starts_with("todo.") {
+            return Some(format!(
+                "nfc.chores.entity {:?} is not a to-do list — it wants a `todo.` entity",
+                self.chores.entity.trim()
+            ));
+        }
+        if self.chores.show == 0 {
+            return Some("nfc.chores.show is 0, so the page has no room for the list".into());
+        }
+        None
     }
 
     /// Seconds of moving this break asks for, scaled from the steps when the
@@ -287,6 +338,53 @@ impl Walk {
     }
 }
 
+/// One line of the list: what it says, and whether it has been ticked off.
+///
+/// The `uid` never reaches the page. It is how a job keeps its identity between
+/// one poll and the next -- summaries are not unique, and "Clean windows" done
+/// is the same row as "Clean windows" not done, not a new one.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Job {
+    pub uid: String,
+    pub summary: String,
+    pub done: bool,
+    /// When it was ticked off, as the hub wrote it -- an ISO 8601 instant, in
+    /// UTC, which is why it can be sorted as a string. Empty on anything still
+    /// to do. Never shown: it decides *which* finished jobs are worth one of
+    /// the few lines the corner has, and nothing else.
+    pub completed: String,
+}
+
+/// The list as the page shows it: which list, and the handful of lines from it
+/// that fit in the corner.
+///
+/// Fixed at the first answer of a break and not re-sorted afterwards. A panel
+/// that re-ordered itself the moment you ticked something off would move the
+/// next job out from under your eye while you were reading it; the statuses
+/// keep updating in place, which is the part worth seeing.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Board {
+    /// What the page draws above the jobs.
+    pub title: String,
+    pub jobs: Vec<Job>,
+    /// Open jobs the page has no room for. The panel says so outright -- a
+    /// corner that showed four of six and let a number elsewhere claim six
+    /// is a corner whose arithmetic does not check out, and the reader is the
+    /// one left doing the subtraction.
+    pub hidden: u32,
+}
+
+impl Board {
+    /// What the page is told: the words and the ticks, without the identities
+    /// that only the poll has any use for.
+    pub fn chores(&self) -> Vec<tea_core::Chore> {
+        self.jobs
+            .iter()
+            .map(|job| tea_core::Chore { summary: job.summary.clone(), done: job.done })
+            .collect()
+    }
+}
+
 /// The third half of the gate: the phone's own word that its owner is on the
 /// move, from Android's activity recognition rather than from a step count.
 ///
@@ -366,6 +464,74 @@ impl Moving {
         self.states.iter().any(|s| s.trim().eq_ignore_ascii_case(state))
     }
 }
+
+/// What to do with the five minutes, read off a list you keep elsewhere.
+///
+/// The rest of this module is about *making* you get up. This is the only part
+/// that is about what to do once you have: a break page that says "stand up"
+/// and nothing else leaves you standing in the kitchen wondering why. A
+/// Home Assistant to-do list is already where the household jobs live, already
+/// editable from the phone in your hand, and already synced -- so the page
+/// borrows it rather than inventing a list of its own.
+///
+/// Read-only, deliberately. Ticking a job off from a laptop you have been sent
+/// away from is a lie the page would have to take at face value, and the list
+/// is one tap away on the phone you are holding while you do the job.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Chores {
+    /// Off by default, like everything else that talks to the hub.
+    pub mode: Mode,
+    /// The list, `todo.<name>`. Any `todo` entity will do.
+    pub entity: String,
+    /// What to call it on the page. Empty means the entity id, which is what
+    /// the list is actually called and nobody's idea of a heading.
+    pub title: String,
+    /// How many jobs the page has room for. The list itself can be as long as
+    /// you like; this is what fits in the corner of a break page without
+    /// becoming a second thing to read. Whatever does not fit is counted on a
+    /// line of its own, so the rows never quietly disagree with a total.
+    pub show: u32,
+}
+
+impl Default for Chores {
+    fn default() -> Self {
+        Self { mode: Mode::Off, entity: String::new(), title: String::new(), show: 8 }
+    }
+}
+
+impl Chores {
+    pub fn on(&self) -> bool {
+        self.mode == Mode::On && !self.entity.trim().is_empty() && self.show > 0
+    }
+
+    /// What the page puts above the jobs.
+    pub fn header(&self) -> String {
+        match self.title.trim() {
+            "" => self.entity.trim().to_string(),
+            title => title.to_string(),
+        }
+    }
+
+    /// The list, capped: never more than the page can hold, and never so many
+    /// that a hub with a hundred jobs on it hands back a page of them.
+    pub fn cap(&self) -> usize {
+        self.show.clamp(1, CHORES_CAP) as usize
+    }
+}
+
+/// The most lines the corner will ever show, whatever the config says. Past
+/// this the panel stops being a glance and starts being homework.
+const CHORES_CAP: u32 = 10;
+
+/// How many of the page's lines are held back for jobs already done.
+///
+/// Without this a long enough list of things still to do fills every line, and
+/// a panel that can only ever show work outstanding is a nag. Two struck-through
+/// lines at the bottom are what makes it a record of a day going well -- and
+/// they are the freshest two, because a job ticked off this morning is worth
+/// seeing and one from last Tuesday is not.
+const CHORES_DONE_SLOTS: usize = 2;
 
 /// Seconds of moving asked for per step asked for, on auto. A hundred steps
 /// at walking pace is about a minute; half of that is what the phone has to
@@ -650,6 +816,14 @@ pub struct Link {
     walk: Cell<Walk>,
     /// And how the time on your feet has got on, the same way.
     motion: Cell<Motion>,
+    /// The jobs the page is showing, or `None` when nothing has answered yet.
+    /// A `RefCell` rather than a `Cell` only because a list of strings is not
+    /// `Copy`; it is the same one-way letterbox as the rest.
+    board: RefCell<Option<Board>>,
+    /// How many jobs have gone from open to done since this break's page went
+    /// up. Read by the tick that ends the break, and reset by the poll when
+    /// there is no break to count against.
+    chores_done: Cell<u32>,
     /// Whether whatever watches for scans could be reached, last time it was
     /// asked. `None` until something has looked. A break cannot be gated on a
     /// signal that has no way of arriving, so this decides whether the gate
@@ -664,6 +838,8 @@ impl Link {
             scan: Cell::new(false),
             walk: Cell::new(Walk::default()),
             motion: Cell::new(Motion::default()),
+            board: RefCell::new(None),
+            chores_done: Cell::new(0),
             reachable: Cell::new(None),
         })
     }
@@ -695,6 +871,28 @@ impl Link {
     pub fn motion(&self) -> Option<Motion> {
         let motion = self.motion.get();
         (motion.needed > 0).then_some(motion)
+    }
+
+    /// Called from the poll: this is the list, as the page should show it.
+    pub fn post_board(&self, board: Option<Board>) {
+        *self.board.borrow_mut() = board;
+    }
+
+    /// The jobs to show, or `None` when there is no list or nothing has
+    /// answered yet -- which the page treats the same way, by showing nothing.
+    pub fn board(&self) -> Option<Board> {
+        self.board.borrow().clone()
+    }
+
+    /// Called from the poll: this many jobs have been ticked off since the
+    /// page went up.
+    pub fn post_chores_done(&self, done: u32) {
+        self.chores_done.set(done);
+    }
+
+    /// How many jobs this break has to its name.
+    pub fn chores_done(&self) -> u32 {
+        self.chores_done.get()
     }
 
     pub fn set_reachable(&self, ok: bool) {
@@ -1108,6 +1306,11 @@ struct Ask {
     /// The activity sensor, when the break also wants time on your feet.
     /// Same beat, same hub, third question.
     gait: Option<Gait>,
+    /// The to-do list, when the page is showing one. Not on the same beat: it
+    /// is asked every few of them, because a list of household jobs does not
+    /// change between one second and the next, and it is the one question here
+    /// that costs the hub a service call rather than a state lookup.
+    jobs: Option<Jobs>,
     link: Rc<Link>,
     /// The entity's value when this break started. A *change* is the scan;
     /// comparing against a remembered value rather than a clock means the two
@@ -1168,6 +1371,131 @@ struct Gait {
     complained: Cell<bool>,
     misses: Cell<u32>,
     lost: Cell<bool>,
+}
+
+/// The list on the wall: which list, how much of it fits, and what this break
+/// has seen happen to it.
+struct Jobs {
+    entity: String,
+    /// What the page calls the list, which is the entity id unless the config
+    /// says otherwise. Kept apart from `entity`, which is what the *hub* calls
+    /// it and what every error message here has to name.
+    title: String,
+    path: String,
+    /// The service call's body, built once: it never changes.
+    body: String,
+    cap: usize,
+    /// Beats between questions, and how many are left before the next one.
+    /// Zero means ask on this one, so the first beat of a break always asks.
+    every: u32,
+    due: Cell<u32>,
+    /// What the page is showing, fixed at the first answer of this break. The
+    /// rows never move afterwards; only their statuses do.
+    board: RefCell<Option<Board>>,
+    /// Every job that was still open when the page went up -- the whole list,
+    /// not just the rows on screen. A job ticked off during a break counts
+    /// whether or not there was room to show it.
+    open: RefCell<HashSet<String>>,
+    /// Which of those have since been ticked off. A set rather than a counter
+    /// because a job can be ticked, un-ticked and ticked again inside five
+    /// minutes, and that is one job done.
+    credited: RefCell<HashSet<String>>,
+    /// Complain once per outage, like everything else that talks to the hub.
+    complained: Cell<bool>,
+}
+
+impl Jobs {
+    /// Whether this beat is one that asks.
+    fn asks_now(&self) -> bool {
+        match self.due.get() {
+            0 => {
+                self.due.set(self.every.saturating_sub(1));
+                true
+            }
+            left => {
+                self.due.set(left - 1);
+                false
+            }
+        }
+    }
+
+    /// The first answer of a break decides what the page shows for the rest of
+    /// it: the open jobs in the list's own order, then the ones most recently
+    /// ticked off, and no more of either than fits.
+    ///
+    /// The two are not simply concatenated and cut. A couple of lines are held
+    /// back for finished jobs whenever there are any, so a list with eleven
+    /// things still on it does not fill the corner with nothing but work; and
+    /// when there is barely anything left to do, the finished ones take the
+    /// slack rather than leaving the page half empty.
+    fn settle_on(&self, items: Vec<Job>) -> Board {
+        let (open, mut done): (Vec<Job>, Vec<Job>) = items.iter().cloned().partition(|j| !j.done);
+        *self.open.borrow_mut() = open.iter().map(|j| j.uid.clone()).collect();
+
+        // Freshest first. The hub writes these as UTC instants, so the string
+        // order is the time order, and one without a stamp at all sorts last
+        // rather than jumping the queue.
+        done.sort_by(|a, b| b.completed.cmp(&a.completed));
+
+        let held = done.len().min(CHORES_DONE_SLOTS);
+        let open_rows = open.len().min(self.cap.saturating_sub(held));
+        let done_rows = done.len().min(self.cap - open_rows);
+
+        Board {
+            title: self.title.clone(),
+            hidden: (open.len() - open_rows) as u32,
+            jobs: open.into_iter().take(open_rows).chain(done.into_iter().take(done_rows)).collect(),
+        }
+    }
+
+    /// How many open jobs are not on the page, worked out again from the list
+    /// as it stands now.
+    ///
+    /// Recounted on every answer rather than fixed with the rows: tick a job
+    /// off from the phone and it may well be one of the ones that never fit,
+    /// and a marker still saying "2 more" when there is one left is the same
+    /// sum failing to check out, one row lower down.
+    fn hidden_now(&self, board: &Board, items: &[Job]) -> u32 {
+        let shown: HashSet<&str> = board.jobs.iter().map(|job| job.uid.as_str()).collect();
+        items.iter().filter(|job| !job.done && !shown.contains(job.uid.as_str())).count() as u32
+    }
+
+    /// Every answer after the first: the rows stay where they are, and only
+    /// what is ticked off changes. A job deleted from the list mid-break keeps
+    /// the row it had, saying what it last said -- the alternative is a panel
+    /// that closes a gap under the line you were reading.
+    fn restate(&self, board: &mut Board, items: &[Job]) {
+        for row in &mut board.jobs {
+            if let Some(now) = items.iter().find(|j| j.uid == row.uid) {
+                row.done = now.done;
+                row.summary.clone_from(&now.summary);
+                row.completed.clone_from(&now.completed);
+            }
+        }
+    }
+
+    /// How many of the jobs that were open when the page went up have been
+    /// ticked off since. Counted across the whole list, and never uncounted:
+    /// a job ticked off and then re-opened was still done.
+    fn tally(&self, items: &[Job]) -> u32 {
+        let open = self.open.borrow();
+        let mut credited = self.credited.borrow_mut();
+        for job in items.iter().filter(|j| j.done) {
+            if open.contains(&job.uid) && credited.insert(job.uid.clone()) {
+                println!("[ha]    ticked off — {}", job.summary);
+            }
+        }
+        credited.len() as u32
+    }
+
+    /// Between breaks there is nothing to show and nothing to count.
+    fn forget(&self) {
+        *self.board.borrow_mut() = None;
+        self.open.borrow_mut().clear();
+        self.credited.borrow_mut().clear();
+        self.due.set(0);
+        self.complained.set(false);
+    }
 }
 
 impl Gait {
@@ -1342,6 +1670,26 @@ pub fn watch(cfg: &Config, link: Rc<Link>) -> Result<Watch, String> {
             lost: Cell::new(false),
         }
     });
+    let jobs = cfg.shows_chores().then(|| {
+        let entity = cfg.chores.entity.trim().to_string();
+        // A beat of its own, worked out from the poll's: at the default two
+        // seconds that is every fifth one, and never less than every one.
+        let every = (JOBS_EVERY.as_secs_f64() / ha.every().as_secs_f64()).round() as u32;
+        Jobs {
+            path: format!("{base}/api/services/todo/get_items?return_response=true"),
+            body: json_body(&entity),
+            cap: cfg.chores.cap(),
+            title: cfg.chores.header(),
+            entity,
+            every: every.max(1),
+            due: Cell::new(0),
+            board: RefCell::new(None),
+            open: RefCell::new(HashSet::new()),
+            credited: RefCell::new(HashSet::new()),
+            complained: Cell::new(false),
+        }
+    });
+
     // Posted before the first poll so that a page built in the same tick knows
     // there is a walk in this break, rather than showing no badge for a second
     // and then growing one.
@@ -1365,6 +1713,7 @@ pub fn watch(cfg: &Config, link: Rc<Link>) -> Result<Watch, String> {
         entity,
         legs,
         gait,
+        jobs,
         link,
         baseline: RefCell::new(None),
         busy: Cell::new(false),
@@ -1394,6 +1743,13 @@ pub fn watch(cfg: &Config, link: Rc<Link>) -> Result<Watch, String> {
                 gait.forget();
                 ask.link.post_motion(gait.motion());
             }
+            // The next break gets the list as it stands then, and starts
+            // counting what gets ticked off from zero.
+            if let Some(jobs) = &ask.jobs {
+                jobs.forget();
+                ask.link.post_board(None);
+                ask.link.post_chores_done(0);
+            }
             return glib::ControlFlow::Continue;
         }
         poll(Rc::clone(&ask));
@@ -1419,6 +1775,7 @@ pub fn probe(cfg: &HomeAssistant, entity: &str) -> Result<String, String> {
         entity,
         legs: None,
         gait: None,
+        jobs: None,
         link: Link::new(),
         baseline: RefCell::new(None),
         busy: Cell::new(false),
@@ -1453,15 +1810,41 @@ fn poll(ask: Rc<Ask>) {
             Some(gait) => Some(fetch(&ask, &gait.path, &gait.entity).await),
             None => None,
         };
+        // Last, and not on every beat: the gate's three questions are what the
+        // break actually turns on, and none of them should queue behind a list
+        // of household jobs.
+        let jobs = match &ask.jobs {
+            Some(jobs) if jobs.asks_now() => Some(ask_jobs(&ask, jobs).await),
+            _ => None,
+        };
         ask.busy.set(false);
-        settle(&ask, tag, steps, moving);
+        settle(&ask, tag, steps, moving, jobs);
     });
 }
 
 async fn fetch(ask: &Ask, path: &str, entity: &str) -> Result<String, String> {
+    let raw = send(ask, path, None, ASK_TIMEOUT).await?;
+    read_state(&raw, entity)
+}
+
+/// The list, as the hub currently has it.
+///
+/// A service call rather than a state lookup, because a to-do entity's state is
+/// the *number* of things left on it and nothing else: the lines themselves only
+/// come back from `todo.get_items`, which is a POST with a body and a reply
+/// worth parsing. Given its own timeout, and a short one -- this is decoration
+/// on a page that has a job to do, and it must never be what the poll is
+/// waiting for.
+async fn ask_jobs(ask: &Ask, jobs: &Jobs) -> Result<Vec<Job>, String> {
+    let raw = send(ask, &jobs.path, Some(&jobs.body), JOBS_TIMEOUT).await?;
+    read_jobs(&raw, &jobs.entity)
+}
+
+/// One request, on the main loop. A `body` makes it a POST.
+async fn send(ask: &Ask, path: &str, body: Option<&str>, timeout: u32) -> Result<Vec<u8>, String> {
     let client = gio::SocketClient::new();
     client.set_tls(ask.tls);
-    client.set_timeout(ASK_TIMEOUT);
+    client.set_timeout(timeout);
 
     let conn = client
         .connect_to_host_future(&format!("{}:{}", ask.host, ask.port), ask.port)
@@ -1470,11 +1853,23 @@ async fn fetch(ask: &Ask, path: &str, entity: &str) -> Result<String, String> {
 
     // HTTP/1.0 on purpose: it cannot be answered with a chunked body, which
     // saves unpicking one for the sake of a forty-byte string.
-    let request = format!(
-        "GET {} HTTP/1.0\r\nHost: {}\r\nAuthorization: Bearer {}\r\n\
-         Accept: application/json\r\nConnection: close\r\n\r\n",
-        path, ask.host, ask.token
-    );
+    let request = match body {
+        None => format!(
+            "GET {} HTTP/1.0\r\nHost: {}\r\nAuthorization: Bearer {}\r\n\
+             Accept: application/json\r\nConnection: close\r\n\r\n",
+            path, ask.host, ask.token
+        ),
+        Some(body) => format!(
+            "POST {} HTTP/1.0\r\nHost: {}\r\nAuthorization: Bearer {}\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\
+             Accept: application/json\r\nConnection: close\r\n\r\n{}",
+            path,
+            ask.host,
+            ask.token,
+            body.len(),
+            body
+        ),
+    };
     conn.output_stream()
         .write_all_future(request.into_bytes(), glib::Priority::DEFAULT)
         .await
@@ -1494,7 +1889,7 @@ async fn fetch(ask: &Ask, path: &str, entity: &str) -> Result<String, String> {
     }
     let _ = conn.close(gio::Cancellable::NONE);
 
-    read_state(&raw, entity)
+    Ok(raw)
 }
 
 /// Pull the entity's state out of the reply, and say something useful about
@@ -1527,12 +1922,100 @@ fn read_state(raw: &[u8], entity: &str) -> Result<String, String> {
         .map_err(|e| format!("cannot read the answer about {entity}: {e}"))
 }
 
+/// Pull the lines out of a `todo.get_items` reply.
+///
+/// The shape is `{"service_response": {"<entity>": {"items": [...]}}}`, and
+/// each item is a `summary` and a `status` of `needs_action` or `completed`.
+/// Anything else in there -- due dates, descriptions, the completion time -- is
+/// deliberately dropped: the page shows a line and whether it is struck
+/// through, and a field nobody reads is a field that can go wrong.
+fn read_jobs(raw: &[u8], entity: &str) -> Result<Vec<Job>, String> {
+    let text = String::from_utf8_lossy(raw);
+    let (head, body) = text
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| "Home Assistant answered with something that is not HTTP".to_string())?;
+    let status = head.lines().next().unwrap_or("").split_whitespace().nth(1).unwrap_or("");
+
+    match status {
+        "200" => {}
+        "401" | "403" => {
+            return Err("Home Assistant refused the token (nfc.home_assistant.token)".into());
+        }
+        // What a service call says about an entity that is not there, or is
+        // not a list at all. The state lookup's 404 never applies here: the
+        // service exists whether or not your entity does.
+        "400" => {
+            return Err(format!(
+                "Home Assistant will not read {entity:?} as a to-do list (nfc.chores.entity)"
+            ));
+        }
+        "404" => {
+            return Err(
+                "Home Assistant has no todo.get_items service — the To-do list integration is \
+                 not set up on that hub"
+                    .into(),
+            );
+        }
+        other => return Err(format!("Home Assistant answered {other}")),
+    }
+
+    #[derive(Deserialize)]
+    struct Reply {
+        service_response: std::collections::HashMap<String, Items>,
+    }
+    #[derive(Deserialize)]
+    struct Items {
+        items: Vec<Item>,
+    }
+    #[derive(Deserialize)]
+    struct Item {
+        #[serde(default)]
+        uid: String,
+        #[serde(default)]
+        summary: String,
+        #[serde(default)]
+        status: String,
+        #[serde(default)]
+        completed: String,
+    }
+
+    let reply: Reply = serde_json::from_str(body.trim())
+        .map_err(|e| format!("cannot read the list {entity}: {e}"))?;
+    // Keyed by entity id, and asked for by entity id, so this is the only key
+    // in it -- but taking whatever is there rather than insisting on the name
+    // costs nothing and survives a hub that answers about `Todo.X`.
+    let items = reply
+        .service_response
+        .into_values()
+        .next()
+        .ok_or_else(|| format!("Home Assistant said nothing about {entity}"))?;
+
+    Ok(items
+        .items
+        .into_iter()
+        .filter(|item| !item.summary.trim().is_empty())
+        .map(|item| Job {
+            // A list kept somewhere that hands out no uids would have every
+            // row looking like every other one. The summary is the fallback
+            // identity: not unique in principle, unique in every real list.
+            uid: match item.uid.trim().is_empty() {
+                true => item.summary.trim().to_string(),
+                false => item.uid,
+            },
+            summary: item.summary.trim().to_string(),
+            done: item.status.trim() == "completed",
+            completed: item.completed,
+        })
+        .collect())
+}
+
 /// What one answer means for the break on screen.
 fn settle(
     ask: &Ask,
     answer: Result<String, String>,
     steps: Option<Result<String, String>>,
     moving: Option<Result<String, String>>,
+    jobs: Option<Result<Vec<Job>, String>>,
 ) {
     settle_tag(ask, answer);
     if let (Some(legs), Some(answer)) = (&ask.legs, steps) {
@@ -1541,6 +2024,74 @@ fn settle(
     if let (Some(gait), Some(answer)) = (&ask.gait, moving) {
         settle_motion(ask, gait, answer);
     }
+    if let (Some(list), Some(answer)) = (&ask.jobs, jobs) {
+        settle_jobs(ask, list, answer);
+    }
+}
+
+/// What came back about the list.
+///
+/// Nothing in here touches `reachable`, and that is the whole design: the list
+/// is not part of the gate. A hub that cannot be asked about it must not end a
+/// break early, must not hold one open, and must not put an error on a page
+/// whose one job is to be restful. It costs a line on stderr, once, and the
+/// panel keeps saying whatever it last said.
+fn settle_jobs(ask: &Ask, jobs: &Jobs, answer: Result<Vec<Job>, String>) {
+    let items = match answer {
+        Ok(items) => items,
+        Err(why) => {
+            if !jobs.complained.replace(true) {
+                eprintln!("tea: cannot read the to-do list — {why}");
+            }
+            return;
+        }
+    };
+    if jobs.complained.replace(false) {
+        println!("[ha]    the to-do list is answering again");
+    }
+
+    let mut held = jobs.board.borrow_mut();
+    let mut board = match held.as_mut() {
+        // Every answer after the first: the rows stay put, the statuses do not.
+        Some(board) => {
+            jobs.restate(board, &items);
+            board.clone()
+        }
+        // The first of this break decides what the page shows for the rest of
+        // it -- and what "ticked off during this break" is measured against.
+        None => {
+            let board = jobs.settle_on(items.clone());
+            *held = Some(board.clone());
+            board
+        }
+    };
+    board.hidden = jobs.hidden_now(&board, &items);
+    if let Some(held) = held.as_mut() {
+        held.hidden = board.hidden;
+    }
+    drop(held);
+
+    ask.link.post_chores_done(jobs.tally(&items));
+    ask.link.post_board((!board.jobs.is_empty()).then_some(board));
+}
+
+/// The service call's body. Hand-built rather than pulled through `serde_json`
+/// for one field, and the entity is quoted properly because an entity id from
+/// a config file is not a thing to paste into JSON unescaped.
+fn json_body(entity: &str) -> String {
+    let mut out = String::from("{\"entity_id\":\"");
+    for c in entity.chars() {
+        match c {
+            '"' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if (c as u32) < 0x20 => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out.push_str("\"}");
+    out
 }
 
 /// The moving half. Every answer in a moving state is worth one beat of the
@@ -2065,6 +2616,7 @@ mod tests {
             path: "/api/states/tag.hall".into(),
             token: "t".into(),
             entity: "tag.hall".into(),
+            jobs: None,
             legs: None,
             gait: None,
             link: Rc::clone(link),
@@ -2395,7 +2947,7 @@ mod tests {
     fn the_walk_is_counted_from_where_the_break_found_you() {
         let link = link_with(Desk { breaking: true, ..Desk::default() });
         let ask = asking_with_legs(&link, 20);
-        let steps = |value: &str| settle(&ask, Ok("9:00".into()), Some(Ok(value.into())), None);
+        let steps = |value: &str| settle(&ask, Ok("9:00".into()), Some(Ok(value.into())), None, None);
 
         // The daily total when the page went up: no walk yet, but the page has
         // to know a walk is being asked for.
@@ -2423,16 +2975,16 @@ mod tests {
     fn a_step_sensor_with_nothing_to_say_is_not_zero_steps() {
         let link = link_with(Desk { breaking: true, ..Desk::default() });
         let ask = asking_with_legs(&link, 20);
-        settle(&ask, Ok("9:00".into()), Some(Ok("4812.0".into())), None);
+        settle(&ask, Ok("9:00".into()), Some(Ok("4812.0".into())), None, None);
         // The catch-up sync, and then a walk that actually counts.
-        settle(&ask, Ok("9:00".into()), Some(Ok("4820.0".into())), None);
-        settle(&ask, Ok("9:00".into()), Some(Ok("4840.0".into())), None);
+        settle(&ask, Ok("9:00".into()), Some(Ok("4820.0".into())), None, None);
+        settle(&ask, Ok("9:00".into()), Some(Ok("4840.0".into())), None, None);
         assert!(link.walk().unwrap().done());
 
         // A phone that has not synced, an integration reloading: the walk
         // already counted stands, and the hub is still perfectly reachable.
         for quiet in ["unknown", "unavailable", ""] {
-            settle(&ask, Ok("9:00".into()), Some(Ok(quiet.into())), None);
+            settle(&ask, Ok("9:00".into()), Some(Ok(quiet.into())), None, None);
             assert!(link.walk().unwrap().done(), "{quiet:?} must not undo the walk");
         }
         assert_eq!(link.reachable(), Some(true));
@@ -2450,17 +3002,17 @@ mod tests {
         // Same debounce as the tag, and it has to be the *steps* that decide
         // it: the tag is answering perfectly well throughout.
         for _ in 1..MISSES_BEFORE_LOST {
-            settle(&ask, Ok("9:00".into()), gone(), None);
+            settle(&ask, Ok("9:00".into()), gone(), None, None);
             assert_ne!(link.reachable(), Some(false), "one miss is not an outage");
         }
-        settle(&ask, Ok("9:00".into()), gone(), None);
+        settle(&ask, Ok("9:00".into()), gone(), None, None);
         assert_eq!(link.reachable(), Some(false));
 
         // A tag that keeps answering must not paint over a walk that can never
         // be counted -- the gate still has a half that will not close.
         settle_tag(&ask, Ok("9:01".into()));
         assert_eq!(link.reachable(), Some(false), "the steps are still gone");
-        settle(&ask, Ok("9:01".into()), Some(Ok("4812.0".into())), None);
+        settle(&ask, Ok("9:01".into()), Some(Ok("4812.0".into())), None, None);
         assert_eq!(link.reachable(), Some(true), "and back when both answer");
     }
 
@@ -2670,5 +3222,310 @@ mod tests {
             assert_eq!(h.mode, Mode::Off, "{word}");
         }
         assert!(toml::from_str::<Holder>("mode = \"maybe\"").is_err());
+    }
+}
+
+/// The list in the corner: what gets read off the hub, what gets shown, and
+/// what counts as a job done during a break.
+#[cfg(test)]
+mod chore_tests {
+    use super::*;
+
+    /// A reply in exactly the shape a hub sends one.
+    fn reply(items: &str) -> Vec<u8> {
+        format!(
+            "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n\
+             {{\"changed_states\":[],\"service_response\":{{\"todo.jobs\":{{\"items\":[{items}]}}}}}}"
+        )
+        .into_bytes()
+    }
+
+    fn open(uid: &str, summary: &str) -> Job {
+        Job { uid: uid.into(), summary: summary.into(), done: false, completed: String::new() }
+    }
+
+    fn done(uid: &str, summary: &str) -> Job {
+        finished(uid, summary, "2026-09-02T09:00:00+00:00")
+    }
+
+    fn finished(uid: &str, summary: &str, at: &str) -> Job {
+        Job { uid: uid.into(), summary: summary.into(), done: true, completed: at.into() }
+    }
+
+    fn list(cap: usize) -> Jobs {
+        Jobs {
+            entity: "todo.jobs".into(),
+            title: "todo.jobs".into(),
+            path: "/api/services/todo/get_items?return_response=true".into(),
+            body: json_body("todo.jobs"),
+            cap,
+            every: 5,
+            due: Cell::new(0),
+            board: RefCell::new(None),
+            open: RefCell::new(HashSet::new()),
+            credited: RefCell::new(HashSet::new()),
+            complained: Cell::new(false),
+        }
+    }
+
+    #[test]
+    fn a_reply_becomes_lines() {
+        let raw = reply(
+            "{\"summary\":\"Luft\",\"uid\":\"a\",\"status\":\"needs_action\"},\
+             {\"summary\":\"Clean windows\",\"uid\":\"b\",\"status\":\"completed\",\
+              \"completed\":\"2026-09-02T15:06:15+00:00\"}",
+        );
+        let jobs = read_jobs(&raw, "todo.jobs").unwrap();
+        assert_eq!(
+            jobs,
+            vec![open("a", "Luft"), finished("b", "Clean windows", "2026-09-02T15:06:15+00:00")]
+        );
+    }
+
+    #[test]
+    fn a_line_with_no_words_on_it_is_not_a_line() {
+        // A list somebody has just pressed "add" on, and not typed into yet.
+        let raw = reply("{\"summary\":\"  \",\"uid\":\"a\",\"status\":\"needs_action\"}");
+        assert!(read_jobs(&raw, "todo.jobs").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_hub_that_says_no_says_why() {
+        let refused = b"HTTP/1.0 401 Unauthorized\r\n\r\n{}".to_vec();
+        assert!(read_jobs(&refused, "todo.jobs").unwrap_err().contains("token"));
+        // A service call about an entity that is not a list, which is the
+        // typo everybody makes: `sensor.` where `todo.` was meant.
+        let wrong = b"HTTP/1.0 400 Bad Request\r\n\r\n{}".to_vec();
+        assert!(read_jobs(&wrong, "sensor.oops").unwrap_err().contains("nfc.chores.entity"));
+        // And a hub with no to-do integration at all.
+        let missing = b"HTTP/1.0 404 Not Found\r\n\r\n{}".to_vec();
+        assert!(read_jobs(&missing, "todo.jobs").unwrap_err().contains("To-do list integration"));
+    }
+
+    fn shown(board: &Board) -> Vec<&str> {
+        board.jobs.iter().map(|j| j.summary.as_str()).collect()
+    }
+
+    #[test]
+    fn the_page_shows_the_open_ones_first_and_no_more_than_it_can_hold() {
+        let jobs = list(4);
+        let board = jobs.settle_on(vec![
+            finished("a", "Make tea", "2026-09-02T09:00:00+00:00"),
+            open("b", "Luft"),
+            finished("c", "Clean windows", "2026-09-02T11:00:00+00:00"),
+            open("d", "Tidy up"),
+        ]);
+        // Open ones in the list's own order, then the finished ones, freshest
+        // first -- the windows were done after the tea.
+        assert_eq!(shown(&board), ["Luft", "Tidy up", "Clean windows", "Make tea"]);
+    }
+
+    #[test]
+    fn a_long_list_still_finds_room_for_what_has_been_done() {
+        // Six things to do and five lines: without a slot held back, the page
+        // would be nothing but work, which is the opposite of the point.
+        let jobs = list(5);
+        let board = jobs.settle_on(vec![
+            open("a", "Luft"),
+            open("b", "Tidy up the Kitchen"),
+            open("c", "Vacuum"),
+            open("d", "Clean dish rack"),
+            open("e", "Clean Mirros"),
+            open("f", "Clean bathroom"),
+            finished("g", "Make tea", "2026-09-02T15:15:29+00:00"),
+        ]);
+        assert_eq!(
+            shown(&board),
+            ["Luft", "Tidy up the Kitchen", "Vacuum", "Clean dish rack", "Make tea"]
+        );
+    }
+
+    #[test]
+    fn a_list_with_little_left_on_it_fills_up_with_what_was_done() {
+        // The other way round: one job left, and the rest of the corner given
+        // over to the afternoon's work rather than left blank.
+        let jobs = list(4);
+        let board = jobs.settle_on(vec![
+            open("a", "Luft"),
+            finished("b", "Bins", "2026-09-02T09:00:00+00:00"),
+            finished("c", "Windows", "2026-09-02T10:00:00+00:00"),
+            finished("d", "Dishes", "2026-09-02T11:00:00+00:00"),
+            finished("e", "Tea", "2026-09-02T12:00:00+00:00"),
+        ]);
+        assert_eq!(shown(&board), ["Luft", "Tea", "Dishes", "Windows"]);
+    }
+
+    #[test]
+    fn a_list_of_nothing_but_work_still_fills_the_page() {
+        let jobs = list(3);
+        let board = jobs.settle_on(vec![open("a", "Luft"), open("b", "Bins"), open("c", "Tea")]);
+        assert_eq!(shown(&board), ["Luft", "Bins", "Tea"], "no finished jobs, no slots held");
+    }
+
+    #[test]
+    fn the_page_can_say_what_the_list_is_called() {
+        let mut chores = Chores { entity: "todo.physical_todos".into(), ..Chores::default() };
+        assert_eq!(chores.header(), "todo.physical_todos", "the entity id unless told otherwise");
+        chores.title = "  While you are up  ".into();
+        assert_eq!(chores.header(), "While you are up");
+    }
+
+    #[test]
+    fn the_rows_do_not_move_when_something_is_ticked_off() {
+        let jobs = list(5);
+        let mut board = jobs.settle_on(vec![open("a", "Luft"), open("b", "Tidy up")]);
+        // The hub now has them the other way round, one of them done, and one
+        // brand new. None of that is allowed to move a line out from under the
+        // eye that is reading it.
+        jobs.restate(
+            &mut board,
+            &[open("c", "Vacuum"), done("a", "Luft"), open("b", "Tidy up")],
+        );
+        assert_eq!(
+            board.jobs.iter().map(|j| (j.summary.as_str(), j.done)).collect::<Vec<_>>(),
+            [("Luft", true), ("Tidy up", false)]
+        );
+    }
+
+    #[test]
+    fn a_job_deleted_mid_break_keeps_its_line() {
+        let jobs = list(5);
+        let mut board = jobs.settle_on(vec![open("a", "Luft"), open("b", "Tidy up")]);
+        jobs.restate(&mut board, &[open("b", "Tidy up")]);
+        assert_eq!(board.jobs.len(), 2, "closing the gap would shuffle the page");
+        assert_eq!(board.jobs[0].summary, "Luft");
+    }
+
+    #[test]
+    fn only_what_was_open_when_the_page_went_up_counts() {
+        let jobs = list(5);
+        let items = vec![open("a", "Luft"), open("b", "Tidy up"), done("c", "Make tea")];
+        jobs.settle_on(items.clone());
+        // Nothing has happened yet, and the job that was already done when the
+        // break started is not this break's doing.
+        assert_eq!(jobs.tally(&items), 0);
+
+        let after = vec![done("a", "Luft"), open("b", "Tidy up"), done("c", "Make tea")];
+        assert_eq!(jobs.tally(&after), 1);
+        // Asked again on the next beat: still one job, not two.
+        assert_eq!(jobs.tally(&after), 1);
+    }
+
+    #[test]
+    fn a_job_ticked_off_and_put_back_was_still_done() {
+        let jobs = list(5);
+        let items = vec![open("a", "Luft")];
+        jobs.settle_on(items.clone());
+        assert_eq!(jobs.tally(&[done("a", "Luft")]), 1);
+        assert_eq!(jobs.tally(&items), 1, "un-ticking is not un-doing");
+    }
+
+    #[test]
+    fn what_did_not_fit_is_counted_and_recounted() {
+        let jobs = list(3);
+        let items = vec![
+            open("a", "Luft"),
+            open("b", "Tidy up"),
+            open("c", "Vacuum"),
+            open("d", "Bins"),
+            finished("e", "Make tea", "2026-09-02T09:00:00+00:00"),
+        ];
+        let board = jobs.settle_on(items.clone());
+        // Two open jobs on the page, one line kept for the finished one, and
+        // two open jobs with nowhere to go -- which the page has to say.
+        assert_eq!(shown(&board), ["Luft", "Tidy up", "Make tea"]);
+        assert_eq!(board.hidden, 2);
+
+        // One of the two nobody could see is ticked off from the phone. The
+        // rows cannot change -- they are fixed for the break -- but a marker
+        // still saying "2 more" would be the same arithmetic failing again.
+        let after = vec![
+            open("a", "Luft"),
+            open("b", "Tidy up"),
+            open("c", "Vacuum"),
+            finished("d", "Bins", "2026-09-02T14:00:00+00:00"),
+            finished("e", "Make tea", "2026-09-02T09:00:00+00:00"),
+        ];
+        assert_eq!(jobs.hidden_now(&board, &after), 1);
+        assert_eq!(jobs.tally(&after), 1, "and it counts, page or no page");
+    }
+
+    #[test]
+    fn a_list_that_fits_hides_nothing() {
+        let jobs = list(8);
+        let board = jobs.settle_on(vec![open("a", "Luft"), finished("b", "Tea", "2026-09-02T09:00:00+00:00")]);
+        assert_eq!(board.hidden, 0);
+    }
+
+    #[test]
+    fn jobs_beyond_the_page_still_count() {
+        // Two lines of room, four jobs. Ticking off the one that never fit on
+        // screen is still a job done on a break.
+        let jobs = list(2);
+        let items =
+            vec![open("a", "Luft"), open("b", "Tidy up"), open("c", "Vacuum"), open("d", "Bins")];
+        jobs.settle_on(items.clone());
+        let after = vec![open("a", "Luft"), open("b", "Tidy up"), open("c", "Vacuum"), done("d", "Bins")];
+        assert_eq!(jobs.tally(&after), 1);
+    }
+
+    #[test]
+    fn the_list_is_asked_about_on_its_own_beat() {
+        let jobs = list(5);
+        // The first beat of a break always asks; the next four do not.
+        assert!(jobs.asks_now());
+        assert_eq!((0..4).filter(|_| jobs.asks_now()).count(), 0);
+        assert!(jobs.asks_now());
+    }
+
+    #[test]
+    fn a_break_that_has_ended_forgets_the_list() {
+        let jobs = list(5);
+        jobs.settle_on(vec![open("a", "Luft")]);
+        assert_eq!(jobs.tally(&[done("a", "Luft")]), 1);
+        jobs.forget();
+        assert!(jobs.board.borrow().is_none());
+        // And the next break starts from nothing, not from yesterday's one.
+        assert_eq!(jobs.tally(&[done("a", "Luft")]), 0);
+    }
+
+    #[test]
+    fn an_entity_id_cannot_break_out_of_the_body() {
+        assert_eq!(json_body("todo.jobs"), "{\"entity_id\":\"todo.jobs\"}");
+        assert_eq!(json_body("a\"b"), "{\"entity_id\":\"a\\\"b\"}");
+    }
+
+    #[test]
+    fn the_list_is_off_unless_there_is_a_hub_and_a_list() {
+        let mut cfg = Config { mode: Mode::On, ..Config::default() };
+        cfg.chores.mode = Mode::On;
+        cfg.chores.entity = "todo.jobs".into();
+        assert!(!cfg.shows_chores(), "no hub, no list");
+        assert!(cfg.chores_misconfigured().is_some());
+
+        cfg.home_assistant.url = "http://ha.example".into();
+        cfg.home_assistant.entity = "tag.hall".into();
+        assert!(cfg.shows_chores());
+        assert!(cfg.chores_misconfigured().is_none());
+
+        // The typo worth catching before it becomes an empty corner.
+        cfg.chores.entity = "sensor.jobs".into();
+        assert!(cfg.chores_misconfigured().unwrap().contains("to-do list"));
+
+        // And unlike the steps, the list does not need the tag: it holds
+        // nothing back, so there is nothing to be locked out of.
+        cfg.chores.entity = "todo.jobs".into();
+        cfg.mode = Mode::Off;
+        assert!(cfg.shows_chores(), "a list is not a gate");
+    }
+
+    #[test]
+    fn the_page_never_shows_more_than_it_can_hold() {
+        let mut chores = Chores { show: 500, ..Chores::default() };
+        assert_eq!(chores.cap(), CHORES_CAP as usize);
+        chores.show = 0;
+        assert_eq!(chores.cap(), 1, "clamped, not zero -- `show = 0` is off, not empty");
+        chores.show = 8;
+        assert_eq!(chores.cap(), 8, "eight is the default and well under the ceiling");
     }
 }

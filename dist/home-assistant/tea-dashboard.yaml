@@ -1,153 +1,146 @@
-# A dashboard for tea, ready to paste.
+# A dashboard for tea, ready to paste -- or to push:
 #
-# Settings → Dashboards → Add dashboard → "New dashboard from scratch". Open it,
-# pencil (top right) → ⋮ → "Raw configuration editor", replace everything with
-# this file, save.
+#   ./dist/home-assistant/push.py dashboard sensor.phone_daily_steps=sensor.<yours>_daily_steps
 #
-# Needs `publish = "on"` under [nfc.home_assistant] in tea's config. The
-# entities are named after `publish_entity`: with the default "sensor.tea" they
-# are the ones below. Two numbers are yours to adjust and marked as such.
+# By hand: Settings → Dashboards → Add dashboard → "New dashboard from scratch",
+# open it, pencil → ⋮ → "Raw configuration editor", paste, save.
+#
+# Needs `publish = "on"` under [nfc.home_assistant] in tea's config. The tea
+# entities are named after `publish_entity`; with the default "sensor.tea" they
+# are the ones below. Two entities are yours to fill in. One is the
+# phone's own daily step count, from the companion app -- what "steps today,
+# all of them" is measured against. The other is the to-do list the break page
+# reads, `todo.household` here:
+#
+#   ./dist/home-assistant/push.py dashboard \
+#       sensor.phone_daily_steps=sensor.<yours>_daily_steps \
+#       todo.household=todo.<yours>
+#
+# Six numbers and three pictures, on purpose. Each picture has one axis and one
+# kind of thing on it: steps against steps, breaks against days, jobs against
+# days. The list itself is the one card here you can act on.
 title: tea
 views:
   - title: tea
     path: tea
     icon: mdi:tea
     cards:
-      # What tea is doing right now, in a sentence.
-      - type: markdown
-        content: >-
-          {% set s = states('sensor.tea') %}
-          {% if s == 'break' %}
-          ## ☕ Break — the page lifts in {{ time_until(state_attr('sensor.tea', 'break_ends_at') | as_datetime) }}
-          {% elif s == 'waiting' %}
-          ## 🚶 Waiting for the walk — {{ state_attr('sensor.tea', 'steps_walked') }} of {{ state_attr('sensor.tea', 'steps_needed') }} steps
-          {% elif s == 'warning' %}
-          ## ⏳ Break in a moment
-          {% elif s == 'held' %}
-          ## 📞 A break is owed — held by a call
-          {% elif s == 'off' %}
-          ## 💤 Off — {{ state_attr('sensor.tea', 'why_off') }}
-          {% elif s == 'working' %}
-          ## ⌨️ Working — next break in {{ time_until(state_attr('sensor.tea', 'next_break_at') | as_datetime) }}
-          {% else %}
-          ## tea is not reporting
-          {% endif %}
-
-      # The clock, and the walk.
-      - type: horizontal-stack
-        cards:
-          - type: gauge
-            entity: sensor.tea_worked
-            name: Worked
-            unit: min
-            min: 0
-            max: 30            # ← your `work`, in minutes
-            needle: true
-            severity:
-              green: 0
-              yellow: 20
-              red: 27
-          - type: gauge
-            entity: sensor.tea_walk
-            name: This walk
-            unit: steps
-            min: 0
-            max: 100           # ← your `nfc.steps.count`
-            needle: true
-            severity:
-              red: 0
-              yellow: 50
-              green: 100
-
-      # Today.
+      # Today, in numbers.
       - type: horizontal-stack
         cards:
           - type: tile
             entity: sensor.tea_breaks_today
-            name: Breaks
+            name: Breaks today
             icon: mdi:coffee
             color: teal
           - type: tile
             entity: sensor.tea_steps_today
-            name: Steps walked
+            name: Steps in breaks
             icon: mdi:walk
             color: green
           - type: tile
-            entity: sensor.tea_postpones_today
-            name: Postponed
-            icon: mdi:timer-sand
+            entity: sensor.phone_daily_steps
+            name: Steps today, all of them
+            icon: mdi:shoe-print
+            color: grey
+          - type: tile
+            entity: sensor.tea_chores_today
+            name: Jobs done in breaks
+            icon: mdi:clipboard-check-outline
+            color: green
+          - type: tile
+            entity: sensor.tea_worked_today
+            name: Worked today
+            icon: mdi:briefcase-clock
+            color: blue
+
+      # Walking today: the steps taken in breaks, against all the steps the
+      # phone counted. Two rising lines, one axis, one unit.
+      - type: history-graph
+        title: Walking today
+        hours_to_show: 16
+        entities:
+          - entity: sensor.phone_daily_steps
+            name: All steps
+          - entity: sensor.tea_steps_today
+            name: In breaks
+
+      # Breaks, one bar a day, a month back.
+      - type: statistics-graph
+        title: Breaks per day
+        chart_type: bar
+        period: day
+        days_to_show: 30
+        stat_types:
+          - change
+        entities:
+          - entity: sensor.tea_breaks_today
+            name: Breaks
+
+      # The list the break page reads, live and tickable from here. tea only
+      # ever reads it: this card is the other end of that, and the tile beside
+      # it is the entity's own state -- how many jobs are still open.
+      - type: horizontal-stack
+        cards:
+          - type: tile
+            entity: todo.household
+            name: Still on the list
+            icon: mdi:format-list-checks
             color: amber
           - type: tile
-            entity: sensor.tea_cheats_today
-            name: Nice tries
-            icon: mdi:emoticon-devil-outline
-            color: red
+            entity: sensor.tea_chores_today
+            name: Done in breaks today
+            icon: mdi:clipboard-check-outline
+            color: green
+      - type: todo-list
+        entity: todo.household
 
-      # The day as a timeline: when the page was up, and the steps climbing.
-      - type: history-graph
-        title: Today
-        hours_to_show: 12
-        entities:
-          - entity: binary_sensor.tea_break
-            name: Break
-          - entity: sensor.tea_steps_today
-            name: Steps
-          - entity: sensor.tea_worked
-            name: Worked
-
-      # The month, one bar a day. Long-term statistics, so this survives the
-      # recorder purging the raw history.
+      # Jobs ticked off the to-do list during breaks, one bar a day. The same
+      # shape as the breaks above on purpose: a break taken and a job done are
+      # the two halves of the same question -- whether any of this is working.
       - type: statistics-graph
-        title: Steps walked, per day
+        title: Jobs done per day
         chart_type: bar
         period: day
         days_to_show: 30
         stat_types:
           - change
         entities:
-          - sensor.tea_steps_today
+          - entity: sensor.tea_chores_today
+            name: Jobs
 
-      - type: statistics-graph
-        title: Breaks and postpones, per day
-        chart_type: bar
-        period: day
-        days_to_show: 30
-        stat_types:
-          - change
-        entities:
-          - sensor.tea_breaks_today
-          - sensor.tea_postpones_today
-          - sensor.tea_cheats_today
-
-      # The small print.
-      - type: entities
-        title: Details
-        entities:
-          - entity: sensor.tea
-            name: State
-          - type: attribute
-            entity: sensor.tea
-            attribute: next_break_at
-            name: Next break at
-            format: time
-          - type: attribute
-            entity: sensor.tea
-            attribute: break_ends_at
-            name: Break ends at
-            format: time
-          - type: attribute
-            entity: sensor.tea
-            attribute: postpones_left
-            name: Postpones left
-          - type: attribute
-            entity: sensor.tea
-            attribute: tag_scanned
-            name: Tag scanned
-          - type: attribute
-            entity: sensor.tea
-            attribute: steps_needed
-            name: Steps asked for
-          - type: attribute
-            entity: sensor.tea
-            attribute: credited_today
-            name: Breaks credited for being away
+      # And the same numbers added up since tea started reporting.
+      - type: horizontal-stack
+        cards:
+          - type: statistic
+            entity: sensor.tea_breaks_today
+            name: Breaks, all time
+            stat_type: change
+            period:
+              rolling_window:
+                duration:
+                  days: 365
+          - type: statistic
+            entity: sensor.tea_steps_today
+            name: Steps in breaks, all time
+            stat_type: change
+            period:
+              rolling_window:
+                duration:
+                  days: 365
+          - type: statistic
+            entity: sensor.tea_chores_today
+            name: Jobs done, all time
+            stat_type: change
+            period:
+              rolling_window:
+                duration:
+                  days: 365
+          - type: statistic
+            entity: sensor.tea_worked_today
+            name: Worked, all time
+            stat_type: change
+            period:
+              rolling_window:
+                duration:
+                  days: 365

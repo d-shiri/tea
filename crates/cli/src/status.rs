@@ -152,6 +152,15 @@ pub fn show(cfg: Config, hours: &Hours, config_path: &std::path::Path, boottime:
             if today.steps > 0 {
                 parts.push(format!("{} steps walked", today.steps));
             }
+            if today.chores > 0 {
+                parts.push(match today.chores {
+                    1 => "1 job done".to_string(),
+                    n => format!("{n} jobs done"),
+                });
+            }
+            if today.worked_ms >= 60_000 {
+                parts.push(format!("{} worked", human(Duration::from_millis(today.worked_ms))));
+            }
             if today.cheats > 0 {
                 parts.push(format!("{} nice tries", today.cheats));
             }

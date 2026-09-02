@@ -295,7 +295,7 @@ const firstEvent = EVENTS.length ? Math.min(...EVENTS.map(e => e.t)) : DATA.gene
  *  skip a day or count one twice. */
 function byDay(events, since) {
   const rows = new Map();
-  const blank = k => ({ key: k, taken: 0, credited: 0, postponed: 0, steps: 0, walked: 0 });
+  const blank = k => ({ key: k, taken: 0, credited: 0, postponed: 0, steps: 0, walked: 0, chores: 0 });
   for (let t = noon(Math.max(since, firstEvent)); t <= DATA.generated + DAY / 2; t += DAY) {
     rows.set(dayKey(t), blank(dayKey(t)));
   }
@@ -303,7 +303,10 @@ function byDay(events, since) {
     const k = dayKey(e.t);
     if (!rows.has(k)) rows.set(k, blank(k));
     const r = rows.get(k);
-    if (e.kind === "break") { r.taken++; r.steps += e.steps || 0; if (e.needed > 0) r.walked++; }
+    if (e.kind === "break") {
+      r.taken++; r.steps += e.steps || 0; r.chores += e.chores || 0;
+      if (e.needed > 0) r.walked++;
+    }
     else if (e.kind === "credited") r.credited++;
     else if (e.kind === "postpone") r.postponed++;
   }
@@ -965,8 +968,17 @@ function renderTiles() {
     walked.length ? " avg" : "",
     walked.length ? "over " + num(walked.length) + " walked breaks" : "no walks counted in " + window_,
     sparkline(tail.map(r => r.walked ? Math.round(r.steps / r.walked) : 0), S.s3, SW, SH), 120));
+  const chores = brk.reduce((a, e) => a + (e.chores || 0), 0);
+  // Only worth a tile once there is a list to tick things off: the panel is
+  // off by default, and a hard zero here would read as a failure rather than
+  // as a feature nobody switched on.
+  if (chores > 0 || (t && t.chores > 0)) {
+    box.appendChild(tile("Jobs done", num(chores), chores === 1 ? " job" : " jobs",
+      "ticked off on breaks in " + window_ + (t ? " · " + num(t.chores) + " today" : ""),
+      sparkline(tail.map(r => r.chores), S.s2, SW, SH), 180));
+  }
   box.appendChild(tile("Streak", num(streak(rows)), " days", "in a row with a break in them",
-    sparkline(tail.map(r => r.taken + r.credited > 0 ? 1 : 0), S.s4, SW, SH), 180));
+    sparkline(tail.map(r => r.taken + r.credited > 0 ? 1 : 0), S.s4, SW, SH), 240));
 
   if (postponed) box.lastChild.title = "";
 }
@@ -994,8 +1006,9 @@ function renderTables() {
   box.replaceChildren();
   const rows = byDay(slice(), from()).slice().reverse();
   box.appendChild(table("Every day in this window",
-    ["Day", "Taken", "Credited", "Postponed", "Steps"],
-    rows.map(r => [short(r.key), num(r.taken), num(r.credited), num(r.postponed), num(r.steps)])));
+    ["Day", "Taken", "Credited", "Postponed", "Steps", "Jobs"],
+    rows.map(r => [short(r.key), num(r.taken), num(r.credited), num(r.postponed), num(r.steps),
+      num(r.chores)])));
 
   const gateName = k => (GATES.find(g => g.key === k) || GATES[3]).label;
   box.appendChild(table("Every break in this window",
@@ -1075,7 +1088,7 @@ function boot() {
     v.appendChild(el("p", { class: "eyebrow", text: "Today" }));
     v.appendChild(el("div", { class: "big", text: t ? num(t.breaks) : "—" }));
     v.appendChild(el("div", { class: "big-sub", style: "margin-bottom:1.6rem", text: t
-      ? (t.breaks === 1 ? "break" : "breaks") + " · " + num(t.steps) + " steps · " + t.credited + " away from the desk"
+      ? (t.breaks === 1 ? "break" : "breaks") + " · " + num(t.steps) + " steps · " + num(t.chores) + " jobs · " + t.credited + " away from the desk"
       : "the service has not saved anything yet" }));
     v.appendChild(el("h2", { text: "Nothing to chart yet" }));
     v.appendChild(el("p", { text: t && t.breaks

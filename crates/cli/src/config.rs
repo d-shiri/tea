@@ -216,6 +216,51 @@ mode = "off"
 entity = ""           # e.g. "sensor.pixel_detected_activity"
 for = "auto"
 states = ["walking", "on_foot", "running"]
+
+# What to do with the five minutes. Everything above is about making you get up;
+# this is the only part about what to do once you have, and a break page that
+# says "stand up" and nothing else leaves you standing in the kitchen wondering
+# why. Point it at a Home Assistant to-do list -- open the window, unload the
+# dishwasher, take the bins out -- and the page shows the first few of them in
+# the corner, the open ones first, the finished ones struck through.
+#
+# Read-only, deliberately: ticking a job off from the laptop you have just been
+# sent away from is a claim this has no way of checking, and the list is one tap
+# away on the phone in your hand. Tick it off there and the page catches up
+# within a few seconds, which is the point of reading it live.
+#
+# Not part of the gate. A list that cannot be read costs one line on stderr and
+# an empty corner; it can never hold your desk, and it can never end a break
+# early. The rows are fixed when the page first gets an answer and never
+# re-ordered afterwards -- only their statuses change -- because a list that
+# re-sorted itself as you ticked things off would move the next job out from
+# under the eye reading it.
+#
+# Whatever gets ticked off while a page is up is counted: `tea status` says how
+# many today, and `tea dash` has them per day and in total.
+#
+# Of the lines the corner has, the last two are kept for jobs already done
+# whenever there are any: a panel showing nothing but outstanding work is a nag,
+# and two struck-through lines are what makes it a record of an afternoon going
+# well. When there is little left to do, the finished ones take the slack.
+#
+# Anything that does not fit is counted on a line of its own -- "3 more", in the
+# same grey as the branches -- so what you can see plus what it says it is
+# hiding is the whole list, and no number on the page can disagree with the rows
+# under it. Under that, once the day has something to report, the day's own
+# score: "today · 2 jobs done", below a hairline, because it is a fact about you
+# rather than about the list.
+#
+#   mode    "off" (default) or "on".
+#   entity  the list, "todo.<name>". Any to-do entity will do.
+#   title   what to call it on the page. Empty means the entity id.
+#   show    how many jobs the corner has room for, up to ten. The count of what
+#           did not fit does not use one of them.
+[nfc.chores]
+mode = "off"
+entity = ""           # e.g. "todo.household"
+title = ""            # e.g. "While you're up"
+show = 8
 "##;
 
 #[derive(Debug, Clone, Deserialize)]

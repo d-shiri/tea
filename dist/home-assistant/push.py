@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Put tea's dashboard on a Home Assistant hub, without the clipboard.
 
-    ./dist/home-assistant/push.py dashboard          # create or replace the "tea" dashboard
+    ./dist/home-assistant/push.py dashboard sensor.phone_daily_steps=sensor.<yours>_daily_steps
+                                                     # create or replace the "tea" dashboard,
+                                                     # with your phone's step sensor filled in
     ./dist/home-assistant/push.py automations tea_held tea_summary \\
         notify.mobile_app_phone=notify.mobile_app_sm_g990b2
                                                      # add those automations, with the
@@ -75,10 +77,20 @@ async def talk(url, token, requests):
         return results
 
 
-def dashboard(url, token):
+def dashboard(url, token, args=()):
     import yaml
 
-    config = yaml.safe_load(DASHBOARD.read_text())
+    text = DASHBOARD.read_text()
+    # `old=new` pairs fill in the one entity that is yours: the phone's steps.
+    for old, new in (a.split("=", 1) for a in args if "=" in a):
+        text = text.replace(old, new)
+    for holder, hint in (
+        ("sensor.phone_daily_steps", "sensor.phone_daily_steps=sensor.<yours>_daily_steps"),
+        ("todo.household", "todo.household=todo.<yours>"),
+    ):
+        if holder in text:
+            print(f"tea: note — {holder} is a placeholder; pass {hint} to fill it in")
+    config = yaml.safe_load(text)
     (existing,) = asyncio.run(talk(url, token, [{"type": "lovelace/dashboards/list"}]))
     if not any(d.get("url_path") == URL_PATH for d in existing):
         asyncio.run(
@@ -157,7 +169,7 @@ def main():
     what = sys.argv[1] if len(sys.argv) > 1 else ""
     url, token = hub()
     if what == "dashboard":
-        dashboard(url, token)
+        dashboard(url, token, sys.argv[2:])
     elif what == "automations":
         automations(url, token, sys.argv[2:])
     elif what == "list":
