@@ -152,6 +152,9 @@ pub fn show(cfg: Config, hours: &Hours, config_path: &std::path::Path, boottime:
             if today.steps > 0 {
                 parts.push(format!("{} steps walked", today.steps));
             }
+            if today.cheats > 0 {
+                parts.push(format!("{} nice tries", today.cheats));
+            }
             parts.join(" · ")
         }
     };

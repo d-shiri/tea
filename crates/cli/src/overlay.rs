@@ -11,7 +11,7 @@ use gtk::gio;
 use gtk::glib;
 use gtk::prelude::*;
 use crate::config::Dur;
-use crate::nfc::Walk;
+use crate::nfc::{Motion, Walk};
 use crate::session::Session;
 use tea_core::{Blocker, Snooze};
 use serde::Deserialize;
@@ -38,20 +38,20 @@ window.tea-toast {
 }
 window.tea-toast button {
     background-image: none;
-    background-color: rgba(122,162,255,0.10);
+    background-color: rgba(ACCENT,0.10);
     color: #dce4f5;
-    border: 1px solid rgba(122,162,255,0.22);
+    border: 1px solid rgba(ACCENT,0.22);
     border-radius: 999px;
     padding: 8px 18px;
     font-size: 11pt;
     letter-spacing: 1px;
 }
-window.tea-toast button:hover { background-color: rgba(122,162,255,0.18); }
+window.tea-toast button:hover { background-color: rgba(ACCENT,0.18); }
 
 /* A pill: the shape everything on this page that is not the clock arrives in. */
 .tea-chip {
-    background-color: rgba(122,162,255,0.05);
-    border: 1px solid rgba(122,162,255,0.15);
+    background-color: rgba(ACCENT,0.05);
+    border: 1px solid rgba(ACCENT,0.15);
     border-radius: 999px;
     padding: 7px 18px;
 }
@@ -79,6 +79,12 @@ pub struct GtkBlocker {
     /// focus; see `engage`.
     anim: Anim,
     hold: Hold,
+    /// The colours, resolved once from `[page]`.
+    palette: Palette,
+    /// What the page says under the title, and when it changes its mind.
+    /// Shared with the face closure, so a page rebuilt by `insist` comes back
+    /// saying the same line as the one it replaced.
+    prompter: Rc<RefCell<Prompter>>,
     /// One page per monitor. Shared, because insisting replaces them: see
     /// `insist`, which builds a fresh window rather than re-showing a hidden
     /// one, and has to put the new one somewhere `update` will find it.
@@ -104,6 +110,10 @@ pub struct GtkBlocker {
     /// Shared for the same reason again -- a page rebuilt at step eighteen has
     /// to come back saying eighteen.
     walk: Rc<Cell<Walk>>,
+    /// And the time on your feet, shared for the same reason.
+    motion: Rc<Cell<Motion>>,
+    /// The steps came from a hand: see `cheat_seen`. Shared like the rest.
+    busted: Rc<Cell<bool>>,
     /// Both halves are in and the break is ending. Distinct from `scanned`,
     /// which is only the tag: the celebration belongs to the moment the page is
     /// actually about to lift, not to the first of two things that had to
@@ -129,11 +139,12 @@ impl GtkBlocker {
         postpone: Rc<Cell<bool>>,
         anim: Anim,
         hold: Hold,
+        look: &Look,
         ask: Option<String>,
     ) -> Self {
         if let Some(display) = gdk::Display::default() {
             let provider = gtk::CssProvider::new();
-            provider.load_from_string(&CSS.replace("MONO", MONO));
+            provider.load_from_string(&look.css(CSS));
             gtk::style_context_add_provider_for_display(
                 &display,
                 &provider,
@@ -145,6 +156,8 @@ impl GtkBlocker {
             postpone,
             anim,
             hold,
+            palette: look.palette(),
+            prompter: Rc::new(RefCell::new(Prompter::new(look))),
             pages: Rc::new(RefCell::new(Vec::new())),
             warning: None,
             ask,
@@ -152,6 +165,8 @@ impl GtkBlocker {
             scanned: Rc::new(Cell::new(false)),
             reachable: Rc::new(Cell::new(true)),
             walk: Rc::new(Cell::new(Walk::default())),
+            motion: Rc::new(Cell::new(Motion::default())),
+            busted: Rc::new(Cell::new(false)),
             open: Rc::new(Cell::new(false)),
             live: Rc::new(Cell::new(false)),
             session: Rc::new(RefCell::new(Session::connect())),
@@ -175,6 +190,13 @@ struct Face {
     tag: Option<Tag>,
     /// `None` when this break has no walk in it.
     walk: Option<Walk>,
+    /// `None` when this break does not ask for time on your feet.
+    motion: Option<Motion>,
+    /// The steps badge is teasing rather than counting.
+    busted: bool,
+    /// The line under the title while the clock runs, when `[page].prompts`
+    /// has given the page something to say. `None` keeps the line it ships with.
+    sub: Option<String>,
 }
 
 /// Whether the walk has been made yet.
@@ -198,17 +220,24 @@ impl GtkBlocker {
         let scanned = Rc::clone(&self.scanned);
         let reachable = Rc::clone(&self.reachable);
         let walk = Rc::clone(&self.walk);
+        let motion = Rc::clone(&self.motion);
+        let busted = Rc::clone(&self.busted);
         let open = Rc::clone(&self.open);
         let ask = self.ask.clone();
+        let prompter = Rc::clone(&self.prompter);
         move || {
-            face_of(
+            let mut face = face_of(
                 ask.as_deref(),
                 waiting.get(),
                 scanned.get(),
                 reachable.get(),
                 open.get(),
                 walk.get(),
-            )
+                motion.get(),
+                busted.get(),
+            );
+            face.sub = prompter.borrow().current();
+            face
         }
     }
 
@@ -240,6 +269,9 @@ impl GtkBlocker {
 /// Split out from the closure above so the rules can be checked without a
 /// display: what a page shows is decided here, and a rebuilt page that forgot
 /// a scan would send someone back down the hall for nothing.
+// Every input the page's face depends on, and nothing else: a struct here
+// would be this list with a name.
+#[allow(clippy::too_many_arguments)]
 fn face_of(
     ask: Option<&str>,
     waiting: bool,
@@ -247,8 +279,11 @@ fn face_of(
     reachable: bool,
     open: bool,
     walk: Walk,
+    motion: Motion,
+    busted: bool,
 ) -> Face {
     let walk = (walk.needed > 0).then_some(walk);
+    let motion = (motion.needed > 0).then_some(motion);
     Face {
         done: waiting && open,
         // Only once the countdown is spent. Before that the page has a clock to
@@ -258,10 +293,18 @@ fn face_of(
             // The tag is in and the walk is not: asking for the tag again would
             // send someone back down the hall for a thing they have done. What
             // is left is the only thing worth saying.
+            // Caught out: the page says so instead of asking for more steps,
+            // until the phone reports moving and the badge goes back to counting.
+            (true, _, Some(w)) if busted && !w.done() => Some(CAUGHT.to_string()),
             (true, true, Some(w)) if !w.done() => Some(match w.left() {
                 1 => "One more step".to_string(),
                 left => format!("{left} more steps"),
             }),
+            // Tag in, steps in, and only the phone's word still wanted: say
+            // what to do, not what to scan.
+            (true, true, _) if motion.is_some_and(|m| !m.done() && !m.lost) => {
+                Some(format!("Keep walking — {}s more", motion.map_or(0, |m| m.left())))
+            }
             (true, ..) => ask.map(str::to_string),
         },
         // The prompt doubles as the switch: it is set exactly when a tag is
@@ -275,6 +318,9 @@ fn face_of(
             (false, true) => Tag::Pending,
         }),
         walk: ask.and(walk),
+        motion: ask.and(motion),
+        busted: busted && ask.and(walk).is_some(),
+        sub: None,
     }
 }
 
@@ -298,6 +344,9 @@ impl Blocker for GtkBlocker {
         // the page would say "off you go" while still holding the screen.
         self.open.set(false);
         self.reachable.set(true);
+        // A fresh break starts the prompts somewhere new, so five breaks in a
+        // row do not all open with the same line.
+        self.prompter.borrow_mut().begin();
 
         let Some(display) = gdk::Display::default() else {
             eprintln!("tea: no display — overlay not shown");
@@ -310,7 +359,16 @@ impl Blocker for GtkBlocker {
         let built: Vec<Page> = monitors_in(&monitors)
             .iter()
             .map(|monitor| {
-                build_page(&self.app, monitor, total, total, &self.anim, Entrance::Full, &face)
+                build_page(
+                    &self.app,
+                    monitor,
+                    total,
+                    total,
+                    &self.anim,
+                    &self.palette,
+                    Entrance::Full,
+                    &face,
+                )
             })
             .collect();
 
@@ -328,6 +386,7 @@ impl Blocker for GtkBlocker {
                 Rc::clone(&self.pages),
                 total,
                 self.anim.clone(),
+                self.palette,
                 self.hold.every(),
                 Rc::clone(&self.live),
                 Rc::clone(&self.session),
@@ -345,6 +404,7 @@ impl Blocker for GtkBlocker {
         let pages = Rc::clone(&self.pages);
         let live = Rc::clone(&self.live);
         let anim = self.anim.clone();
+        let palette = self.palette;
         let facing = self.face();
         let watch = monitors.connect_items_changed(move |list, _, _, _| {
             if !live.get() {
@@ -358,7 +418,7 @@ impl Blocker for GtkBlocker {
             let face = facing();
             let fresh: Vec<Page> = monitors_in(list)
                 .iter()
-                .map(|m| build_page(&app, m, total, left, &anim, Entrance::None, &face))
+                .map(|m| build_page(&app, m, total, left, &anim, &palette, Entrance::None, &face))
                 .collect();
             // Every monitor gone at once (a lid closing, a dock resetting):
             // keep the old pages. They will be rebuilt onto whatever comes
@@ -380,6 +440,18 @@ impl Blocker for GtkBlocker {
     fn update(&mut self, remaining: Duration) {
         if self.waiting.get() {
             return;
+        }
+        // Once a second, which is what the prompts count in. Only while the
+        // clock runs: the waiting page has its own line, and a stretch
+        // suggested to somebody standing in the hall is noise.
+        // The prompts keep their beat under a verdict, but do not overwrite it.
+        let line = self.prompter.borrow_mut().tick();
+        if let Some(line) = line
+            && !self.busted.get()
+        {
+            for page in self.pages.borrow().iter() {
+                page.sub.set_text(&line);
+            }
         }
         for page in self.pages.borrow().iter() {
             // The dial runs itself between ticks so the sweep is smooth, and
@@ -560,7 +632,10 @@ impl Blocker for GtkBlocker {
         }
         for page in self.pages.borrow().iter() {
             if let Some(badge) = &page.walk {
-                badge.paint(Mark::Walk(walk));
+                badge.paint(match self.busted.get() {
+                    true => Mark::Cheat(walk),
+                    false => Mark::Walk(walk),
+                });
                 // Only the finish is worth a fade. A badge that flashes on
                 // every step counted is a strobe at the foot of a page whose
                 // one job is to be restful.
@@ -570,6 +645,52 @@ impl Blocker for GtkBlocker {
             }
             if let Some(meter) = &page.meter {
                 meter.paint(walk);
+            }
+        }
+        self.retext();
+    }
+
+    fn motion_seen(&mut self, secs: u32, needed: u32, lost: bool) {
+        let motion = Motion { secs, needed, lost };
+        if self.motion.replace(motion) == motion {
+            return;
+        }
+        for page in self.pages.borrow().iter() {
+            if let Some(badge) = &page.motion {
+                badge.paint(Mark::Move(motion));
+                if motion.done() {
+                    animate_in(&badge.row, 0.25, 0, 0.0);
+                }
+            }
+        }
+        self.retext();
+    }
+
+    fn cheat_seen(&mut self, busted: bool) {
+        if self.busted.replace(busted) == busted {
+            return;
+        }
+        let walk = self.walk.get();
+        let waiting = self.waiting.get();
+        for page in self.pages.borrow().iter() {
+            if let Some(badge) = &page.walk {
+                badge.paint(match busted {
+                    true => Mark::Cheat(walk),
+                    false => Mark::Walk(walk),
+                });
+                if busted {
+                    animate_in(&badge.row, 0.25, 0, 0.0);
+                }
+            }
+            // While the clock runs the verdict goes under the title, where the
+            // prompts go. The waiting page says it in the big line instead,
+            // which `retext` sees to.
+            if !waiting {
+                let line = match busted {
+                    true => CAUGHT.to_string(),
+                    false => self.prompter.borrow().current().unwrap_or_else(|| SUB.to_string()),
+                };
+                page.sub.set_text(&line);
             }
         }
         self.retext();
@@ -695,6 +816,329 @@ impl Hold {
     }
 }
 
+/// The line under the title, until the prompts have something else to say.
+const SUB: &str = "Look away from the screen. Stand up.";
+/// What the page says when the steps came from a hand.
+const CAUGHT: &str = "That was the phone walking, not you.";
+/// Where a prompt wraps. Wide enough for a sentence, narrow enough that it
+/// stays a caption under the title rather than a paragraph across the screen.
+const SUB_WIDTH: i32 = 56;
+/// The accent the page ships with, as the CSS has always had it.
+const ACCENT: &str = "#7aa2ff";
+
+/// What the page says while the clock runs, when it says anything. Short, and
+/// all things that can be done beside a desk: the walk is what the tag is
+/// for, this is what to do with the minutes at either end of it.
+const PROMPTS: &[&str] = &[
+    "Look at something far away. Twenty seconds.",
+    "Roll your shoulders back. Slowly, five times.",
+    "Drink some water.",
+    "Stand up and reach for the ceiling.",
+    "Breathe in for four, out for six. Three times.",
+    "Turn your head to one side, then the other. Hold each.",
+    "Unclench your jaw. Drop your shoulders.",
+    "Walk to a window.",
+    "Blink. Properly, a few times.",
+    "Palm out, fingers back: stretch each wrist.",
+    "Stand on one leg. Then the other.",
+    "Straighten your back. Ears over shoulders.",
+];
+
+/// How the page looks, and what it says while the clock runs: `[page]`.
+///
+/// The defaults are the page as it ships, pixel for pixel. Everything here is
+/// a departure from that, made on purpose.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Look {
+    /// `#rrggbb`: the ring, the glow, the blast and the pills. Not the text.
+    pub accent: String,
+    pub background: Background,
+    /// A family name. Empty takes the first monospaced face the machine has.
+    pub font: String,
+    pub prompts: Prompts,
+    /// How long each prompt stays up.
+    pub prompt_every: Dur,
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Self {
+            accent: ACCENT.into(),
+            background: Background::Dark,
+            font: String::new(),
+            prompts: Prompts::Off,
+            prompt_every: Dur(Duration::from_secs(20)),
+        }
+    }
+}
+
+/// What is behind the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Background {
+    /// The screen is covered.
+    #[default]
+    Dark,
+    /// The desk shows through, darkened: a veil over the work rather than a
+    /// wall in front of it.
+    Dim,
+}
+
+/// `"off"`, `"on"` for the built-in list, or a list of lines of your own.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(try_from = "RawPrompts")]
+pub enum Prompts {
+    #[default]
+    Off,
+    On,
+    Custom(Vec<String>),
+}
+
+/// The two shapes the key can take in the file.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawPrompts {
+    Word(String),
+    List(Vec<String>),
+}
+
+impl TryFrom<RawPrompts> for Prompts {
+    type Error = String;
+
+    fn try_from(raw: RawPrompts) -> Result<Self, String> {
+        match raw {
+            RawPrompts::Word(word) => match word.trim().to_ascii_lowercase().as_str() {
+                "off" | "disabled" | "false" => Ok(Prompts::Off),
+                "on" | "enabled" | "true" => Ok(Prompts::On),
+                other => Err(format!(
+                    "page.prompts: {other:?} is not \"off\", \"on\", or a list of lines"
+                )),
+            },
+            RawPrompts::List(lines) => {
+                let lines: Vec<String> = lines
+                    .into_iter()
+                    .map(|line| line.trim().to_string())
+                    .filter(|line| !line.is_empty())
+                    .collect();
+                // An empty list is "off", written the long way.
+                Ok(if lines.is_empty() { Prompts::Off } else { Prompts::Custom(lines) })
+            }
+        }
+    }
+}
+
+impl Prompts {
+    pub fn on(&self) -> bool {
+        !matches!(self, Prompts::Off)
+    }
+
+    /// The lines the page will cycle through. Empty when off.
+    pub fn lines(&self) -> Vec<String> {
+        match self {
+            Prompts::Off => Vec::new(),
+            Prompts::On => PROMPTS.iter().map(|s| s.to_string()).collect(),
+            Prompts::Custom(lines) => lines.clone(),
+        }
+    }
+
+    /// How it reads in `tea config`.
+    pub fn describe(&self) -> String {
+        match self {
+            Prompts::Off => "off".into(),
+            Prompts::On => format!("on — {} built-in lines", PROMPTS.len()),
+            Prompts::Custom(lines) => format!("{} of your own", lines.len()),
+        }
+    }
+}
+
+impl Look {
+    /// The accent as it was written, as bytes, if it was written properly.
+    fn rgb(&self) -> Option<(u8, u8, u8)> {
+        let hex = self.accent.trim().strip_prefix('#')?;
+        if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+        Some((byte(0)?, byte(2)?, byte(4)?))
+    }
+
+    /// Why the accent is being ignored, if it is. Said once at startup, and
+    /// then the page uses the colour it ships with: a typo in a colour should
+    /// cost a colour, not a break.
+    pub fn accent_misconfigured(&self) -> Option<String> {
+        match self.rgb() {
+            Some(_) => None,
+            None => Some(format!(
+                "page.accent {:?} is not a colour like \"#7aa2ff\" — using the default",
+                self.accent
+            )),
+        }
+    }
+
+    /// The stylesheet with the accent and the face filled in.
+    fn css(&self, css: &str) -> String {
+        let (r, g, b) = self.rgb().unwrap_or((0x7a, 0xa2, 0xff));
+        let family = match self.font.trim() {
+            "" => MONO.to_string(),
+            // Quoted, and never able to end the quote early: a family name is
+            // one string in the stylesheet, whatever was typed.
+            face => format!("\"{}\", {MONO}", face.replace('"', "")),
+        };
+        css.replace("ACCENT", &format!("{r},{g},{b}")).replace("MONO", &family)
+    }
+
+    /// The colours the page is painted in, worked out once.
+    pub(crate) fn palette(&self) -> Palette {
+        let stock = self.accent.trim().eq_ignore_ascii_case(ACCENT);
+        let mut palette = match self.rgb() {
+            // The colours as they ship are not derived from the accent -- they
+            // were chosen one by one -- so the stock accent gets them exactly.
+            Some(rgb) if !stock => Palette::from_accent(rgb),
+            _ => Palette::default(),
+        };
+        palette.cover = match self.background {
+            Background::Dark => 1.0,
+            Background::Dim => DIM,
+        };
+        palette
+    }
+}
+
+/// How much of the desk the dark covers with `background = "dim"`. Enough that
+/// nothing behind it can be read, which is the point of the page; little
+/// enough that the shapes are there, which is the point of the setting.
+const DIM: f64 = 0.84;
+
+/// Every colour the page draws with that is not fixed. Cairo wants floats, so
+/// these are floats; the stylesheet gets the same accent in bytes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Palette {
+    /// The ring's arc, and the lit squares of the meter.
+    pub accent: (f64, f64, f64),
+    /// The blast's waves and the graph paper.
+    pub wave: (f64, f64, f64),
+    /// The shards, and the paler confetti.
+    pub light: (f64, f64, f64),
+    /// The darker confetti.
+    pub deep: (f64, f64, f64),
+    /// The circle the arc runs on.
+    pub hairline: (f64, f64, f64),
+    /// The breath of light behind the dial.
+    pub glow: (f64, f64, f64),
+    pub pip: (f64, f64, f64),
+    pub pip_unlit: (f64, f64, f64),
+    /// How opaque the dark is. One covers the screen.
+    pub cover: f64,
+}
+
+impl Default for Palette {
+    fn default() -> Self {
+        Self {
+            accent: (0.56, 0.71, 1.0),
+            wave: (0.55, 0.70, 1.0),
+            light: (0.62, 0.74, 1.0),
+            deep: (0.48, 0.63, 0.97),
+            hairline: (0.20, 0.28, 0.47),
+            glow: (0.29, 0.42, 0.85),
+            pip: (0.54, 0.69, 1.0),
+            pip_unlit: (0.42, 0.52, 0.72),
+            cover: 1.0,
+        }
+    }
+}
+
+impl Palette {
+    /// The whole set from one colour, keeping the same relationships the
+    /// stock colours have to their accent: the hairline is the accent most of
+    /// the way to the dark, the shards a shade lighter than the arc.
+    fn from_accent((r, g, b): (u8, u8, u8)) -> Self {
+        let accent = (f64::from(r) / 255.0, f64::from(g) / 255.0, f64::from(b) / 255.0);
+        let dark = (0.024, 0.031, 0.051);
+        let white = (1.0, 1.0, 1.0);
+        let towards = |(r, g, b): (f64, f64, f64), (tr, tg, tb): (f64, f64, f64), k: f64| {
+            (r + (tr - r) * k, g + (tg - g) * k, b + (tb - b) * k)
+        };
+        Self {
+            accent,
+            wave: accent,
+            light: towards(accent, white, 0.18),
+            deep: towards(accent, dark, 0.12),
+            hairline: towards(accent, dark, 0.62),
+            glow: towards(accent, dark, 0.35),
+            pip: accent,
+            pip_unlit: towards(accent, dark, 0.27),
+            cover: 1.0,
+        }
+    }
+
+    /// Confetti colours, every one already on the page: the badge's green, the
+    /// dial's two blues, and the unseen badge's amber. A celebration in colours
+    /// the page has never used would look pasted on.
+    fn confetti(&self) -> [(f64, f64, f64); 4] {
+        [GREEN, self.deep, self.light, AMBER]
+    }
+}
+
+/// The prompts, and which one is up.
+///
+/// Counts in ticks of the engine's clock rather than in wall time, so the
+/// line changes on the same beat the numbers do, and a page rebuilt by
+/// `insist` mid-line comes back saying the line and not the next one.
+struct Prompter {
+    lines: Vec<String>,
+    /// Ticks each line stays up.
+    every: u64,
+    at: usize,
+    ticks: u64,
+}
+
+impl Prompter {
+    fn new(look: &Look) -> Self {
+        Self {
+            lines: look.prompts.lines(),
+            // Five seconds is already too quick to read and act on; ten minutes
+            // is longer than a break. Outside that a typo, not a wish.
+            every: look.prompt_every.0.as_secs().clamp(5, 600),
+            at: 0,
+            ticks: 0,
+        }
+    }
+
+    /// A break is starting: begin somewhere new.
+    fn begin(&mut self) {
+        let start = match self.lines.len() {
+            0 | 1 => 0,
+            n => glib::random_int_range(0, n as i32) as usize,
+        };
+        self.begin_at(start);
+    }
+
+    fn begin_at(&mut self, at: usize) {
+        self.ticks = 0;
+        self.at = if self.lines.is_empty() { 0 } else { at % self.lines.len() };
+    }
+
+    /// What the page should be saying now, or nothing when prompts are off.
+    fn current(&self) -> Option<String> {
+        self.lines.get(self.at).cloned()
+    }
+
+    /// One second on. `Some` when the line has just changed, carrying the new
+    /// one; a page only has to touch its label then.
+    fn tick(&mut self) -> Option<String> {
+        if self.lines.len() < 2 {
+            return None;
+        }
+        self.ticks += 1;
+        if !self.ticks.is_multiple_of(self.every) {
+            return None;
+        }
+        self.at = (self.at + 1) % self.lines.len();
+        self.current()
+    }
+}
+
 /// One screen's worth of break page: the window, the screen it belongs to, and
 /// the two things that have to be kept up to date while the break runs.
 ///
@@ -716,6 +1160,8 @@ struct Page {
     badge: Option<Badge>,
     /// Absent unless the break is being walked off as well.
     walk: Option<Badge>,
+    /// Absent unless the break also wants the phone's word that you moved.
+    motion: Option<Badge>,
     /// The block of squares under the badges, same condition as `walk`.
     meter: Option<Meter>,
     dial: Rc<RefCell<Dial>>,
@@ -770,6 +1216,9 @@ struct Badge {
 enum Mark {
     Tag(Tag),
     Walk(Walk),
+    Move(Motion),
+    /// The walk badge, caught out: the count came from a hand.
+    Cheat(Walk),
 }
 
 impl Mark {
@@ -779,6 +1228,19 @@ impl Mark {
         match self {
             Mark::Tag(tag) => tag == Tag::Scanned,
             Mark::Walk(walk) => walk.done(),
+            Mark::Move(motion) => motion.done(),
+            Mark::Cheat(_) => false,
+        }
+    }
+
+    /// Whether the thing this half depends on cannot be read at all -- the
+    /// amber state, on a page that is otherwise grey and green.
+    fn unseen(self) -> bool {
+        match self {
+            Mark::Tag(tag) => tag == Tag::Unseen,
+            Mark::Walk(_) => false,
+            Mark::Move(motion) => motion.lost && !motion.done(),
+            Mark::Cheat(_) => true,
         }
     }
 }
@@ -812,11 +1274,17 @@ impl Badge {
 
     fn paint(&self, mark: Mark) {
         self.state.set(mark);
-        self.label.set_text(&words_for(mark));
+        match mark {
+            // The count crossed out, and the verdict beside it.
+            Mark::Cheat(walk) => {
+                self.label.set_markup(&format!("Nice try — <s>{} steps</s>", walk.walked))
+            }
+            _ => self.label.set_text(&words_for(mark)),
+        }
         // One class, toggled, rather than two that could both be on: a label
         // that is somehow "not scanned" and green is worse than no badge.
         for (class, on) in
-            [("done", mark.done()), ("unseen", mark == Mark::Tag(Tag::Unseen))]
+            [("done", mark.done()), ("unseen", mark.unseen())]
         {
             if on {
                 self.label.add_css_class(class);
@@ -858,7 +1326,7 @@ const PIPS_ROW: u32 = 50;
 const PIPS_MOST: u32 = 4 * PIPS_ROW;
 
 impl Meter {
-    fn new(walk: Walk) -> Self {
+    fn new(walk: Walk, palette: Palette) -> Self {
         let state = Rc::new(Cell::new(walk));
         let area = gtk::DrawingArea::new();
         let (cols, rows) = Self::grid(walk.needed);
@@ -868,7 +1336,7 @@ impl Meter {
 
         let drawing = Rc::clone(&state);
         area.set_draw_func(move |_, cr, width, height| {
-            draw_meter(cr, width, height, drawing.get());
+            draw_meter(cr, width, height, drawing.get(), &palette);
         });
         Self { area, state }
     }
@@ -893,7 +1361,7 @@ impl Meter {
     }
 }
 
-fn draw_meter(cr: &gtk::cairo::Context, width: i32, height: i32, walk: Walk) {
+fn draw_meter(cr: &gtk::cairo::Context, width: i32, height: i32, walk: Walk, palette: &Palette) {
     let pips = Meter::pips(walk.needed);
     let (cols, rows) = Meter::grid(walk.needed);
     // Rounded off rather than up: a square that lights before its step has
@@ -910,9 +1378,11 @@ fn draw_meter(cr: &gtk::cairo::Context, width: i32, height: i32, walk: Walk) {
         let x = left + (i % PIPS_ROW) as f64 * (PIP + PIP_GAP);
         let y = top + (i / PIPS_ROW) as f64 * (PIP + ROW_GAP);
         if i < lit {
-            cr.set_source_rgba(0.54, 0.69, 1.0, 1.0);
+            let (r, g, b) = palette.pip;
+            cr.set_source_rgba(r, g, b, 1.0);
         } else {
-            cr.set_source_rgba(0.42, 0.52, 0.72, 0.22);
+            let (r, g, b) = palette.pip_unlit;
+            cr.set_source_rgba(r, g, b, 0.22);
         }
         rounded(cr, x, y, PIP, PIP, 2.0);
         let _ = cr.fill();
@@ -945,6 +1415,13 @@ fn words_for(mark: Mark) -> String {
         // who has just crossed the flat sends them across it a second time.
         Mark::Walk(walk) if walk.walked == 0 && walk.marked => "Counting from here".to_string(),
         Mark::Walk(walk) => format!("{} of {} steps", walk.walked, walk.needed),
+        Mark::Cheat(walk) => format!("Nice try — {} steps", walk.walked),
+        Mark::Move(motion) if motion.done() => "Moved".to_string(),
+        Mark::Move(motion) if motion.lost => {
+            "Can't read the activity — this break ends on the clock".to_string()
+        }
+        Mark::Move(motion) if motion.secs == 0 => "Not moving yet".to_string(),
+        Mark::Move(motion) => format!("Moving · {}s of {}s", motion.secs, motion.needed),
     }
 }
 
@@ -963,6 +1440,13 @@ fn draw_mark(cr: &gtk::cairo::Context, width: i32, height: i32, mark: Mark) {
         // one gate, and when both are in the page says so the same way twice.
         Mark::Walk(walk) if walk.done() => draw_tag(cr, width, height, Tag::Scanned),
         Mark::Walk(walk) => draw_walk(cr, width, height, walk),
+        Mark::Cheat(_) => draw_tag(cr, width, height, Tag::Unseen),
+        Mark::Move(motion) if motion.done() => draw_tag(cr, width, height, Tag::Scanned),
+        // A sensor that cannot be read gets the tag's amber glyph: the same
+        // thing has gone wrong, and the page should say so the same way.
+        Mark::Move(motion) if motion.lost => draw_tag(cr, width, height, Tag::Unseen),
+        // The same figure as the walk: it is the same person, still going.
+        Mark::Move(_) => draw_walk(cr, width, height, Walk::default()),
     }
 }
 
@@ -1168,12 +1652,16 @@ enum Entrance {
 /// the start of a break: `insist` builds replacements part-way through, and
 /// they have to arrive showing the right time on the clock and the right amount
 /// of ring left.
+// A page is built from exactly this many things, and a struct to carry two of
+// them across one call would be a struct with no other reason to exist.
+#[allow(clippy::too_many_arguments)]
 fn build_page(
     app: &gtk::Application,
     monitor: &gdk::Monitor,
     total: Duration,
     remaining: Duration,
     anim: &Anim,
+    palette: &Palette,
     entrance: Entrance,
     face: &Face,
 ) -> Page {
@@ -1212,7 +1700,7 @@ fn build_page(
     // The layers, sized from the monitor rather than from their own
     // allocation: the ring's box has to be built before it is measured. Built
     // after the label because the pace inside it is what moves the clock on.
-    let (stage, state) = build_stage(total, remaining, arrival, anim, radius, &count);
+    let (stage, state) = build_stage(total, remaining, arrival, anim, palette, radius, &count);
 
     // What the clock is a clock *of*, in the smallest type on the page. It
     // hangs below the numbers, inside the ring, and is balanced by an equal
@@ -1236,8 +1724,13 @@ fn build_page(
     let title = gtk::Label::new(Some("Time to stop"));
     title.add_css_class("tea-title");
 
-    let sub = gtk::Label::new(Some("Look away from the screen. Stand up."));
+    let sub = gtk::Label::new(Some(face.sub.as_deref().unwrap_or(SUB)));
     sub.add_css_class("tea-sub");
+    // A prompt somebody wrote is longer than the line this ships with, and it
+    // has to stay under the title rather than push the page wide.
+    sub.set_wrap(true);
+    sub.set_justify(gtk::Justification::Center);
+    sub.set_max_width_chars(SUB_WIDTH);
 
     // The mark and the word, in a pill: enough branding for a page nobody
     // asked to see, and it doubles as the thing that says what this *is* to
@@ -1268,7 +1761,13 @@ fn build_page(
     // The two halves of the gate, side by side in the order they happen in:
     // you scan on the way past, and the steps are what you do next.
     let badge = face.tag.map(|tag| Badge::new(Mark::Tag(tag)));
-    let walk = face.walk.map(|walk| Badge::new(Mark::Walk(walk)));
+    let walk = face.walk.map(|walk| {
+        Badge::new(match face.busted {
+            true => Mark::Cheat(walk),
+            false => Mark::Walk(walk),
+        })
+    });
+    let moving = face.motion.map(|motion| Badge::new(Mark::Move(motion)));
     let badges = gtk::Box::new(gtk::Orientation::Horizontal, 14);
     badges.set_halign(gtk::Align::Center);
     if let Some(badge) = &badge {
@@ -1277,11 +1776,14 @@ fn build_page(
     if let Some(walk) = &walk {
         badges.append(&walk.row);
     }
+    if let Some(moving) = &moving {
+        badges.append(&moving.row);
+    }
 
     // And the walk again, as squares that fill up, fifty to a row: the badge
     // is the number, this is the picture of it, and the picture is the one you can
     // read from the doorway without your glasses on.
-    let meter = face.walk.map(Meter::new);
+    let meter = face.walk.map(|walk| Meter::new(walk, *palette));
 
     let feet = gtk::Box::new(gtk::Orientation::Vertical, STACK_GAP + 4);
     feet.set_halign(gtk::Align::Center);
@@ -1376,6 +1878,7 @@ fn build_page(
         sub,
         badge,
         walk,
+        motion: moving,
         meter,
         dial: state,
     };
@@ -1443,6 +1946,7 @@ fn insist(
     pages: Rc<RefCell<Vec<Page>>>,
     total: Duration,
     anim: Anim,
+    palette: Palette,
     every: Duration,
     live: Rc<Cell<bool>>,
     session: Rc<RefCell<Session>>,
@@ -1504,7 +2008,7 @@ fn insist(
             .iter()
             .map(|page| {
                 let left = Duration::from_secs_f64(page.dial.borrow().remaining.max(0.0));
-                build_page(&app, &page.monitor, total, left, &anim, Entrance::None, &face)
+                build_page(&app, &page.monitor, total, left, &anim, &palette, Entrance::None, &face)
             })
             .collect();
 
@@ -1701,11 +2205,13 @@ fn build_stage(
     remaining: Duration,
     arrival: f64,
     anim: &Anim,
+    palette: &Palette,
     radius: f64,
     count: &gtk::Label,
 ) -> (Stage, Rc<RefCell<Dial>>) {
     let burst_share = anim.burst_share();
     let shards = anim.shard_count();
+    let palette = *palette;
 
     let state = Rc::new(RefCell::new(Dial {
         total: total.as_secs_f64().max(1.0),
@@ -1747,7 +2253,7 @@ fn build_stage(
                 .and_then(|surface| {
                     let into = gtk::cairo::Context::new(&surface).ok()?;
                     into.scale(sx, sy);
-                    paint_backdrop(&into, width, height);
+                    paint_backdrop(&into, width, height, &palette);
                     Some((dw, dh, surface))
                 });
         }
@@ -1761,7 +2267,7 @@ fn build_stage(
                 let _ = cr.restore();
             }
             // A surface too large to allocate is no reason to show nothing.
-            None => paint_backdrop(cr, width, height),
+            None => paint_backdrop(cr, width, height, &palette),
         }
     });
 
@@ -1790,7 +2296,8 @@ fn build_stage(
                     continue;
                 }
                 cr.set_line_width((thickness * (1.0 - wave)).max(0.5));
-                cr.set_source_rgba(0.55, 0.70, 1.0, (1.0 - wave).powi(2) * weight);
+                let (r, g, b) = palette.wave;
+                cr.set_source_rgba(r, g, b, (1.0 - wave).powi(2) * weight);
                 cr.arc(cx, cy, (reach * ease_out_cubic(wave)).max(1.0), 0.0, TAU);
                 let _ = cr.stroke();
             }
@@ -1803,7 +2310,8 @@ fn build_stage(
                 let angle = i as f64 / shards.max(1) as f64 * TAU + 0.4;
                 let speed = 0.55 + ((i * 7) % 5) as f64 * 0.16;
                 let distance = reach * flown * speed;
-                cr.set_source_rgba(0.62, 0.74, 1.0, fade);
+                let (r, g, b) = palette.light;
+                cr.set_source_rgba(r, g, b, fade);
                 cr.arc(
                     cx + angle.cos() * distance,
                     cy + angle.sin() * distance,
@@ -1820,7 +2328,7 @@ fn build_stage(
         if let Some(t) = dial.celebrate
             && t < 1.0
         {
-            draw_celebration(cr, cx, cy, reach, t);
+            draw_celebration(cr, cx, cy, reach, t, &palette);
         }
     });
 
@@ -1855,7 +2363,8 @@ fn build_stage(
         // A hairline, not a hoop: the ring is a boundary drawn around the
         // clock, and the only heavy thing on this page should be the time.
         cr.set_line_width(2.5);
-        cr.set_source_rgba(0.20, 0.28, 0.47, 0.9 * arriving);
+        let (r, g, b) = palette.hairline;
+        cr.set_source_rgba(r, g, b, 0.9 * arriving);
         cr.arc(cx, cy, radius, 0.0, TAU);
         let _ = cr.stroke();
 
@@ -1867,7 +2376,8 @@ fn build_stage(
             // stacking them is what makes the arc look lit rather than painted.
             for (thickness, alpha) in [(16.0, 0.07), (8.0, 0.16), (3.0, 1.0)] {
                 cr.set_line_width(thickness);
-                cr.set_source_rgba(0.56, 0.71, 1.0, alpha * arriving);
+                let (r, g, b) = palette.accent;
+                cr.set_source_rgba(r, g, b, alpha * arriving);
                 cr.arc(cx, cy, radius, -FRAC_PI_2, -FRAC_PI_2 + TAU * drawn);
                 let _ = cr.stroke();
             }
@@ -1914,18 +2424,23 @@ fn build_stage(
 ///
 /// Split out from the draw func so it can be painted into a cache, used as the
 /// fallback when one cannot be allocated, and timed without a display.
-fn paint_backdrop(cr: &gtk::cairo::Context, width: i32, height: i32) {
+fn paint_backdrop(cr: &gtk::cairo::Context, width: i32, height: i32, palette: &Palette) {
     let (cx, cy) = (width as f64 / 2.0, height as f64 / 2.0);
     let reach = (cx * cx + cy * cy).sqrt();
 
-    cr.set_source_rgba(0.024, 0.031, 0.051, 1.0);
+    // Solid, or -- with `background = "dim"` -- most of the way there, so the
+    // desk shows through as a shape rather than as something to read. The
+    // window behind this is transparent either way; it is this layer that
+    // decides how much of the desk survives.
+    cr.set_source_rgba(0.024, 0.031, 0.051, palette.cover);
     let _ = cr.paint();
 
     // Graph paper, almost too faint to see: it gives the black somewhere to
     // be, so a screen that is entirely one colour does not read as a screen
     // that has died.
     cr.set_line_width(1.0);
-    cr.set_source_rgba(0.55, 0.70, 1.0, 0.022);
+    let (r, g, b) = palette.wave;
+    cr.set_source_rgba(r, g, b, 0.022);
     let mut x = (width as f64 % GRID) / 2.0;
     while x < width as f64 {
         cr.move_to(x.floor() + 0.5, 0.0);
@@ -1943,8 +2458,9 @@ fn paint_backdrop(cr: &gtk::cairo::Context, width: i32, height: i32) {
     // And a breath of light behind the dial, so the middle of the page is
     // where the eye goes. The costly line on this page: see `backdrop`.
     let glow = gtk::cairo::RadialGradient::new(cx, cy, 0.0, cx, cy, reach * 0.62);
-    glow.add_color_stop_rgba(0.0, 0.29, 0.42, 0.85, 0.10);
-    glow.add_color_stop_rgba(1.0, 0.29, 0.42, 0.85, 0.0);
+    let (r, g, b) = palette.glow;
+    glow.add_color_stop_rgba(0.0, r, g, b, 0.10);
+    glow.add_color_stop_rgba(1.0, r, g, b, 0.0);
     let _ = cr.set_source(&glow);
     let _ = cr.paint();
 }
@@ -2100,18 +2616,24 @@ fn arc_of(dial: &Dial) -> f64 {
 /// Confetti colours, every one already on the page: the badge's green, the
 /// dial's two blues, and the unseen badge's amber. A celebration in colours
 /// the page has never used would look pasted on.
-const CONFETTI: [(f64, f64, f64); 4] = [
-    (0.451, 0.820, 0.620),
-    (0.48, 0.63, 0.97),
-    (0.62, 0.74, 1.0),
-    (0.788, 0.639, 0.373),
-];
+/// The green and the amber are fixed; the two blues follow the accent. See
+/// [`Palette::confetti`].
+const GREEN: (f64, f64, f64) = (0.451, 0.820, 0.620);
+const AMBER: (f64, f64, f64) = (0.788, 0.639, 0.373);
 
 /// The walk paid off: one green wave and a sky of confetti, launched from the
 /// middle of the page and sinking as it fades. Varied without randomness, the
 /// same way the shards are -- every scan earns the same celebration, and
 /// nothing here needs a seed.
-fn draw_celebration(cr: &gtk::cairo::Context, cx: f64, cy: f64, reach: f64, t: f64) {
+fn draw_celebration(
+    cr: &gtk::cairo::Context,
+    cx: f64,
+    cy: f64,
+    reach: f64,
+    t: f64,
+    palette: &Palette,
+) {
+    let confetti = palette.confetti();
     let fade = (1.0 - t).powi(2);
 
     // The wave first: the badge's green, and the only green ring this page
@@ -2135,7 +2657,7 @@ fn draw_celebration(cr: &gtk::cairo::Context, cx: f64, cy: f64, reach: f64, t: f
         let x = cx + angle.cos() * distance;
         let y = cy + angle.sin() * distance * 0.85 + sink;
 
-        let (r, g, b) = CONFETTI[(i % 4) as usize];
+        let (r, g, b) = confetti[(i % 4) as usize];
         cr.set_source_rgba(r, g, b, fade);
 
         // Little rectangles, each tumbling at its own rate.
@@ -2169,7 +2691,7 @@ mod tests {
 
     /// The three cells a page is rebuilt from, with no walk in the break.
     fn faced(ask: Option<&str>, waiting: bool, scanned: bool, reachable: bool) -> Face {
-        face_of(ask, waiting, scanned, reachable, waiting && scanned, Walk::default())
+        face_of(ask, waiting, scanned, reachable, waiting && scanned, Walk::default(), Motion::default(), false)
     }
 
     #[test]
@@ -2210,7 +2732,7 @@ mod tests {
         let prompt = Some(PROMPT);
         let part = Walk { walked: 12, needed: 20, marked: false };
         let full = Walk { walked: 20, needed: 20, marked: false };
-        let face = |waiting, scanned, walk| face_of(prompt, waiting, scanned, true, false, walk);
+        let face = |waiting, scanned, walk| face_of(prompt, waiting, scanned, true, false, walk, Motion::default(), false);
 
         // No walk in this break: no second badge, whatever else is going on.
         assert!(face(true, true, Walk::default()).walk.is_none());
@@ -2234,7 +2756,7 @@ mod tests {
         // Only the gate opening says the page is done -- not the walk on its
         // own, and not the scan on its own.
         assert!(!face(true, true, full).done, "the engine has not opened it yet");
-        assert!(face_of(prompt, true, true, true, true, full).done);
+        assert!(face_of(prompt, true, true, true, true, full, Motion::default(), false).done);
     }
 
     #[test]
@@ -2331,6 +2853,181 @@ mod tests {
         assert!(!worth_repainting(0.5, 0.5, RADIUS));
         assert!(!worth_repainting(0.500_000_1, 0.5, RADIUS));
         assert!(worth_repainting(0.51, 0.5, RADIUS));
+    }
+
+    fn look(toml: &str) -> Look {
+        toml::from_str(toml).unwrap()
+    }
+
+    #[test]
+    fn the_page_ships_as_it_always_has() {
+        let stock = Look::default();
+        assert_eq!(stock.palette(), Palette::default());
+        assert_eq!(stock.palette().cover, 1.0);
+        assert!(stock.accent_misconfigured().is_none());
+        assert!(!stock.prompts.on());
+        // The stylesheet gets the same blue it was written with.
+        let css = stock.css("rgba(ACCENT,0.1) MONO");
+        assert!(css.starts_with("rgba(122,162,255,0.1) "));
+        assert!(css.contains("JetBrains Mono"));
+    }
+
+    #[test]
+    fn the_stock_accent_written_out_is_still_the_stock_palette() {
+        // Case and spacing are not a departure from the default.
+        assert_eq!(look(r##"accent = " #7AA2FF ""##).palette(), Palette::default());
+    }
+
+    #[test]
+    fn another_accent_recolours_everything_that_is_not_text() {
+        let warm = look(r##"accent = "#ff9966""##).palette();
+        assert_ne!(warm, Palette::default());
+        assert!((warm.accent.0 - 1.0).abs() < 1e-9);
+        // Derived colours keep their relationships: the hairline is darker
+        // than the arc, the shards lighter.
+        assert!(warm.hairline.0 < warm.accent.0);
+        assert!(warm.light.1 > warm.accent.1);
+        let css = look(r##"accent = "#ff9966""##).css("ACCENT");
+        assert_eq!(css, "255,153,102");
+    }
+
+    #[test]
+    fn a_colour_that_is_not_one_costs_a_colour_and_not_a_break() {
+        let odd = look(r#"accent = "blue""#);
+        assert!(odd.accent_misconfigured().unwrap().contains("blue"));
+        assert_eq!(odd.palette(), Palette::default());
+        assert_eq!(odd.css("ACCENT"), "122,162,255");
+    }
+
+    #[test]
+    fn dim_leaves_the_desk_showing_through() {
+        let palette = look(r#"background = "dim""#).palette();
+        assert!(palette.cover < 1.0 && palette.cover > 0.5);
+    }
+
+    #[test]
+    fn a_font_goes_first_in_the_stack_and_cannot_break_out_of_its_quotes() {
+        let css = look(r#"font = "IBM \"Plex\" Mono""#).css("MONO");
+        assert!(css.starts_with("\"IBM Plex Mono\", \"JetBrains Mono\""));
+    }
+
+    #[test]
+    fn prompts_read_as_a_switch_or_a_list() {
+        assert_eq!(look(r#"prompts = "off""#).prompts, Prompts::Off);
+        assert_eq!(look(r#"prompts = "on""#).prompts, Prompts::On);
+        assert_eq!(look(r#"prompts = "enabled""#).prompts, Prompts::On);
+        assert_eq!(
+            look(r#"prompts = ["Water.", "  ", "Look up."]"#).prompts,
+            Prompts::Custom(vec!["Water.".into(), "Look up.".into()])
+        );
+        // An empty list is off, written the long way.
+        assert_eq!(look("prompts = []").prompts, Prompts::Off);
+        assert!(toml::from_str::<Look>(r#"prompts = "sometimes""#).is_err());
+        assert_eq!(Prompts::On.lines().len(), PROMPTS.len());
+    }
+
+    #[test]
+    fn the_prompter_changes_its_line_on_the_beat_and_not_between() {
+        let mut prompter =
+            Prompter::new(&look(r#"prompts = ["a", "b", "c"]
+prompt_every = "5s""#));
+        prompter.begin_at(2);
+        assert_eq!(prompter.current().as_deref(), Some("c"));
+        for _ in 0..4 {
+            assert_eq!(prompter.tick(), None);
+        }
+        // Wraps round to the start.
+        assert_eq!(prompter.tick().as_deref(), Some("a"));
+        assert_eq!(prompter.current().as_deref(), Some("a"));
+        for _ in 0..4 {
+            assert_eq!(prompter.tick(), None);
+        }
+        assert_eq!(prompter.tick().as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn the_prompter_says_nothing_when_there_is_nothing_to_say() {
+        let mut off = Prompter::new(&Look::default());
+        off.begin_at(3);
+        assert_eq!(off.current(), None);
+        for _ in 0..100 {
+            assert_eq!(off.tick(), None);
+        }
+        // One line is shown and never swapped: a change to the same line is
+        // a flicker for no reason.
+        let mut one = Prompter::new(&look(r#"prompts = ["Water."]"#));
+        one.begin_at(7);
+        assert_eq!(one.current().as_deref(), Some("Water."));
+        for _ in 0..100 {
+            assert_eq!(one.tick(), None);
+        }
+    }
+
+    #[test]
+    fn a_silly_interval_is_clamped_rather_than_obeyed() {
+        let quick = Prompter::new(&look(r#"prompts = "on"
+prompt_every = "1s""#));
+        assert_eq!(quick.every, 5);
+        let slow = Prompter::new(&look(r#"prompts = "on"
+prompt_every = "3h""#));
+        assert_eq!(slow.every, 600);
+    }
+
+    #[test]
+    fn the_moving_half_asks_for_its_own_thing_last() {
+        let prompt = Some("Scan the tag");
+        let walk = Walk { walked: 20, needed: 20, marked: false };
+        let going = Motion { secs: 12, needed: 30, lost: false };
+        // Countdown spent, tag in, walk in, phone still to say so.
+        let face = face_of(prompt, true, true, true, false, walk, going, false);
+        assert_eq!(face.ask.as_deref(), Some("Keep walking — 18s more"));
+        assert_eq!(face.motion, Some(going));
+        assert!(!face.done);
+        // The walk outranks the moving: with steps still owed, that is what is
+        // asked for, whatever the phone says.
+        let short = Walk { walked: 5, needed: 20, marked: false };
+        assert_eq!(
+            face_of(prompt, true, true, true, false, short, going, false).ask.as_deref(),
+            Some("15 more steps")
+        );
+        // A sensor that cannot be read is not asked for: the page falls back
+        // to the tag's line and the badge says why.
+        let lost = Motion { lost: true, ..going };
+        assert_eq!(face_of(prompt, true, true, true, false, walk, lost, false).ask.as_deref(), Some("Scan the tag"));
+        assert!(Mark::Move(lost).unseen());
+        assert!(words_for(Mark::Move(lost)).contains("ends on the clock"));
+        // Done: green, and it says so.
+        let done = Motion { secs: 30, needed: 30, lost: false };
+        assert!(Mark::Move(done).done());
+        assert_eq!(words_for(Mark::Move(done)), "Moved");
+        assert_eq!(words_for(Mark::Move(Motion { secs: 0, needed: 30, lost: false })), "Not moving yet");
+        assert_eq!(words_for(Mark::Move(going)), "Moving · 12s of 30s");
+        // Not part of this break: no badge at all.
+        assert_eq!(face_of(prompt, false, false, true, false, walk, Motion::default(), false).motion, None);
+    }
+
+    #[test]
+    fn a_shaken_phone_is_called_out_and_forgiven() {
+        let prompt = Some("Scan the tag");
+        let shook = Walk { walked: 27, needed: 100, marked: false };
+        let none = Motion::default();
+        // Countdown running: the badge teases, the ask is untouched.
+        let face = face_of(prompt, false, false, true, false, shook, none, true);
+        assert!(face.busted);
+        assert_eq!(face.ask, None);
+        // Countdown spent: the verdict is the big line, tag scanned or not.
+        assert_eq!(face_of(prompt, true, false, true, false, shook, none, true).ask.as_deref(), Some(CAUGHT));
+        assert_eq!(face_of(prompt, true, true, true, false, shook, none, true).ask.as_deref(), Some(CAUGHT));
+        // Forgiven: back to counting.
+        let face = face_of(prompt, true, true, true, false, shook, none, false);
+        assert!(!face.busted);
+        assert_eq!(face.ask.as_deref(), Some("73 more steps"));
+        // No walk in this break: nothing to be caught at.
+        assert!(!face_of(prompt, true, true, true, false, Walk::default(), none, true).busted);
+        let mark = Mark::Cheat(shook);
+        assert!(!mark.done());
+        assert!(mark.unseen());
+        assert_eq!(words_for(mark), "Nice try — 27 steps");
     }
 
     #[test]
@@ -2480,11 +3177,11 @@ mod paint_tests {
     fn painting_the_backdrop_costs_more_than_a_frame() {
         let s = surface(1920, 1080);
         let cr = gtk::cairo::Context::new(&s).unwrap();
-        paint_backdrop(&cr, 1920, 1080); // warm
+        paint_backdrop(&cr, 1920, 1080, &Palette::default()); // warm
 
         let t = std::time::Instant::now();
         for _ in 0..5 {
-            paint_backdrop(&cr, 1920, 1080);
+            paint_backdrop(&cr, 1920, 1080, &Palette::default());
         }
         s.flush();
         let each = t.elapsed().as_secs_f64() / 5.0;
@@ -2506,7 +3203,7 @@ mod paint_tests {
         let cached = surface(w, h);
         {
             let into = gtk::cairo::Context::new(&cached).unwrap();
-            paint_backdrop(&into, w, h);
+            paint_backdrop(&into, w, h, &Palette::default());
         }
         let target = surface(w, h);
         let cr = gtk::cairo::Context::new(&target).unwrap();
@@ -2624,13 +3321,13 @@ mod paint_tests {
         let direct = surface(w, h);
         {
             let cr = gtk::cairo::Context::new(&direct).unwrap();
-            paint_backdrop(&cr, w, h);
+            paint_backdrop(&cr, w, h, &Palette::default());
         }
 
         let cached = surface(w, h);
         {
             let into = gtk::cairo::Context::new(&cached).unwrap();
-            paint_backdrop(&into, w, h);
+            paint_backdrop(&into, w, h, &Palette::default());
         }
         let blitted = surface(w, h);
         {

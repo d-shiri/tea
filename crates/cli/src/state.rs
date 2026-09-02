@@ -62,6 +62,8 @@ struct Saved {
     credited_today: u32,
     #[serde(default)]
     steps_today: u32,
+    #[serde(default)]
+    cheats_today: u32,
 }
 
 /// What today came to: how much of this actually worked.
@@ -81,6 +83,10 @@ pub struct Tally {
     pub credited: u32,
     /// Steps walked during breaks, where a walk is counted at all.
     pub steps: u32,
+    /// Breaks in which the steps arrived and the phone said `still` the whole
+    /// time: the count came from a hand, not a walk. Kept because shame is a
+    /// feature.
+    pub cheats: u32,
 }
 
 impl Tally {
@@ -249,6 +255,7 @@ impl Store {
                 postponed: saved.postponed_today,
                 credited: saved.credited_today,
                 steps: saved.steps_today,
+                cheats: saved.cheats_today,
             },
         })
     }
@@ -282,6 +289,7 @@ impl Store {
             postponed_today: tally.postponed,
             credited_today: tally.credited,
             steps_today: tally.steps,
+            cheats_today: tally.cheats,
         };
 
         if let Err(e) = self.write(&saved) {

@@ -6,7 +6,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const DEFAULT_FILE: &str = r#"# tea — take a break, whether you like it or not
+pub const DEFAULT_FILE: &str = r##"# tea — take a break, whether you like it or not
 #
 # Durations are strings: "90s", "25m", "1h". A bare number means minutes.
 # Command-line flags override anything set here.
@@ -62,6 +62,31 @@ length = "15m"
 mode = "soft"
 recheck = "400ms"     # how often an insisting page checks it is still in front
 
+# How the page looks, and what it says while the clock runs. The defaults are
+# the page as it ships; nothing here has to be set.
+#
+#   accent      the colour of the ring, the glow, the blast and the pills, as
+#               "#rrggbb". The text stays as it is: it is white on dark for a
+#               reason, and an accent is a highlight, not a theme.
+#   background  "dark" covers the screen. "dim" leaves your desktop showing
+#               through the dark, so the page reads as a veil over your work
+#               rather than a wall in front of it. Same page either way.
+#   font        a family name, "IBM Plex Mono". Empty uses the first monospaced
+#               face the machine has. Monospaced is the point: the clock and
+#               the count change under you, and proportional digits twitch.
+#   prompts     what the page says under "Time to stop" while the countdown
+#               runs. "off" keeps the one line it has always said. "on" cycles
+#               through a short built-in list -- look away, roll your
+#               shoulders, drink some water -- and a list of your own does the
+#               same with your words: prompts = ["Water.", "Look out of the window."]
+#   prompt_every  how long each one stays up.
+[page]
+accent = "#7aa2ff"
+background = "dark"
+font = ""
+prompts = "off"
+prompt_every = "20s"
+
 [nfc]
 # Sitting out a break at your own desk is not a break. With this on, the page
 # does not lift when the countdown ends -- it lifts when a tag you have to get
@@ -103,11 +128,30 @@ prompt = "Scan the tag to get your desk back"
 #           `tag_scanned` trigger -- an input_button is one line of YAML. Any
 #           entity whose state changes will do, which is why a Zigbee button by
 #           the kettle works just as well as a sticker.
+#
+# And the other way round. With `publish` on, tea keeps a sensor on the hub
+# saying what it is doing -- "working", "warning", "break", "waiting", "held",
+# "off" -- with the next break, the walk so far and today's tally hanging off
+# it as attributes; six plain numbers beside it that the hub can graph
+# (sensor.tea_worked, _walk, _steps_today, _breaks_today, _postpones_today,
+# and binary_sensor.tea_break); and fires a `tea` event at each turn:
+# break_start, scan, released, break_end, postpone, and so on, each with
+# `what` set to that word. dist/home-assistant/ has a dashboard and the
+# automations, ready to paste.
+# An automation on `event_type: tea` with `event_data: {what: break_start}` is
+# the hall light, the speaker, or the phone. Needs `url` and a token, not the
+# tag: reporting works with nfc off. Sent when something changes, not every
+# second -- the countdown is `break_ends_at`, and the hub can do that sum.
+#
+#   publish         "off" (default) or "on".
+#   publish_entity  what the hub knows tea as.
 [nfc.home_assistant]
 url = ""              # e.g. "http://homeassistant.local:8123"
 token = ""            # a long-lived access token, from your profile page
 entity = ""           # e.g. "tag.living_room"
 poll = "2s"           # how often to ask, while a break is up
+publish = "off"
+publish_entity = "sensor.tea"
 
 # The other half of the gate. A tag proves you stood up; it does not prove you
 # went anywhere, and a tag within reach of the chair proves nothing at all. With
@@ -140,7 +184,39 @@ mode = "off"
 count = 20
 entity = ""           # e.g. "sensor.pixel_daily_steps"
 sync = "batched"
-"#;
+
+# And a third half, for the hole the other two leave: steps can be earned by a
+# phone waved at the desk. Android's activity recognition wants the whole
+# body going somewhere, and the companion app reports its word as an entity --
+# "walking", "still", "in_vehicle". With this on the page also waits for a
+# little time in a moving state, added up over the break. No hardware: switch
+# on the "Detected activity" sensor in the companion app and point this at it.
+# Read from the hub on the same beat as the steps, and lazily reported by the
+# phone -- a minute behind at times -- so `for` is a floor, not a stopwatch,
+# and `grace` still ends a break the phone never speaks up for.
+#
+#   mode    "off" (default) or "on".
+#   entity  the sensor, "sensor.<phone>_detected_activity".
+#   for     how long in a moving state the break wants, in total. "auto"
+#           scales it from the steps above -- a hundred steps asks for thirty
+#           seconds, ten steps for five, never less than five nor more than
+#           two minutes -- and is thirty seconds when no steps are counted.
+#           A duration says it outright.
+#   states  which of the sensor's words count as moving.
+#
+# And a hand is not a walk. Steps that arrive while this sensor has said
+# "still" the whole time came from a phone being shaken at the desk; once
+# there are twenty of them and half a minute has gone by with no movement
+# seen, the page says so -- "Nice try" on the steps badge, with the count
+# crossed out -- and the day's tally counts it. The gate is not changed by
+# this: it is still waiting for the walk, and the teasing stops the moment the
+# phone reports moving.
+[nfc.moving]
+mode = "off"
+entity = ""           # e.g. "sensor.pixel_detected_activity"
+for = "auto"
+states = ["walking", "on_foot", "running"]
+"##;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -157,6 +233,7 @@ pub struct FileConfig {
     pub sound: crate::sound::Config,
     pub animation: crate::overlay::Anim,
     pub hold: crate::overlay::Hold,
+    pub page: crate::overlay::Look,
     pub nfc: crate::nfc::Config,
 }
 
@@ -275,6 +352,7 @@ impl Default for FileConfig {
             sound: crate::sound::Config::default(),
             animation: crate::overlay::Anim::default(),
             hold: crate::overlay::Hold::default(),
+            page: crate::overlay::Look::default(),
             nfc: crate::nfc::Config::default(),
         }
     }

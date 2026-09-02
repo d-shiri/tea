@@ -156,6 +156,17 @@ pub trait Blocker {
     /// Called on every tick of a gated break, so it must do nothing when
     /// nothing has changed.
     fn steps_seen(&mut self, _walked: u32, _needed: u32, _marked: bool) {}
+    /// How the time on your feet is going: `secs` counted in a moving state
+    /// since the page went up, out of the `needed` this break asks for.
+    /// `lost` says the sensor cannot be read, so the page can say that this
+    /// half will not close by itself. Same contract as `steps_seen`: called
+    /// every tick, must do nothing when nothing has changed.
+    fn motion_seen(&mut self, _secs: u32, _needed: u32, _lost: bool) {}
+    /// The steps arrived and the phone said `still` the whole time: the count
+    /// came from a hand, not a walk. `busted` goes back to false the moment
+    /// the phone reports moving, so the page can stop teasing. Called every
+    /// tick of a gated break, same contract as the two above.
+    fn cheat_seen(&mut self, _busted: bool) {}
     /// The release signal has arrived for the break currently on screen.
     ///
     /// Called by the host rather than emitted as a command, because a signal

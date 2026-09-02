@@ -1,0 +1,153 @@
+# A dashboard for tea, ready to paste.
+#
+# Settings → Dashboards → Add dashboard → "New dashboard from scratch". Open it,
+# pencil (top right) → ⋮ → "Raw configuration editor", replace everything with
+# this file, save.
+#
+# Needs `publish = "on"` under [nfc.home_assistant] in tea's config. The
+# entities are named after `publish_entity`: with the default "sensor.tea" they
+# are the ones below. Two numbers are yours to adjust and marked as such.
+title: tea
+views:
+  - title: tea
+    path: tea
+    icon: mdi:tea
+    cards:
+      # What tea is doing right now, in a sentence.
+      - type: markdown
+        content: >-
+          {% set s = states('sensor.tea') %}
+          {% if s == 'break' %}
+          ## ☕ Break — the page lifts in {{ time_until(state_attr('sensor.tea', 'break_ends_at') | as_datetime) }}
+          {% elif s == 'waiting' %}
+          ## 🚶 Waiting for the walk — {{ state_attr('sensor.tea', 'steps_walked') }} of {{ state_attr('sensor.tea', 'steps_needed') }} steps
+          {% elif s == 'warning' %}
+          ## ⏳ Break in a moment
+          {% elif s == 'held' %}
+          ## 📞 A break is owed — held by a call
+          {% elif s == 'off' %}
+          ## 💤 Off — {{ state_attr('sensor.tea', 'why_off') }}
+          {% elif s == 'working' %}
+          ## ⌨️ Working — next break in {{ time_until(state_attr('sensor.tea', 'next_break_at') | as_datetime) }}
+          {% else %}
+          ## tea is not reporting
+          {% endif %}
+
+      # The clock, and the walk.
+      - type: horizontal-stack
+        cards:
+          - type: gauge
+            entity: sensor.tea_worked
+            name: Worked
+            unit: min
+            min: 0
+            max: 30            # ← your `work`, in minutes
+            needle: true
+            severity:
+              green: 0
+              yellow: 20
+              red: 27
+          - type: gauge
+            entity: sensor.tea_walk
+            name: This walk
+            unit: steps
+            min: 0
+            max: 100           # ← your `nfc.steps.count`
+            needle: true
+            severity:
+              red: 0
+              yellow: 50
+              green: 100
+
+      # Today.
+      - type: horizontal-stack
+        cards:
+          - type: tile
+            entity: sensor.tea_breaks_today
+            name: Breaks
+            icon: mdi:coffee
+            color: teal
+          - type: tile
+            entity: sensor.tea_steps_today
+            name: Steps walked
+            icon: mdi:walk
+            color: green
+          - type: tile
+            entity: sensor.tea_postpones_today
+            name: Postponed
+            icon: mdi:timer-sand
+            color: amber
+          - type: tile
+            entity: sensor.tea_cheats_today
+            name: Nice tries
+            icon: mdi:emoticon-devil-outline
+            color: red
+
+      # The day as a timeline: when the page was up, and the steps climbing.
+      - type: history-graph
+        title: Today
+        hours_to_show: 12
+        entities:
+          - entity: binary_sensor.tea_break
+            name: Break
+          - entity: sensor.tea_steps_today
+            name: Steps
+          - entity: sensor.tea_worked
+            name: Worked
+
+      # The month, one bar a day. Long-term statistics, so this survives the
+      # recorder purging the raw history.
+      - type: statistics-graph
+        title: Steps walked, per day
+        chart_type: bar
+        period: day
+        days_to_show: 30
+        stat_types:
+          - change
+        entities:
+          - sensor.tea_steps_today
+
+      - type: statistics-graph
+        title: Breaks and postpones, per day
+        chart_type: bar
+        period: day
+        days_to_show: 30
+        stat_types:
+          - change
+        entities:
+          - sensor.tea_breaks_today
+          - sensor.tea_postpones_today
+          - sensor.tea_cheats_today
+
+      # The small print.
+      - type: entities
+        title: Details
+        entities:
+          - entity: sensor.tea
+            name: State
+          - type: attribute
+            entity: sensor.tea
+            attribute: next_break_at
+            name: Next break at
+            format: time
+          - type: attribute
+            entity: sensor.tea
+            attribute: break_ends_at
+            name: Break ends at
+            format: time
+          - type: attribute
+            entity: sensor.tea
+            attribute: postpones_left
+            name: Postpones left
+          - type: attribute
+            entity: sensor.tea
+            attribute: tag_scanned
+            name: Tag scanned
+          - type: attribute
+            entity: sensor.tea
+            attribute: steps_needed
+            name: Steps asked for
+          - type: attribute
+            entity: sensor.tea
+            attribute: credited_today
+            name: Breaks credited for being away

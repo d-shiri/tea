@@ -64,6 +64,8 @@ pub struct Config {
     pub home_assistant: HomeAssistant,
     /// The other half of the gate: steps walked while the page is up.
     pub steps: Steps,
+    /// And a third: the phone's own word that its owner is on the move.
+    pub moving: Moving,
     /// Where the tag's URL actually points, when tea is not reached directly.
     ///
     /// Nothing has to listen on your network for a tag to work: a reverse proxy
@@ -84,6 +86,7 @@ impl Default for Config {
             url: String::new(),
             home_assistant: HomeAssistant::default(),
             steps: Steps::default(),
+            moving: Moving::default(),
         }
     }
 }
@@ -126,6 +129,47 @@ impl Config {
     /// second half can never be satisfied is a locked screen.
     pub fn counts_steps(&self) -> bool {
         self.on() && self.asks() && self.steps.on()
+    }
+
+    /// Whether the phone's word that you are moving is part of the gate. Read
+    /// from the hub like the steps, and needs it for the same reason.
+    pub fn counts_moving(&self) -> bool {
+        self.on() && self.asks() && self.moving.on()
+    }
+
+    /// Seconds of moving this break asks for, scaled from the steps when the
+    /// steps are counted at all.
+    pub fn moving_secs(&self) -> u32 {
+        self.moving.secs(self.counts_steps().then_some(self.steps.count))
+    }
+
+    /// The same, with where the number came from.
+    pub fn moving_words(&self) -> String {
+        self.moving.describe(self.counts_steps().then_some(self.steps.count))
+    }
+
+    /// Why moving is on in the file and off in the process, if it is.
+    pub fn moving_misconfigured(&self) -> Option<String> {
+        if self.moving.mode != Mode::On || !self.on() {
+            return None;
+        }
+        if !self.asks() {
+            return Some(
+                "nfc.moving is on, but no hub is being watched — the activity comes from Home \
+                 Assistant (nfc.home_assistant.url and entity)"
+                    .into(),
+            );
+        }
+        if self.moving.entity.trim().is_empty() {
+            return Some("nfc.moving is on, but nfc.moving.entity is empty — nothing to watch".into());
+        }
+        if matches!(self.moving.r#for, Wanted::For(d) if d.is_zero()) {
+            return Some("nfc.moving.for is 0, so no time on your feet is being asked for".into());
+        }
+        if self.moving.states.iter().all(|s| s.trim().is_empty()) {
+            return Some("nfc.moving.states is empty — no state would count as moving".into());
+        }
+        None
     }
 
     /// Set and switched on, but with nothing to read it from. Worth saying out
@@ -243,6 +287,152 @@ impl Walk {
     }
 }
 
+/// The third half of the gate: the phone's own word that its owner is on the
+/// move, from Android's activity recognition rather than from a step count.
+///
+/// Steps can be earned by a phone waved at the desk. Activity recognition
+/// wants the whole body going somewhere, and says so in a word: `walking`,
+/// `on_foot`, `running`. This asks for a little time in one of those states,
+/// added up over the break, and is the cheapest honest check there is -- no
+/// hardware, one sensor switched on in the companion app.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Moving {
+    /// Off by default, like the other two: an upgrade must never quietly add
+    /// a third thing standing between you and your desk.
+    pub mode: Mode,
+    /// The entity, `sensor.<phone>_detected_activity` from the companion app.
+    pub entity: String,
+    /// How long in a moving state the break wants, in total. `"auto"` works
+    /// it out from the steps asked for; a duration says it outright. Android
+    /// reports lazily, a minute behind at times, so this is a floor and not a
+    /// stopwatch.
+    #[serde(rename = "for")]
+    pub r#for: Wanted,
+    /// Which of the sensor's words count as moving.
+    pub states: Vec<String>,
+}
+
+impl Default for Moving {
+    fn default() -> Self {
+        Self {
+            mode: Mode::Off,
+            entity: String::new(),
+            r#for: Wanted::Auto,
+            states: ["walking", "on_foot", "running"].map(String::from).to_vec(),
+        }
+    }
+}
+
+impl Moving {
+    pub fn on(&self) -> bool {
+        self.mode == Mode::On
+            && !self.entity.trim().is_empty()
+            && !matches!(self.r#for, Wanted::For(d) if d.is_zero())
+            && self.states.iter().any(|s| !s.trim().is_empty())
+    }
+
+    /// Whole seconds asked for, given how many steps the break asks for --
+    /// `None` when it asks for none.
+    ///
+    /// On auto, a share of the time the walk itself takes: a hundred steps
+    /// is a minute of walking and asks for thirty seconds of the phone
+    /// saying so, ten steps asks for five. Half rather than all of it because
+    /// the sensor is late and lumpy, and a floor the walk cannot reach opens
+    /// the gate on grace instead of on the walk. Without a walk to scale
+    /// from, thirty seconds: out of the room, and not only to the doorway.
+    pub fn secs(&self, steps: Option<u32>) -> u32 {
+        match self.r#for {
+            Wanted::For(d) => d.as_secs().clamp(1, 3600) as u32,
+            Wanted::Auto => match steps {
+                Some(count) => ((f64::from(count) * SECS_PER_STEP).round() as u32).clamp(5, 120),
+                None => 30,
+            },
+        }
+    }
+
+    /// How it reads in `tea config`: the number, and where it came from.
+    pub fn describe(&self, steps: Option<u32>) -> String {
+        match (self.r#for, steps) {
+            (Wanted::For(_), _) => format!("{}s", self.secs(steps)),
+            (Wanted::Auto, Some(count)) => format!("{}s — auto, from {count} steps", self.secs(steps)),
+            (Wanted::Auto, None) => format!("{}s — auto, with no walk to scale from", self.secs(steps)),
+        }
+    }
+
+    /// Whether what the sensor said counts as moving.
+    pub fn counts(&self, state: &str) -> bool {
+        let state = state.trim();
+        self.states.iter().any(|s| s.trim().eq_ignore_ascii_case(state))
+    }
+}
+
+/// Seconds of moving asked for per step asked for, on auto. A hundred steps
+/// at walking pace is about a minute; half of that is what the phone has to
+/// have noticed.
+const SECS_PER_STEP: f64 = 0.3;
+
+/// How long the moving half wants: worked out from the steps, or said.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Wanted {
+    /// Scaled from `nfc.steps.count` -- see `Moving::secs`.
+    #[default]
+    Auto,
+    For(Duration),
+}
+
+impl<'de> Deserialize<'de> for Wanted {
+    fn deserialize<D: de::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl de::Visitor<'_> for V {
+            type Value = Wanted;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str(r#""auto", or a duration like "30s""#)
+            }
+            fn visit_str<E: de::Error>(self, s: &str) -> Result<Wanted, E> {
+                if s.trim().eq_ignore_ascii_case("auto") {
+                    return Ok(Wanted::Auto);
+                }
+                config::parse(s).map(Wanted::For).ok_or_else(|| {
+                    E::custom(format!("{s:?} is not \"auto\" or a duration like \"30s\""))
+                })
+            }
+            fn visit_i64<E: de::Error>(self, n: i64) -> Result<Wanted, E> {
+                // A bare number is seconds here, not minutes: nobody wants
+                // three minutes of walking, and `for = 30` reads as thirty.
+                u64::try_from(n)
+                    .ok()
+                    .map(|secs| Wanted::For(Duration::from_secs(secs)))
+                    .ok_or_else(|| E::custom(format!("{n} is not a number of seconds")))
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// How the time on your feet is going: seconds counted in a moving state since
+/// this break began, and how many the gate is holding out for. A `needed` of
+/// zero means moving is not part of this break at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Motion {
+    pub secs: u32,
+    pub needed: u32,
+    /// The sensor cannot be read, so this half will never close on its own.
+    /// Carried to the page so it can say so, rather than showing a count that
+    /// is never going to move.
+    pub lost: bool,
+}
+
+impl Motion {
+    pub fn done(&self) -> bool {
+        self.secs >= self.needed
+    }
+
+    pub fn left(&self) -> u32 {
+        self.needed.saturating_sub(self.secs)
+    }
+}
+
 /// A duration that is allowed to be `"off"`.
 ///
 /// Zero and `"off"` mean the same thing to the scheduler — wait indefinitely —
@@ -312,6 +502,13 @@ pub struct HomeAssistant {
     /// How often to ask, and only while a break is on screen. Nothing is asked
     /// of Home Assistant for the other twenty-five minutes.
     pub poll: crate::config::Dur,
+    /// The other direction: tea telling the hub what it is doing, so the hub
+    /// can light the hall, ring the speaker, or show the next break on a
+    /// dashboard. Needs only `url` and a token -- not the tag.
+    pub publish: Mode,
+    /// What the hub knows tea as. A sensor, so it shows up in the states list
+    /// and can be graphed like anything else.
+    pub publish_entity: String,
 }
 
 impl Default for HomeAssistant {
@@ -322,6 +519,8 @@ impl Default for HomeAssistant {
             token_file: PathBuf::new(),
             entity: String::new(),
             poll: crate::config::Dur(Duration::from_secs(2)),
+            publish: Mode::Off,
+            publish_entity: "sensor.tea".into(),
         }
     }
 }
@@ -332,6 +531,40 @@ pub const TOKEN_VAR: &str = "TEA_HA_TOKEN";
 impl HomeAssistant {
     pub fn on(&self) -> bool {
         !self.url.trim().is_empty() && !self.entity.trim().is_empty()
+    }
+
+    /// Whether tea reports to the hub. Independent of the tag: a hub that only
+    /// ever hears from tea, and is never asked anything, is a perfectly good
+    /// arrangement for somebody who wants the hall light on during breaks.
+    pub fn publishes(&self) -> bool {
+        self.publish == Mode::On && !self.url.trim().is_empty()
+    }
+
+    /// Why publishing is on in the file and off in the process, if it is.
+    pub fn publish_misconfigured(&self) -> Option<String> {
+        if self.publish != Mode::On {
+            return None;
+        }
+        if self.url.trim().is_empty() {
+            return Some(
+                "nfc.home_assistant.publish is on, but url is empty — nowhere to report to".into(),
+            );
+        }
+        let entity = self.publish_entity.trim();
+        let well_formed = entity
+            .split_once('.')
+            .is_some_and(|(domain, name)| {
+                !domain.is_empty()
+                    && !name.is_empty()
+                    && domain.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                    && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            });
+        if !well_formed {
+            return Some(format!(
+                "nfc.home_assistant.publish_entity {entity:?} is not an entity id like \"sensor.tea\""
+            ));
+        }
+        None
     }
 
     /// Where the token actually comes from: written in the config, in a file
@@ -415,6 +648,8 @@ pub struct Link {
     /// How far the walk has got. Left here by the poll, read by the tick, the
     /// same one-way arrangement as everything else in this letterbox.
     walk: Cell<Walk>,
+    /// And how the time on your feet has got on, the same way.
+    motion: Cell<Motion>,
     /// Whether whatever watches for scans could be reached, last time it was
     /// asked. `None` until something has looked. A break cannot be gated on a
     /// signal that has no way of arriving, so this decides whether the gate
@@ -428,6 +663,7 @@ impl Link {
             desk: Cell::new(Desk::default()),
             scan: Cell::new(false),
             walk: Cell::new(Walk::default()),
+            motion: Cell::new(Motion::default()),
             reachable: Cell::new(None),
         })
     }
@@ -448,6 +684,17 @@ impl Link {
     pub fn walk(&self) -> Option<Walk> {
         let walk = self.walk.get();
         (walk.needed > 0).then_some(walk)
+    }
+
+    /// Called from the poll: this is how much time on your feet has been seen.
+    pub fn post_motion(&self, motion: Motion) {
+        self.motion.set(motion);
+    }
+
+    /// How the moving is going, or `None` when it is not part of this break.
+    pub fn motion(&self) -> Option<Motion> {
+        let motion = self.motion.get();
+        (motion.needed > 0).then_some(motion)
     }
 
     pub fn set_reachable(&self, ok: bool) {
@@ -858,6 +1105,9 @@ struct Ask {
     /// same beat as the tag and from the same hub, so one poll answers both
     /// halves of the gate.
     legs: Option<Legs>,
+    /// The activity sensor, when the break also wants time on your feet.
+    /// Same beat, same hub, third question.
+    gait: Option<Gait>,
     link: Rc<Link>,
     /// The entity's value when this break started. A *change* is the scan;
     /// comparing against a remembered value rather than a clock means the two
@@ -897,6 +1147,47 @@ struct Legs {
     /// And its own run of silence, for the same reason.
     misses: Cell<u32>,
     lost: Cell<bool>,
+}
+
+/// The moving half of the gate: which sensor, which of its words count, how
+/// long is wanted, and how long has been seen.
+///
+/// Time is added up rather than clocked: every answer that says a moving word
+/// is worth one poll's beat, whatever the phone got up to between. A sensor
+/// that reports a minute late still reports, and the beat it is credited with
+/// is the same beat a prompt one gets.
+struct Gait {
+    entity: String,
+    path: String,
+    needed: u32,
+    states: Vec<String>,
+    /// Seconds each moving answer is worth: the poll interval.
+    beat: f64,
+    secs: Cell<f64>,
+    /// Its own outage latch and run of silence, for the reasons `Legs` has.
+    complained: Cell<bool>,
+    misses: Cell<u32>,
+    lost: Cell<bool>,
+}
+
+impl Gait {
+    fn counts(&self, state: &str) -> bool {
+        let state = state.trim();
+        self.states.iter().any(|s| s.trim().eq_ignore_ascii_case(state))
+    }
+
+    fn motion(&self) -> Motion {
+        // Rounded down, like the steps: a second that has not been walked is
+        // not credited.
+        Motion { secs: self.secs.get() as u32, needed: self.needed, lost: self.lost.get() }
+    }
+
+    fn forget(&self) {
+        self.secs.set(0.0);
+        self.complained.set(false);
+        self.misses.set(0);
+        self.lost.set(false);
+    }
 }
 
 /// Steps taken since the break began, from a sensor that only ever reports a
@@ -1037,6 +1328,20 @@ pub fn watch(cfg: &Config, link: Rc<Link>) -> Result<Watch, String> {
             lost: Cell::new(false),
         }
     });
+    let gait = cfg.counts_moving().then(|| {
+        let entity = cfg.moving.entity.trim().to_string();
+        Gait {
+            path: format!("{base}/api/states/{entity}"),
+            entity,
+            needed: cfg.moving_secs(),
+            states: cfg.moving.states.clone(),
+            beat: ha.every().as_secs_f64(),
+            secs: Cell::new(0.0),
+            complained: Cell::new(false),
+            misses: Cell::new(0),
+            lost: Cell::new(false),
+        }
+    });
     // Posted before the first poll so that a page built in the same tick knows
     // there is a walk in this break, rather than showing no badge for a second
     // and then growing one.
@@ -1044,6 +1349,11 @@ pub fn watch(cfg: &Config, link: Rc<Link>) -> Result<Watch, String> {
         walked: 0,
         needed: legs.as_ref().map_or(0, |l| l.needed),
         marked: false,
+    });
+    link.post_motion(Motion {
+        secs: 0,
+        needed: gait.as_ref().map_or(0, |g| g.needed),
+        lost: false,
     });
 
     let ask = Rc::new(Ask {
@@ -1054,6 +1364,7 @@ pub fn watch(cfg: &Config, link: Rc<Link>) -> Result<Watch, String> {
         token,
         entity,
         legs,
+        gait,
         link,
         baseline: RefCell::new(None),
         busy: Cell::new(false),
@@ -1079,6 +1390,10 @@ pub fn watch(cfg: &Config, link: Rc<Link>) -> Result<Watch, String> {
                 legs.lost.set(false);
                 ask.link.post_walk(Walk { walked: 0, needed: legs.needed, marked: false });
             }
+            if let Some(gait) = &ask.gait {
+                gait.forget();
+                ask.link.post_motion(gait.motion());
+            }
             return glib::ControlFlow::Continue;
         }
         poll(Rc::clone(&ask));
@@ -1103,6 +1418,7 @@ pub fn probe(cfg: &HomeAssistant, entity: &str) -> Result<String, String> {
         token,
         entity,
         legs: None,
+        gait: None,
         link: Link::new(),
         baseline: RefCell::new(None),
         busy: Cell::new(false),
@@ -1133,8 +1449,12 @@ fn poll(ask: Rc<Ask>) {
             Some(legs) => Some(fetch(&ask, &legs.path, &legs.entity).await),
             None => None,
         };
+        let moving = match &ask.gait {
+            Some(gait) => Some(fetch(&ask, &gait.path, &gait.entity).await),
+            None => None,
+        };
         ask.busy.set(false);
-        settle(&ask, tag, steps);
+        settle(&ask, tag, steps, moving);
     });
 }
 
@@ -1208,10 +1528,69 @@ fn read_state(raw: &[u8], entity: &str) -> Result<String, String> {
 }
 
 /// What one answer means for the break on screen.
-fn settle(ask: &Ask, answer: Result<String, String>, steps: Option<Result<String, String>>) {
+fn settle(
+    ask: &Ask,
+    answer: Result<String, String>,
+    steps: Option<Result<String, String>>,
+    moving: Option<Result<String, String>>,
+) {
     settle_tag(ask, answer);
     if let (Some(legs), Some(answer)) = (&ask.legs, steps) {
         settle_steps(ask, legs, answer);
+    }
+    if let (Some(gait), Some(answer)) = (&ask.gait, moving) {
+        settle_motion(ask, gait, answer);
+    }
+}
+
+/// The moving half. Every answer in a moving state is worth one beat of the
+/// poll; anything else -- a still phone, `unknown`, a sensor that has not
+/// reported yet -- leaves the count where it was. Nothing here ever takes
+/// time away: a phone that says `still` for a second between two `walking`s
+/// has not undone the walk.
+fn settle_motion(ask: &Ask, gait: &Gait, answer: Result<String, String>) {
+    match answer {
+        Ok(state) => {
+            gait.misses.set(0);
+            if gait.lost.replace(false) {
+                ask.link.post_motion(gait.motion());
+            }
+            if gait.complained.replace(false) {
+                println!("[ha]    the activity is answering again");
+            }
+            if !ask.lost.get() {
+                ask.link.set_reachable(true);
+            }
+            if gait.counts(&state) {
+                let before = gait.motion();
+                gait.secs.set(gait.secs.get() + gait.beat);
+                let now = gait.motion();
+                if now.secs != before.secs {
+                    match now.left() {
+                        0 if !before.done() => println!("[ha]    {}s on your feet — that's the moving", now.secs),
+                        0 => {}
+                        left => println!("[ha]    {}s on your feet, {left}s to go", now.secs),
+                    }
+                    ask.link.post_motion(now);
+                }
+            }
+        }
+        Err(why) => {
+            // Same bargain as the steps: a sensor that cannot be read is a
+            // half of the gate that will never close, so once a run of misses
+            // says it is gone rather than slow, the engine is told and the
+            // break ends on the clock.
+            gait.misses.set(gait.misses.get() + 1);
+            if gait.misses.get() < MISSES_BEFORE_LOST {
+                return;
+            }
+            gait.lost.set(true);
+            ask.link.post_motion(gait.motion());
+            if !gait.complained.replace(true) {
+                eprintln!("tea: cannot ask Home Assistant whether you are moving — {why}");
+            }
+            ask.link.set_reachable(false);
+        }
     }
 }
 
@@ -1401,7 +1780,7 @@ fn complain_if_readable(path: &Path) {
 }
 
 /// `http://host:8123`, `https://ha.example/hass` — scheme, host, port, prefix.
-fn split_url(url: &str) -> Result<(String, u16, bool, String), String> {
+pub(crate) fn split_url(url: &str) -> Result<(String, u16, bool, String), String> {
     let raw = url.trim().trim_end_matches('/');
     let (tls, rest) = match raw {
         _ if raw.starts_with("https://") => (true, &raw[8..]),
@@ -1687,6 +2066,7 @@ mod tests {
             token: "t".into(),
             entity: "tag.hall".into(),
             legs: None,
+            gait: None,
             link: Rc::clone(link),
             baseline: RefCell::new(None),
             busy: Cell::new(false),
@@ -1710,6 +2090,102 @@ mod tests {
             }),
             ..asking(link)
         }
+    }
+
+    /// And with time on your feet to be counted, at a two-second beat.
+    fn asking_with_gait(link: &Rc<Link>, needed: u32) -> Ask {
+        Ask {
+            gait: Some(Gait {
+                entity: "sensor.activity".into(),
+                path: "/api/states/sensor.activity".into(),
+                needed,
+                states: Moving::default().states,
+                beat: 2.0,
+                secs: Cell::new(0.0),
+                complained: Cell::new(false),
+                misses: Cell::new(0),
+                lost: Cell::new(false),
+            }),
+            ..asking(link)
+        }
+    }
+
+    #[test]
+    fn moving_words_add_up_and_still_ones_take_nothing_away() {
+        let link = link_with(Desk { breaking: true, ..Desk::default() });
+        let ask = asking_with_gait(&link, 6);
+        let gait = ask.gait.as_ref().unwrap();
+
+        settle_motion(&ask, gait, Ok("still".into()));
+        assert_eq!(gait.motion(), Motion { secs: 0, needed: 6, lost: false });
+        settle_motion(&ask, gait, Ok("walking".into()));
+        settle_motion(&ask, gait, Ok("Walking".into()));
+        assert_eq!(link.motion(), Some(Motion { secs: 4, needed: 6, lost: false }));
+        // A still second between two walking ones is not a step backwards.
+        settle_motion(&ask, gait, Ok("still".into()));
+        settle_motion(&ask, gait, Ok("unknown".into()));
+        assert_eq!(gait.motion().secs, 4);
+        settle_motion(&ask, gait, Ok("on_foot".into()));
+        assert!(link.motion().unwrap().done());
+        assert_eq!(link.reachable(), Some(true));
+    }
+
+    #[test]
+    fn an_activity_sensor_that_cannot_be_read_says_so_after_a_run_of_misses() {
+        let link = link_with(Desk { breaking: true, ..Desk::default() });
+        let ask = asking_with_gait(&link, 30);
+        let gait = ask.gait.as_ref().unwrap();
+        settle_motion(&ask, gait, Ok("walking".into()));
+        for _ in 0..MISSES_BEFORE_LOST - 1 {
+            settle_motion(&ask, gait, Err("no".into()));
+            assert!(!gait.motion().lost, "one bad answer is a packet, not an outage");
+        }
+        settle_motion(&ask, gait, Err("no".into()));
+        assert!(link.motion().unwrap().lost);
+        assert_eq!(link.reachable(), Some(false));
+        // Time already counted survives the outage, and an answer clears it.
+        settle_motion(&ask, gait, Ok("still".into()));
+        assert_eq!(link.motion(), Some(Motion { secs: 2, needed: 30, lost: false }));
+        assert_eq!(link.reachable(), Some(true));
+    }
+
+    #[test]
+    fn moving_is_configured_like_the_steps() {
+        let mut cfg = Config::default();
+        assert!(!cfg.counts_moving());
+        cfg.mode = Mode::On;
+        cfg.home_assistant.url = "http://h:8123".into();
+        cfg.home_assistant.entity = "tag.hall".into();
+        cfg.moving.mode = Mode::On;
+        assert!(cfg.moving_misconfigured().unwrap().contains("entity"));
+        cfg.moving.entity = "sensor.phone_detected_activity".into();
+        assert!(cfg.counts_moving());
+        // Auto, with no walk to scale from: thirty seconds.
+        assert_eq!(cfg.moving_secs(), 30);
+        // With a walk, a share of what the walk itself takes -- and never so
+        // little that a lazy sensor cannot report it.
+        cfg.steps.mode = Mode::On;
+        cfg.steps.entity = "sensor.steps".into();
+        cfg.steps.count = 100;
+        assert_eq!(cfg.moving_secs(), 30);
+        cfg.steps.count = 10;
+        assert_eq!(cfg.moving_secs(), 5);
+        cfg.steps.count = 1000;
+        assert_eq!(cfg.moving_secs(), 120);
+        assert!(cfg.moving_words().contains("auto"));
+        // Said outright, it is what it says.
+        cfg.moving.r#for = Wanted::For(Duration::from_secs(45));
+        assert_eq!(cfg.moving_secs(), 45);
+        assert_eq!(cfg.moving_words(), "45s");
+        let parsed: Moving = toml::from_str(r#"for = "auto""#).unwrap();
+        assert_eq!(parsed.r#for, Wanted::Auto);
+        let parsed: Moving = toml::from_str(r#"for = "20s""#).unwrap();
+        assert_eq!(parsed.r#for, Wanted::For(Duration::from_secs(20)));
+        assert!(toml::from_str::<Moving>(r#"for = "sometimes""#).is_err());
+        assert!(cfg.moving.counts(" WALKING "));
+        assert!(!cfg.moving.counts("in_vehicle"));
+        cfg.moving.states = vec![" ".into()];
+        assert!(cfg.moving_misconfigured().unwrap().contains("states"));
     }
 
     #[test]
@@ -1919,7 +2395,7 @@ mod tests {
     fn the_walk_is_counted_from_where_the_break_found_you() {
         let link = link_with(Desk { breaking: true, ..Desk::default() });
         let ask = asking_with_legs(&link, 20);
-        let steps = |value: &str| settle(&ask, Ok("9:00".into()), Some(Ok(value.into())));
+        let steps = |value: &str| settle(&ask, Ok("9:00".into()), Some(Ok(value.into())), None);
 
         // The daily total when the page went up: no walk yet, but the page has
         // to know a walk is being asked for.
@@ -1947,16 +2423,16 @@ mod tests {
     fn a_step_sensor_with_nothing_to_say_is_not_zero_steps() {
         let link = link_with(Desk { breaking: true, ..Desk::default() });
         let ask = asking_with_legs(&link, 20);
-        settle(&ask, Ok("9:00".into()), Some(Ok("4812.0".into())));
+        settle(&ask, Ok("9:00".into()), Some(Ok("4812.0".into())), None);
         // The catch-up sync, and then a walk that actually counts.
-        settle(&ask, Ok("9:00".into()), Some(Ok("4820.0".into())));
-        settle(&ask, Ok("9:00".into()), Some(Ok("4840.0".into())));
+        settle(&ask, Ok("9:00".into()), Some(Ok("4820.0".into())), None);
+        settle(&ask, Ok("9:00".into()), Some(Ok("4840.0".into())), None);
         assert!(link.walk().unwrap().done());
 
         // A phone that has not synced, an integration reloading: the walk
         // already counted stands, and the hub is still perfectly reachable.
         for quiet in ["unknown", "unavailable", ""] {
-            settle(&ask, Ok("9:00".into()), Some(Ok(quiet.into())));
+            settle(&ask, Ok("9:00".into()), Some(Ok(quiet.into())), None);
             assert!(link.walk().unwrap().done(), "{quiet:?} must not undo the walk");
         }
         assert_eq!(link.reachable(), Some(true));
@@ -1974,17 +2450,17 @@ mod tests {
         // Same debounce as the tag, and it has to be the *steps* that decide
         // it: the tag is answering perfectly well throughout.
         for _ in 1..MISSES_BEFORE_LOST {
-            settle(&ask, Ok("9:00".into()), gone());
+            settle(&ask, Ok("9:00".into()), gone(), None);
             assert_ne!(link.reachable(), Some(false), "one miss is not an outage");
         }
-        settle(&ask, Ok("9:00".into()), gone());
+        settle(&ask, Ok("9:00".into()), gone(), None);
         assert_eq!(link.reachable(), Some(false));
 
         // A tag that keeps answering must not paint over a walk that can never
         // be counted -- the gate still has a half that will not close.
         settle_tag(&ask, Ok("9:01".into()));
         assert_eq!(link.reachable(), Some(false), "the steps are still gone");
-        settle(&ask, Ok("9:01".into()), Some(Ok("4812.0".into())));
+        settle(&ask, Ok("9:01".into()), Some(Ok("4812.0".into())), None);
         assert_eq!(link.reachable(), Some(true), "and back when both answer");
     }
 

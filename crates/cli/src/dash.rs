@@ -104,6 +104,7 @@ fn gather(
             "credited": t.credited,
             "postponed": t.postponed,
             "steps": t.steps,
+            "cheats": t.cheats,
         })),
         "settings": {
             "work": cfg.work.as_secs(),

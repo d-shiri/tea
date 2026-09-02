@@ -65,6 +65,13 @@ matching flag that overrides the file (`tea --help`).
     mode = "soft"
     recheck = "400ms"
 
+    [page]
+    accent = "#7aa2ff"
+    background = "dark"
+    font = ""
+    prompts = "off"
+    prompt_every = "20s"
+
     [nfc]
     mode = "off"
     listen = "127.0.0.1:9797"
@@ -79,6 +86,20 @@ matching flag that overrides the file (`tea --help`).
     token_file = ""
     entity = ""
     poll = "2s"
+    publish = "off"
+    publish_entity = "sensor.tea"
+
+    [nfc.steps]
+    mode = "off"
+    count = 20
+    entity = ""
+    sync = "batched"
+
+    [nfc.moving]
+    mode = "off"
+    entity = ""
+    for = "auto"
+    states = ["walking", "on_foot", "running"]
 
 Durations are `"90s"`, `"25m"`, `"1h"`; a bare number means minutes. Unknown
 keys are a hard error — a silently ignored typo in a config you edit twice a
@@ -172,6 +193,39 @@ survivors keep theirs.
 
 None of it stops someone who keeps switching away, and nothing here should.
 `insist` makes leaving a thing you have to keep choosing.
+
+## The page
+
+The page as it ships is the default, pixel for pixel. `[page]` is for
+departing from it on purpose:
+
+    [page]
+    accent = "#7aa2ff"      # the ring, the glow, the blast, the pills
+    background = "dark"     # or "dim": the desk shows through, darkened
+    font = ""               # a family name; empty takes the first monospaced face you have
+    prompts = "off"         # "on", or a list of your own lines
+    prompt_every = "20s"
+
+`accent` recolours everything on the page that is not text — the text stays
+white on dark, because it is meant to be read from the doorway. A colour that
+does not parse costs a colour, not a break: the page uses the default and says
+so once on startup.
+
+`background = "dim"` leaves the desk visible through the dark, as shapes rather
+than as anything you could read. A veil over the work, not a wall in front of
+it. Some people find that easier to accept several times an hour; some find it
+an invitation to squint. Try both.
+
+`prompts` gives the page something to say while the clock runs. Off, it says
+the one line it has always said. `"on"` cycles through a short built-in list —
+look at something far away, roll your shoulders, drink some water — one line
+every `prompt_every`, starting somewhere different each break. A list of your
+own does the same with your words:
+
+    prompts = ["Water.", "Look out of the window.", "Shoulders down."]
+
+Only while the countdown runs. Once the page is waiting on the tag it has one
+thing to say and says that.
 
 ## The tag on the wall
 
@@ -366,6 +420,103 @@ Both halves are lost if the service restarts mid-break — the scan and the step
 baseline together — because half a gate carried across a restart would let the
 other half be walked twice. That is a deliberate difference from a plain tag
 break, where the scan does survive.
+
+### And thirty seconds on your feet
+
+Steps close most of the hole the tag leaves, not all of it: a phone waved at
+the desk earns steps. Android's activity recognition wants the whole body going
+somewhere, and the companion app reports its word as an entity —
+`sensor.<phone>_detected_activity`, saying `walking`, `still`, `in_vehicle`.
+The third half of the gate asks for a little time in a moving state:
+
+    [nfc.moving]
+    mode = "on"
+    entity = "sensor.pixel_detected_activity"
+    for = "auto"
+    states = ["walking", "on_foot", "running"]
+
+Read from the hub on the same beat as the steps. Every answer in one of those
+states is worth one poll's beat, added up over the break; a `still` between
+two `walking`s takes nothing away. The page grows a third badge beside the tag
+and the steps — *Not moving yet*, *Moving · 12s of 30s*, then green *Moved* —
+and once the countdown is spent and only this half is missing, it says *Keep
+walking — 18s more* rather than sending you back to the tag.
+
+`for = "auto"` scales the time from the steps: a hundred steps is a minute of
+walking and asks for thirty seconds of the phone saying so, ten steps asks for
+five, never less than five nor more than two minutes. Half of the walk rather
+than all of it, because the sensor is late and lumpy. A duration says it
+outright, and thirty seconds is what auto means when no steps are counted.
+
+And a hand is not a walk. The two sensors disagree in exactly one way that
+only a shaken phone produces: the step count climbs while the activity sensor
+keeps saying `still`. Once twenty such steps have arrived and half a minute
+has gone by with no movement seen, the page says so — the steps badge turns
+amber and reads *Nice try* with the count crossed out, the line under the
+clock becomes *That was the phone walking, not you*, and the day's tally
+counts it (`sensor.tea_cheats_today` on the hub, *Nice tries* on the
+dashboard). The gate itself is not changed: it is still waiting for the walk,
+and the teasing stops the moment the phone reports moving.
+
+No hardware: switch on the *Detected activity* sensor in the companion app.
+Android reports it lazily, a minute behind at times, so `for` is a floor and
+not a stopwatch, and a sensor that cannot be read turns the badge amber and
+ends the break on the clock, the way the tag does. `tea --probe` reads it.
+
+### Telling Home Assistant
+
+Everything above is the hub talking to tea. This is tea talking back:
+
+    [nfc.home_assistant]
+    url = "http://homeassistant.local:8123"
+    token_file = "~/.config/tea/.env"
+    publish = "on"
+    publish_entity = "sensor.tea"
+
+With that on, the hub has a sensor whose state is what tea is doing — `working`,
+`warning`, `held`, `break`, `waiting`, `off` — with the rest hanging off it as
+attributes: `next_break_at` and `break_ends_at` as timestamps, `steps_walked`
+and `steps_needed`, `tag_scanned`, `postpones_left`, today's `breaks_today` and
+`steps_today`, and `why_off` when it is asleep. And at each turn it fires a
+`tea` event with `what` set to the turn: `warning`, `break_start`, `waiting`,
+`scan`, `released`, `break_end`, `postpone`, `credited`, `held`, `off`, `on`.
+The hall light is an automation on `event_type: tea` with `event_data:
+{what: break_start}`; the speaker is the same with `released`.
+
+The hub cannot graph an attribute, so beside the sensor go six plain numbers,
+each with a unit and a state class so the recorder keeps long-term statistics
+for them: `sensor.tea_worked` (minutes towards the next break),
+`sensor.tea_walk` (steps this break), `sensor.tea_steps_today`,
+`sensor.tea_breaks_today`, `sensor.tea_postpones_today`, and
+`binary_sensor.tea_break` (on while the page is up). Named after
+`publish_entity`, so `sensor.desk` gets `sensor.desk_steps_today`.
+
+`dist/home-assistant/tea-dashboard.yaml` is a dashboard built on them — what
+tea is doing in a sentence, two gauges for the clock and the walk, today's
+tally, the day as a timeline, and a month of bars — for Settings → Dashboards
+→ Add dashboard → raw configuration editor. `dist/home-assistant/automations.yaml`
+is the hall light, the speaker, and the phone, on the events above. Neither
+needs the clipboard: `dist/home-assistant/push.py dashboard` creates or
+replaces the dashboard over the hub's API, `push.py list` says what the hub
+has to point automations at, and `push.py automations tea_held tea_summary
+notify.mobile_app_phone=notify.mobile_app_yours` adds those two with the
+placeholder filled in.
+
+It needs `url` and a token, not the tag: reporting works with `nfc` off, for a
+hub that only ever hears from tea and is never asked anything. The token has
+to be allowed to write, which a long-lived access token is.
+
+Sent when something changes and not otherwise. The hub is told about a new
+state, a scan, a step count that moved, and once a minute that the clock is
+still running; it is not told the time left every second, because it can do
+that sum from `break_ends_at` for itself. A hub that cannot be reached costs
+one line on stderr and a retry half a minute later, and the break carries on
+exactly as it would have. The sensor is tea's, not the hub's: a hub restarted
+forgets it, and gets it back on tea's next report, within the minute.
+
+    tea --probe
+
+fires a `tea` event with `what: probe` and says whether the hub took it.
 
 ### The ear
 

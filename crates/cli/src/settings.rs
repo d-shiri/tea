@@ -261,6 +261,29 @@ pub fn show(cfg: &Config, file: &FileConfig, path: &Path) {
         }
     }
 
+    section(&s, "the page");
+    let look = &file.page;
+    match look.accent_misconfigured() {
+        Some(why) => field(&s, "accent", "default", &why),
+        None => field(&s, "accent", look.accent.trim(), "the ring, the glow, the pills"),
+    }
+    match look.background {
+        crate::overlay::Background::Dark => field(&s, "background", "dark", "covers the screen"),
+        crate::overlay::Background::Dim => {
+            field(&s, "background", "dim", "the desk shows through, darkened")
+        }
+    }
+    match look.font.trim() {
+        "" => field(&s, "font", "", "the first monospaced face the machine has"),
+        face => field(&s, "font", "", face),
+    }
+    if look.prompts.on() {
+        field(&s, "prompts", "", &look.prompts.describe());
+        field(&s, "each stays up", &human(look.prompt_every.0), "then the next one");
+    } else {
+        field(&s, "prompts", "off", "the page says its one line and no more");
+    }
+
     section(&s, "the tag");
     let nfc = &file.nfc;
     if !nfc.on() {
@@ -283,6 +306,17 @@ pub fn show(cfg: &Config, file: &FileConfig, path: &Path) {
             field(&s, "steps", "off", &why);
         } else {
             field(&s, "steps", "off", "the scan is the whole gate");
+        }
+        if nfc.counts_moving() {
+            field(&s, "moving", "", &format!("{} on your feet before the page lifts", nfc.moving_words()));
+            field(
+                &s,
+                "read from",
+                "",
+                &format!("{} — {}", nfc.moving.entity.trim(), nfc.moving.states.join(", ")),
+            );
+        } else if let Some(why) = nfc.moving_misconfigured() {
+            field(&s, "moving", "off", &why);
         }
         if nfc.asks() {
             field(&s, "answers on", "", &format!("{} — for `tea unlock` only", nfc.listen));
@@ -312,6 +346,24 @@ pub fn show(cfg: &Config, file: &FileConfig, path: &Path) {
                 true => "MISSING — `tea set-nfc on` writes one",
                 false => "set — `tea set-nfc on` prints the tag's URL",
             });
+        }
+    }
+
+    // The hub hearing from tea, as opposed to tea hearing from the hub above.
+    // Its own section because it is its own switch: it works with the tag off.
+    let ha = &nfc.home_assistant;
+    if ha.publishes() || ha.publish_misconfigured().is_some() {
+        section(&s, "home assistant");
+        match ha.publish_misconfigured() {
+            Some(why) => field(&s, "reports", "off", &why),
+            None => {
+                field(&s, "reports", "on", &format!("as {} on {}", ha.publish_entity.trim(), ha.url.trim()));
+                field(&s, "fires", "", &format!("`{}` events — break_start, scan, released, break_end…", crate::publish::EVENT));
+                field(&s, "hub token", "", &match ha.secret() {
+                    Ok(_) => format!("from {}", tilde(std::path::Path::new(&ha.secret_source()))),
+                    Err(why) => format!("MISSING — {why}"),
+                });
+            }
         }
     }
 

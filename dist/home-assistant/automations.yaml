@@ -1,0 +1,93 @@
+# Automations on tea's events, ready to adapt.
+#
+# Every turn of a break fires one `tea` event with `what` set to the turn:
+#   warning      the heads-up is on screen
+#   break_start  the page is up            (len: seconds, long: bool)
+#   waiting      the countdown is spent and the page waits on the tag
+#   scan         the tag was scanned
+#   released     the gate opened -- tag and walk both in  (steps)
+#   break_end    the page came down  (len, steps, gate: none|scanned|walked|grace, long)
+#   postpone     a postpone was granted  (left)
+#   credited     time away counted as the break  (idle: seconds)
+#   held         a break is owed and something is holding it  (waiting: seconds)
+#   off / on     tea went to sleep (why) / woke up
+#
+# Paste what you want into Settings → Automations → ⋮ → "Edit in YAML", or into
+# automations.yaml, replacing the entity ids. Or let push.py do it, by id, with
+# the placeholders filled in on the way:
+#
+#   ./dist/home-assistant/push.py automations tea_held tea_summary \
+#       notify.mobile_app_phone=notify.mobile_app_sm_g990b2
+
+- id: tea_hall_on
+  alias: "tea — light the hall for the walk"
+  triggers:
+    - trigger: event
+      event_type: tea
+      event_data:
+        what: break_start
+  actions:
+    - action: light.turn_on
+      target:
+        entity_id: light.hall
+
+- id: tea_hall_off
+  alias: "tea — hall light off when the break is over"
+  triggers:
+    - trigger: event
+      event_type: tea
+      event_data:
+        what: break_end
+  actions:
+    - action: light.turn_off
+      target:
+        entity_id: light.hall
+
+- id: tea_released
+  alias: "tea — say so when the walk is in"
+  triggers:
+    - trigger: event
+      event_type: tea
+      event_data:
+        what: released
+  actions:
+    - action: tts.speak
+      target:
+        entity_id: tts.home_assistant_cloud
+      data:
+        media_player_entity_id: media_player.kitchen
+        message: "That's the walk. Your desk is yours."
+
+- id: tea_held
+  alias: "tea — nudge the phone when a break is being held"
+  triggers:
+    - trigger: event
+      event_type: tea
+      event_data:
+        what: held
+  actions:
+    - action: notify.mobile_app_phone
+      data:
+        title: "tea"
+        message: >-
+          A break has been waiting {{ (trigger.event.data.waiting / 60) | round }} minutes,
+          held by something that says it is busy. Nothing has been interrupted.
+
+- id: tea_summary
+  alias: "tea — the day's walking, at the end of it"
+  triggers:
+    - trigger: time
+      at: "18:00:00"
+  conditions:
+    # Only when tea has reported today: a hub that has just restarted and
+    # heard nothing yet has nothing to sum up.
+    - condition: template
+      value_template: "{{ states('sensor.tea_breaks_today') | is_number }}"
+  actions:
+    - action: notify.mobile_app_phone
+      data:
+        title: "tea"
+        message: >-
+          {{ states('sensor.tea_breaks_today') }} breaks,
+          {{ states('sensor.tea_steps_today') }} steps walked,
+          {{ states('sensor.tea_postpones_today') }} postponed.

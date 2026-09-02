@@ -58,6 +58,14 @@ pub enum Event {
         len: u64,
         /// Steps walked while the page was up, where a walk was counted at all.
         steps: u32,
+        /// Seconds on your feet, where the phone's word was asked for at all.
+        /// Absent from files written before it was, and read as zero.
+        #[serde(default)]
+        moved: u32,
+        /// The steps came from a hand: the count arrived with the phone saying
+        /// still throughout. Absent from older files.
+        #[serde(default)]
+        cheated: bool,
         /// How many it wanted. Zero means steps were not part of this break.
         needed: u32,
         gate: Gate,
@@ -91,8 +99,9 @@ impl Event {
 /// - `required` — whether the tag was standing between you and your desk at all.
 /// - `gave_up` — the countdown ran out, nothing arrived, and `grace` expired.
 /// - `released` — the gate was open when the page came down.
-/// - `needed` — how many steps this break asked for; zero means none.
-pub fn gate(required: bool, gave_up: bool, released: bool, needed: u32) -> Gate {
+/// - `walk` — whether this break asked for anything beyond the scan: steps,
+///   or time on your feet, or both.
+pub fn gate(required: bool, gave_up: bool, released: bool, walk: bool) -> Gate {
     match (required, gave_up, released) {
         // No gate to pass: the countdown was the whole of it.
         (false, _, _) => Gate::None,
@@ -100,7 +109,7 @@ pub fn gate(required: bool, gave_up: bool, released: bool, needed: u32) -> Gate 
         // the evidence it wanted -- and a break that ends unreleased ended on
         // the clock whether or not this tick was the one that said so.
         (_, true, _) | (_, _, false) => Gate::Grace,
-        _ if needed > 0 => Gate::Walked,
+        _ if walk => Gate::Walked,
         _ => Gate::Scanned,
     }
 }
@@ -177,7 +186,7 @@ mod tests {
     use super::*;
 
     fn a_break() -> Event {
-        Event::Break { t: 1_756_819_511, len: 300, steps: 47, needed: 20, gate: Gate::Walked, long: false }
+        Event::Break { t: 1_756_819_511, len: 300, steps: 47, moved: 0, cheated: false, needed: 20, gate: Gate::Walked, long: false }
     }
 
     #[test]
@@ -233,21 +242,21 @@ mod tests {
 
     #[test]
     fn a_break_with_no_tag_in_front_of_it_is_recorded_as_ungated() {
-        assert_eq!(gate(false, false, true, 20), Gate::None, "the tag is off; nothing was asked");
-        assert_eq!(gate(false, true, false, 0), Gate::None);
+        assert_eq!(gate(false, false, true, true), Gate::None, "the tag is off; nothing was asked");
+        assert_eq!(gate(false, true, false, false), Gate::None);
     }
 
     #[test]
     fn a_scan_and_a_walk_are_told_apart() {
-        assert_eq!(gate(true, false, true, 20), Gate::Walked, "steps were part of this gate");
-        assert_eq!(gate(true, false, true, 0), Gate::Scanned, "the tag alone was the gate");
+        assert_eq!(gate(true, false, true, true), Gate::Walked, "steps were part of this gate");
+        assert_eq!(gate(true, false, true, false), Gate::Scanned, "the tag alone was the gate");
     }
 
     #[test]
     fn a_break_that_ended_without_its_evidence_says_so() {
-        assert_eq!(gate(true, true, false, 20), Gate::Grace, "grace ran out");
+        assert_eq!(gate(true, true, false, true), Gate::Grace, "grace ran out");
         assert_eq!(
-            gate(true, false, false, 20),
+            gate(true, false, false, true),
             Gate::Grace,
             "unreleased at the end is the same outcome, whichever tick noticed",
         );
