@@ -2,6 +2,7 @@
 //! opening an editor.
 
 use crate::config::{self, FileConfig, human, literal};
+use crate::nfc;
 use crate::status::{Style, WIDTH, heading, tilde};
 use tea_core::Config;
 use std::path::Path;
@@ -273,7 +274,11 @@ pub fn show(cfg: &Config, file: &FileConfig, path: &Path) {
         }
         if nfc.counts_steps() {
             field(&s, "steps", &nfc.steps.count.to_string(), "walked before the page lifts");
-            field(&s, "counted from", "", &nfc.steps.entity);
+            let sync = match nfc.steps.sync {
+                nfc::Sync::Live => "live — every rise counts",
+                nfc::Sync::Batched => "batched — the first rise only moves the mark",
+            };
+            field(&s, "counted from", "", &format!("{}, {sync}", nfc.steps.entity));
         } else if let Some(why) = nfc.steps_misconfigured() {
             field(&s, "steps", "off", &why);
         } else {

@@ -3,6 +3,8 @@
 
 mod clock;
 mod config;
+mod dash;
+mod history;
 mod nfc;
 mod overlay;
 mod session;
@@ -55,6 +57,8 @@ fn main() {
     let mut probe = false;
     let mut show_status = false;
     let mut show_config = false;
+    let mut show_dash = false;
+    let mut open_dash = true;
     /// The default `tea off` with no duration named. Long enough to be worth
     /// asking for, short enough that forgetting to say `tea on` costs you one
     /// afternoon rather than the habit.
@@ -124,6 +128,8 @@ fn main() {
             "on" => back_on = true,
             "status" => show_status = true,
             "config" => show_config = true,
+            "dash" => show_dash = true,
+            "--no-open" => open_dash = false,
             "run" | "--test-overlay" => {
                 run_page = true;
                 if let Some(length) = argv.get(i + 1).and_then(|v| config::parse(v)) {
@@ -257,7 +263,7 @@ fn main() {
     // A named file that is not there is a typo, wherever it is named. The
     // daemon path already refuses it; these two were quietly showing defaults
     // instead, which reads as "your settings are gone".
-    if (show_config || show_status) && explicit_path.is_some() && !path.exists() {
+    if (show_config || show_status || show_dash) && explicit_path.is_some() && !path.exists() {
         fail(&format!("no config at {}", path.display()));
     }
 
@@ -271,6 +277,20 @@ fn main() {
         let mut cfg: tea_core::Config = file.clone().into();
         let _ = config::reconcile(&mut cfg);
         return settings::show(&cfg, &file, &path);
+    }
+
+    // Reads what is already on disk and writes a file of its own. No GTK, no
+    // daemon, and no starter config written as a side effect of wanting to look
+    // at a chart.
+    if show_dash {
+        let file = if path.exists() {
+            config::load(&path).unwrap_or_else(|e| fail(&e))
+        } else {
+            config::FileConfig::default()
+        };
+        let mut cfg: tea_core::Config = file.clone().into();
+        let _ = config::reconcile(&mut cfg);
+        return dash::show(&file, &cfg, &path, boottime(), open_dash);
     }
 
     if show_status {
@@ -955,9 +975,40 @@ impl Engine {
     /// asked for again: by the time a break ends the poll has already been
     /// told to forget it, and a day's walking should not depend on which of
     /// the two happened first.
-    fn count_break(&mut self, walk: Option<nfc::Walk>) {
+    ///
+    /// `ran` is the length this particular break had -- taken from the snapshot
+    /// before the tick that ended it, because by now the scheduler has moved on
+    /// and `break_length()` is already answering about the *next* one.
+    fn count_break(&mut self, walk: Option<nfc::Walk>, ran: Duration, gate: history::Gate) {
         self.tally.breaks += 1;
         self.tally.steps += walk.map_or(0, |w| w.walked);
+        history::append(&history::Event::Break {
+            t: clock::unix_now(),
+            len: ran.as_secs(),
+            steps: walk.map_or(0, |w| w.walked),
+            needed: walk.map_or(0, |w| w.needed),
+            gate,
+            long: !ran.is_zero() && ran != self.sched.config().brk,
+        });
+    }
+
+    /// How the break that just ended actually ended, which is the only thing
+    /// recorded here that says whether the tag is earning its place.
+    ///
+    /// `before` is the state on the way into the tick, so its `released` is the
+    /// scan as it stood while the page was still up.
+    fn gate_of(
+        &self,
+        before: &tea_core::Snapshot,
+        walk: Option<nfc::Walk>,
+        gave_up: bool,
+    ) -> history::Gate {
+        history::gate(
+            self.sched.config().require_release,
+            gave_up,
+            before.released,
+            walk.map_or(0, |w| w.needed),
+        )
     }
 
     fn postpone_flag(&self) -> Rc<Cell<bool>> {
@@ -1124,6 +1175,7 @@ impl Engine {
                 PostponeResult::Granted { remaining_budget } => {
                     println!("[snooze] postponed, {remaining_budget} left this window");
                     self.tally.postponed += 1;
+                    history::append(&history::Event::Postpone { t: clock::unix_now() });
                     ui.clear_warning();
                 }
                 other => println!("[snooze] refused: {other:?}"),
@@ -1151,6 +1203,11 @@ impl Engine {
         let before = self.sched.snapshot();
         let commands = tea_core::drive(&mut self.sched, ui, delta, idle, inhibited);
         let after = self.sched.snapshot();
+        // Asked of the whole batch rather than tracked as the loop goes, so it
+        // does not matter which order the two commands come out in.
+        let gave_up =
+            commands.iter().any(|c| matches!(c, tea_core::Command::GaveUpWaiting { .. }));
+        let gate = self.gate_of(&before, walk, gave_up);
 
         for cmd in &commands {
             match *cmd {
@@ -1169,15 +1226,21 @@ impl Engine {
                 tea_core::Command::ShowOverlay { .. } => self.sound.break_starts(),
                 // Counted where it ends rather than where it starts: a break
                 // that was interrupted by a shutdown was not a break you took.
-                tea_core::Command::CreditedIdle { .. } => self.tally.credited += 1,
+                tea_core::Command::CreditedIdle { was_idle } => {
+                    self.tally.credited += 1;
+                    history::append(&history::Event::Credited {
+                        t: clock::unix_now(),
+                        idle: was_idle.as_secs(),
+                    });
+                }
                 // The scan that just freed this break has its own sound; the
                 // ordinary end-of-break one stacked on top would turn the
                 // celebration into a clatter.
                 tea_core::Command::HideOverlay if !celebrated => {
-                    self.count_break(walk);
+                    self.count_break(walk, before.break_len, gate);
                     self.sound.break_ends();
                 }
-                tea_core::Command::HideOverlay => self.count_break(walk),
+                tea_core::Command::HideOverlay => self.count_break(walk, before.break_len, gate),
                 _ => {}
             }
         }
@@ -1214,7 +1277,11 @@ impl Engine {
 
         self.link.post(nfc::Desk {
             breaking: after.breaking,
-            remaining: self.sched.config().brk.saturating_sub(after.rested),
+            // The break on screen, not the ordinary one: every so often it is
+            // the long one, and measuring against `cfg.brk` had the phone told
+            // "the page lifts on its own in 0s" for the last ten minutes of a
+            // fifteen-minute break. Zero between breaks, where nothing reads it.
+            remaining: after.break_len.saturating_sub(after.rested),
             waiting: self.sched.awaiting_release(),
             released: after.released,
             tag_in: self.tag_in,
@@ -1328,6 +1395,7 @@ fn usage() {
         ("run-warning [dur]", "show the warning toast"),
         ("status", "what the background service is doing"),
         ("config", "show every setting"),
+        ("dash", "steps, breaks and how the habit is going"),
         ("reload", "pick up changed settings"),
         ("off [dur]", "no breaks for a while (an hour by default)"),
         ("on", "start again, now"),
@@ -1350,6 +1418,7 @@ fn usage() {
         ("    --headless", "terminal only, no GTK window"),
         ("    --probe", "print idle/inhibitor readings and exit"),
         ("    --write-config", "create the starter config and exit"),
+        ("    --no-open", "with `dash`: write the page, don't open it"),
     ];
 
     let width = COMMANDS

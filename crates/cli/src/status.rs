@@ -9,7 +9,7 @@ use crate::clock;
 use crate::config::{Hours, human};
 use crate::session::Session;
 use crate::state;
-use tea_core::Config;
+use tea_core::{Config, Snapshot};
 use std::io::IsTerminal;
 use std::time::Duration;
 
@@ -63,9 +63,7 @@ pub fn show(cfg: Config, hours: &Hours, config_path: &std::path::Path, boottime:
         s.yellow(&format!("tea — off for another {}", human(left)))
     } else if asleep {
         s.yellow(&format!("tea — asleep, {}", hours.opens()))
-    } else if snap.breaking && cfg.require_release && !snap.released
-        && (snap.rested + elapsed) >= cfg.brk
-    {
+    } else if snap.breaking && waiting_for_the_tag(&cfg, snap, brk, elapsed) {
         s.yellow("tea — waiting for the tag")
     } else if snap.breaking {
         s.green("tea — on a break")
@@ -92,7 +90,7 @@ pub fn show(cfg: Config, hours: &Hours, config_path: &std::path::Path, boottime:
         println!("  {}  {}", s.dim("rest    "), bar(rested, brk, &s));
         // Time served and still up means it is waiting on the tag, and "back to
         // work in 0s" beside a page that is plainly still there reads as a bug.
-        let waiting = cfg.require_release && left.is_zero() && !snap.released;
+        let waiting = waiting_for_the_tag(&cfg, snap, brk, elapsed);
         println!(
             "            {} of {}{} — {}",
             human(rested),
@@ -183,6 +181,19 @@ pub fn show(cfg: Config, hours: &Hours, config_path: &std::path::Path, boottime:
         },
     );
     println!();
+}
+
+/// Whether the page on screen has served its time and is now only waiting to
+/// be released.
+///
+/// Asked in two places -- the headline and the gauge under it -- which is why
+/// it is one function: they used to measure the same break against two
+/// different lengths, so five minutes into a fifteen-minute break the headline
+/// said "waiting for the tag" while the gauge below it correctly reported ten
+/// minutes still to run. `brk` is the length of *this* break, which is not
+/// always `cfg.brk`.
+fn waiting_for_the_tag(cfg: &Config, snap: Snapshot, brk: Duration, elapsed: Duration) -> bool {
+    cfg.require_release && !snap.released && snap.rested + elapsed >= brk
 }
 
 /// When the long break falls due, if there is one. Worked out here rather than
@@ -277,5 +288,70 @@ impl Style {
     }
     pub fn yellow(&self, t: &str) -> String {
         self.wrap("33", t)
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    /// Five-minute breaks, with the tag holding the page.
+    fn gated() -> Config {
+        Config { brk: secs(300), require_release: true, ..Config::default() }
+    }
+
+    fn on_a_break(rested: Duration, break_len: Duration) -> Snapshot {
+        Snapshot {
+            breaking: true,
+            rested,
+            break_len,
+            worked: Duration::ZERO,
+            due: false,
+            postpones_used: 0,
+            window_elapsed: Duration::ZERO,
+            released: false,
+            waiting: Duration::ZERO,
+            breaks_done: 0,
+        }
+    }
+
+    #[test]
+    fn a_long_break_is_not_waiting_the_moment_a_short_one_would_be() {
+        // The headline used to measure against `cfg.brk` while the gauge below
+        // it measured against the break actually running, so a fifteen-minute
+        // break announced "waiting for the tag" ten minutes early -- directly
+        // above a line that said it had ten minutes left.
+        let snap = on_a_break(secs(300), secs(900));
+        assert!(
+            !waiting_for_the_tag(&gated(), snap, secs(900), Duration::ZERO),
+            "five minutes into the long one is not the end of it"
+        );
+        assert!(
+            waiting_for_the_tag(&gated(), snap, secs(900), secs(600)),
+            "and ten minutes later it is"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_break_waits_once_its_time_is_served() {
+        let snap = on_a_break(secs(300), secs(300));
+        assert!(waiting_for_the_tag(&gated(), snap, secs(300), Duration::ZERO));
+        assert!(
+            !waiting_for_the_tag(&gated(), on_a_break(secs(299), secs(300)), secs(300), Duration::ZERO),
+            "a second short is still a break"
+        );
+
+        // A scan already in is nothing to wait for...
+        let scanned = Snapshot { released: true, ..snap };
+        assert!(!waiting_for_the_tag(&gated(), scanned, secs(300), Duration::ZERO));
+
+        // ...and neither is a break that nothing is gating.
+        let ungated = Config { require_release: false, ..gated() };
+        assert!(!waiting_for_the_tag(&ungated, snap, secs(300), Duration::ZERO));
     }
 }

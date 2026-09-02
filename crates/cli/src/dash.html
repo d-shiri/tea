@@ -1,0 +1,1118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>tea — the last few weeks</title>
+<style>
+/* Dark on purpose, and only dark: this is the break page's palette, and a
+   page about a thing that takes your screen in the dark should look like it. */
+:root {
+  color-scheme: dark;
+  --bg:       #080a10;
+  --card-hi:  #171d2c;
+  --card-lo:  #10151f;
+  --line:     rgba(255,255,255,.07);
+  --line-2:   rgba(255,255,255,.13);
+  --ink:      #eef1f7;
+  --ink-2:    #9aa5bd;
+  --ink-3:    #626d86;
+  --grid:     rgba(255,255,255,.055);
+  /* Categorical slots, in fixed order, validated against the card surface in
+     dark: lightness band, chroma floor, adjacent CVD separation, normal-vision
+     floor and contrast all pass. Colour follows the thing, never its size. */
+  --s1: #3987e5;   /* breaks the page ran   */
+  --s2: #d95926;   /* postponed             */
+  --s3: #199e70;   /* walked / credited     */
+  --s4: #c98500;   /* gave up on grace      */
+  --nil:#3d465c;   /* not applicable, which is an absence rather than a category */
+  /* Two faces on purpose: the display stack is asked for weights below 400,
+     which the text stack does not have. `inherit` is not a legal family in the
+     `font:` shorthand -- naming them is also what stops the whole declaration
+     being thrown away. */
+  --sans:    "Noto Sans", Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --display: Cantarell, "SF Pro Display", "Segoe UI Variable Display", Inter, system-ui, sans-serif;
+  --mono:    ui-monospace, "Noto Sans Mono", "DejaVu Sans Mono", monospace;
+}
+* { box-sizing: border-box; }
+/* `.filters { display: flex }` outranks the user agent's `[hidden]`. */
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--ink);
+  background:
+    radial-gradient(1100px 520px at 22% -240px, rgba(57,135,229,.16), transparent 70%),
+    radial-gradient(900px 460px at 88% -160px, rgba(25,158,112,.10), transparent 70%),
+    var(--bg);
+  background-attachment: fixed;
+  font: 400 15px/1.55 var(--sans);
+  font-feature-settings: "cv01", "ss01";
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1160px; margin: 0 auto; padding: 3rem 1.5rem 6rem; }
+
+/* ---- header ------------------------------------------------------------ */
+header { display: flex; align-items: center; gap: .85rem; flex-wrap: wrap; margin-bottom: 1.75rem; }
+.mark {
+  font: 300 2.7rem/1 var(--display); letter-spacing: -.03em; margin: 0;
+  background: linear-gradient(100deg, #fff 20%, #86b6ef 130%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.pill {
+  display: inline-flex; align-items: center; gap: .45rem;
+  border: 1px solid var(--line); border-radius: 999px; padding: .28rem .7rem .28rem .55rem;
+  font-size: .78rem; color: var(--ink-2); background: rgba(255,255,255,.025);
+}
+.pill .dot { width: 7px; height: 7px; border-radius: 999px; background: var(--s3); box-shadow: 0 0 0 3px rgba(25,158,112,.18); }
+.pill.cold .dot { background: var(--ink-3); box-shadow: none; }
+.meta { color: var(--ink-3); font-size: .8125rem; margin-left: auto; }
+
+/* ---- cards ------------------------------------------------------------- */
+.grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 14px; }
+.card {
+  grid-column: span 12;
+  position: relative;
+  padding: 1.2rem 1.35rem 1.35rem;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: linear-gradient(168deg, var(--card-hi), var(--card-lo) 62%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.045), 0 10px 26px -18px #000c;
+  animation: rise .55s cubic-bezier(.16,1,.3,1) backwards;
+  transition: border-color .18s;
+}
+.card:hover { border-color: var(--line-2); }
+@keyframes rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+@media (min-width: 900px) {
+  .c3 { grid-column: span 3; } .c4 { grid-column: span 4; }
+  .c6 { grid-column: span 6; } .c8 { grid-column: span 8; }
+}
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+
+.eyebrow {
+  font-size: .6875rem; font-weight: 600; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--ink-3); margin: 0;
+}
+.card h2 { font: 600 1.0625rem/1.3 var(--sans); margin: .15rem 0 0; letter-spacing: -.012em; }
+.card .note { color: var(--ink-3); font-size: .8125rem; margin: .25rem 0 0; max-width: 46ch; }
+.card > svg { display: block; margin-top: 1rem; overflow: visible; }
+
+/* ---- the big one ------------------------------------------------------- */
+.habit { display: grid; gap: 1.5rem; grid-template-columns: 1fr; }
+@media (min-width: 900px) { .habit { grid-template-columns: 15rem 1fr; align-items: start; } }
+.big { font: 300 clamp(3.1rem, 6.5vw, 4.4rem)/.95 var(--display); letter-spacing: -.035em; font-variant-numeric: tabular-nums; margin: .6rem 0 .4rem; }
+.big-sub { color: var(--ink-2); font-size: .875rem; }
+.heat-legend { display: flex; align-items: center; gap: .4rem; color: var(--ink-3); font-size: .75rem; margin-top: .85rem; }
+.heat-legend i { width: 11px; height: 11px; border-radius: 3px; display: inline-block; }
+
+/* ---- filters ----------------------------------------------------------- */
+.filters { display: flex; align-items: center; gap: .8rem; margin: 2rem 0 1rem; flex-wrap: wrap; }
+.filters .lbl { font-size: .6875rem; font-family: var(--sans); font-weight: 600; letter-spacing: .09em; text-transform: uppercase; color: var(--ink-3); }
+.seg { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--line); border-radius: 999px; background: rgba(255,255,255,.025); }
+.seg button {
+  border: 0; background: transparent; color: var(--ink-3); font: inherit; font-size: .8125rem;
+  padding: .3rem .85rem; border-radius: 999px; cursor: pointer; transition: color .15s, background .15s;
+}
+.seg button:hover { color: var(--ink); }
+.seg button[aria-pressed="true"] { background: rgba(255,255,255,.09); color: var(--ink); box-shadow: inset 0 1px 0 rgba(255,255,255,.07); }
+
+/* ---- tiles ------------------------------------------------------------- */
+.tile .value { font: 300 2.3rem/1.1 var(--display); letter-spacing: -.03em; margin-top: .4rem; font-variant-numeric: tabular-nums; }
+.tile .value small { font-size: .8125rem; font-weight: 400; color: var(--ink-3); letter-spacing: 0; margin-left: .15rem; }
+.tile .foot { color: var(--ink-3); font-size: .75rem; margin-top: .3rem; }
+.tile svg { margin-top: .7rem; }
+
+/* ---- legends & tooltips ------------------------------------------------ */
+.legend { display: flex; gap: .9rem; flex-wrap: wrap; margin-top: .9rem; font-size: .78rem; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: .4rem; }
+.legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.legend i.line { width: 15px; height: 2px; border-radius: 2px; }
+
+#tip {
+  position: fixed; z-index: 9; pointer-events: none; opacity: 0; transition: opacity .1s;
+  background: rgba(20,25,38,.97); border: 1px solid var(--line-2); border-radius: 10px;
+  padding: .55rem .7rem; font-size: .8125rem; box-shadow: 0 16px 40px -12px #000d; max-width: 16rem;
+  backdrop-filter: blur(8px);
+}
+#tip .when { color: var(--ink-3); font-size: .72rem; letter-spacing: .04em; text-transform: uppercase; margin-bottom: .35rem; }
+#tip .row { display: flex; align-items: center; gap: .45rem; white-space: nowrap; }
+#tip .row + .row { margin-top: .2rem; }
+#tip .row i { width: 12px; height: 2px; border-radius: 2px; flex: none; }
+#tip .row b { font-weight: 600; font-variant-numeric: tabular-nums; }
+#tip .row span { color: var(--ink-3); }
+
+.empty { color: var(--ink-3); font-size: .875rem; padding: 2.5rem 0 1.5rem; text-align: center; }
+
+/* ---- nothing yet ------------------------------------------------------- */
+.void { text-align: center; padding: 2.5rem 1rem 3rem; }
+.void h2 { font: 300 1.9rem/1.2 var(--display); letter-spacing: -.02em; margin: 0 0 .7rem; }
+.void p { color: var(--ink-2); max-width: 44ch; margin: 0 auto 1.4rem; font-size: .9375rem; }
+.void pre {
+  display: inline-block; margin: 0; text-align: left; padding: .85rem 1.1rem;
+  background: rgba(0,0,0,.35); border: 1px solid var(--line); border-radius: 10px;
+  font: 400 13px/1.7 var(--mono); color: #9ec5f4;
+}
+
+/* ---- disclosure, tables, config ---------------------------------------- */
+details.fold { margin-top: 2.25rem; border-top: 1px solid var(--line); }
+details.fold > summary {
+  cursor: pointer; color: var(--ink-3); font-size: .6875rem; font-weight: 600;
+  letter-spacing: .09em; text-transform: uppercase; list-style: none; padding: 1rem 0;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: "▸"; display: inline-block; width: 1.1em; transition: transform .15s; }
+details.fold[open] > summary::before { transform: rotate(90deg); }
+details.fold > summary:hover { color: var(--ink); }
+table { border-collapse: collapse; width: 100%; font-size: .8125rem; font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: .4rem .7rem; border-bottom: 1px solid var(--line); }
+th:first-child, td:first-child { text-align: left; }
+th { color: var(--ink-3); font-weight: 600; font-size: .6875rem; letter-spacing: .07em; text-transform: uppercase; }
+td { color: var(--ink-2); }
+tbody tr:hover td { color: var(--ink); background: rgba(255,255,255,.022); }
+caption { text-align: left; color: var(--ink-3); font-size: .8125rem; padding: 1.2rem 0 .6rem; }
+
+pre.config {
+  margin: .9rem 0 .6rem; padding: 1.1rem 1.2rem; background: rgba(0,0,0,.32);
+  border: 1px solid var(--line); border-radius: 12px; overflow-x: auto;
+  font: 400 12.5px/1.65 var(--mono);
+  color: var(--ink); white-space: pre;
+}
+pre.config .c { color: var(--ink-3); }
+pre.config .k { color: #9ec5f4; }
+pre.config .v { color: #7fd3ab; }
+pre.config .t { color: var(--s4); font-weight: 600; }
+.fold .note { color: var(--ink-3); font-size: .8125rem; max-width: 60ch; }
+
+footer { color: var(--ink-3); font-size: .75rem; margin-top: 3rem; text-align: center; }
+
+/* ---- chart mark animation ---------------------------------------------- */
+.bar { transform-box: fill-box; transform-origin: 50% 100%; animation: grow .65s cubic-bezier(.16,1,.3,1) backwards; }
+@keyframes grow { from { transform: scaleY(.02); } to { transform: none; } }
+.pop { transform-box: fill-box; transform-origin: 50% 50%; animation: pop .5s cubic-bezier(.16,1,.3,1) backwards; }
+@keyframes pop { from { transform: scale(0); opacity: 0; } to { transform: none; opacity: 1; } }
+.draw { animation: draw 1.2s cubic-bezier(.4,0,.2,1) backwards; }
+@keyframes draw { from { stroke-dashoffset: var(--len); } to { stroke-dashoffset: 0; } }
+.cell { animation: fade .5s ease backwards; }
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1 class="mark">tea</h1>
+    <span class="pill" id="pill"><i class="dot"></i><span id="pilltext"></span></span>
+    <span class="meta" id="meta"></span>
+  </header>
+
+  <div class="grid" id="top"></div>
+
+  <div class="filters" id="filters" hidden>
+    <span class="lbl">Showing</span>
+    <div class="seg">
+      <button type="button" data-days="7">7 days</button>
+      <button type="button" data-days="30">30 days</button>
+      <button type="button" data-days="90">90 days</button>
+      <button type="button" data-days="0">All</button>
+    </div>
+  </div>
+
+  <div class="grid" id="tiles"></div>
+  <div class="grid" id="charts" style="margin-top:14px"></div>
+
+  <details class="fold" id="numbers" hidden>
+    <summary>The numbers behind the charts</summary>
+    <div id="tables"></div>
+  </details>
+
+  <details class="fold" id="configbox" hidden>
+    <summary>Your config file</summary>
+    <p class="note" id="configpath"></p>
+    <pre class="config" id="configtext"></pre>
+    <p class="note">
+      Read-only — this page is a file on your disk, and a file cannot write your
+      config back. Change it with <code>tea set-work 30m</code> and friends, or by
+      editing it, then <code>tea reload</code>. Anything called <code>token</code> is
+      blanked out before it reaches this page.
+    </p>
+  </details>
+
+  <footer id="footer"></footer>
+</div>
+
+<div id="tip" role="status" aria-live="polite"></div>
+
+<script>
+const DATA = /*__TEA_DATA__*/ null;
+
+// ---- palette & shorthands --------------------------------------------------
+
+const S = { s1: "#3987e5", s2: "#d95926", s3: "#199e70", s4: "#c98500", nil: "#3d465c" };
+/** One hue, dark to light, validated as an ordinal ramp against the card:
+ *  monotone lightness, visible steps, and the dark end still clears 2:1. */
+const HEAT = ["#1a2133", "#184f95", "#256abf", "#3987e5", "#6da7ec", "#9ec5f4"];
+const INK = "#eef1f7", DIM = "#9aa5bd", FAINT = "#626d86";
+const GRID = "rgba(255,255,255,.055)", SURFACE = "#141926";
+const DAY = 86400;
+
+const EVENTS = (DATA && DATA.events) || [];
+const SET = (DATA && DATA.settings) || {};
+
+const SVG_TAGS = new Set("svg g rect line path circle text tspan defs linearGradient radialGradient stop clipPath".split(" "));
+const el = (tag, attrs, kids) => {
+  const n = SVG_TAGS.has(tag)
+    ? document.createElementNS("http://www.w3.org/2000/svg", tag)
+    : document.createElement(tag);
+  for (const k in (attrs || {})) {
+    if (k === "text") n.textContent = attrs[k];
+    else if (attrs[k] !== null && attrs[k] !== undefined) n.setAttribute(k, attrs[k]);
+  }
+  for (const kid of (kids || [])) n.appendChild(kid);
+  return n;
+};
+
+const pad2 = n => String(n).padStart(2, "0");
+const dayKey = t => { const d = new Date(t * 1000); return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()); };
+const asDate = key => { const [y, m, d] = key.split("-"); return new Date(+y, m - 1, +d); };
+const short = key => asDate(key).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+const num = n => n.toLocaleString();
+const mins = s => s >= 60 ? Math.round(s / 60) + "m" : s + "s";
+const clock = t => new Date(t * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+const noon = t => { const d = new Date(t * 1000); d.setHours(12, 0, 0, 0); return Math.floor(d.getTime() / 1000); };
+
+// ---- shaping ---------------------------------------------------------------
+
+let days = 30;
+const from = () => days === 0 ? 0 : DATA.generated - days * DAY;
+const slice = () => EVENTS.filter(e => e.t >= from());
+const firstEvent = EVENTS.length ? Math.min(...EVENTS.map(e => e.t)) : DATA.generated;
+
+/** Every day in the window, including the ones nothing happened on — a gap in a
+ *  habit chart is the most interesting mark on it, and a chart that skips those
+ *  days quietly draws a straighter line than the truth.
+ *
+ *  Stepped from local noon so an hour lost or gained to daylight saving cannot
+ *  skip a day or count one twice. */
+function byDay(events, since) {
+  const rows = new Map();
+  const blank = k => ({ key: k, taken: 0, credited: 0, postponed: 0, steps: 0, walked: 0 });
+  for (let t = noon(Math.max(since, firstEvent)); t <= DATA.generated + DAY / 2; t += DAY) {
+    rows.set(dayKey(t), blank(dayKey(t)));
+  }
+  for (const e of events) {
+    const k = dayKey(e.t);
+    if (!rows.has(k)) rows.set(k, blank(k));
+    const r = rows.get(k);
+    if (e.kind === "break") { r.taken++; r.steps += e.steps || 0; if (e.needed > 0) r.walked++; }
+    else if (e.kind === "credited") r.credited++;
+    else if (e.kind === "postpone") r.postponed++;
+  }
+  return [...rows.values()].sort((a, b) => a.key < b.key ? -1 : 1);
+}
+
+// ---- the hover layer -------------------------------------------------------
+
+const tip = document.getElementById("tip");
+function showTip(x, y, when, rows) {
+  tip.replaceChildren();
+  if (when) tip.appendChild(el("div", { class: "when", text: when }));
+  for (const r of rows) {
+    const row = el("div", { class: "row" });
+    if (r.color) row.appendChild(el("i", { style: "background:" + r.color }));
+    row.appendChild(el("b", { text: r.value }));
+    if (r.label) row.appendChild(el("span", { text: r.label }));
+    tip.appendChild(row);
+  }
+  tip.style.opacity = "1";
+  const box = tip.getBoundingClientRect();
+  tip.style.left = Math.min(Math.max(8, x + 14), window.innerWidth - box.width - 8) + "px";
+  tip.style.top = Math.min(Math.max(8, y - box.height - 14), window.innerHeight - box.height - 8) + "px";
+}
+const hideTip = () => { tip.style.opacity = "0"; };
+document.addEventListener("scroll", hideTip, true);
+
+/** The hit target is always bigger than the mark: an eight-pixel dot is a
+ *  pinpoint nobody lands on first go. */
+function hoverable(node, get) {
+  node.addEventListener("pointermove", e => { const d = get(e); if (d) showTip(e.clientX, e.clientY, d.when, d.rows); });
+  node.addEventListener("pointerleave", hideTip);
+  node.setAttribute("tabindex", "0");
+  node.addEventListener("focus", () => {
+    const b = node.getBoundingClientRect();
+    const d = get({ clientX: b.left + b.width / 2, clientY: b.top });
+    if (d) showTip(b.left + b.width / 2, b.top, d.when, d.rows);
+  });
+  node.addEventListener("blur", hideTip);
+}
+
+// ---- chart furniture -------------------------------------------------------
+
+const M = { top: 16, right: 18, bottom: 30, left: 46 };
+let gradSeq = 0;
+
+/** A vertical wash of the series hue, brightest at the data end. */
+function gradient(defs, color, from_, to) {
+  const id = "g" + (++gradSeq);
+  defs.appendChild(el("linearGradient", { id, x1: 0, y1: 0, x2: 0, y2: 1 }, [
+    el("stop", { offset: "0%", "stop-color": color, "stop-opacity": from_ }),
+    el("stop", { offset: "100%", "stop-color": color, "stop-opacity": to }),
+  ]));
+  return "url(#" + id + ")";
+}
+
+/** Rounded at the data end, square on the baseline. A border round a bar is
+ *  ink that is not data; the gap between bars does the separating. */
+function column(x, y, w, h, fill, r, delay) {
+  r = Math.min(r === undefined ? 5 : r, w / 2, h);
+  const attrs = { class: "bar", style: "animation-delay:" + (delay || 0) + "ms" };
+  if (h <= 0.6) return el("rect", { x, y: y - 1, width: w, height: 1.5, fill, opacity: .55, ...attrs });
+  if (r <= 0) return el("rect", { x, y, width: w, height: h, fill, ...attrs });
+  const d = "M" + x + "," + (y + h) + "V" + (y + r) + "a" + r + "," + r + " 0 0 1 " + r + ",-" + r +
+            "h" + (w - 2 * r) + "a" + r + "," + r + " 0 0 1 " + r + "," + r + "V" + (y + h) + "Z";
+  return el("path", { d, fill, ...attrs });
+}
+
+function axes(g, w, ticks, fmt) {
+  for (const t of ticks) {
+    g.appendChild(el("line", { x1: M.left, y1: t.y, x2: w - M.right, y2: t.y, stroke: GRID, "stroke-width": 1 }));
+    g.appendChild(el("text", { x: M.left - 10, y: t.y + 4, "text-anchor": "end", fill: FAINT, "font-size": 10.5, text: fmt(t.v) }));
+  }
+}
+
+/** Round ticks, because 0 / 20 / 40 is read at a glance and 0 / 17 / 34 is not.
+ *  Everything measured here is a count of whole things, so the step is whole
+ *  too: an axis offering to measure half a break is an axis nobody asked. */
+function scale(max, count) {
+  if (max <= 0) return { max: 1, ticks: [0, 1] };
+  const raw = Math.max(max / count, 1);
+  const mag = Math.max(1, Math.pow(10, Math.floor(Math.log10(raw))));
+  const step = [1, 2, 5, 10].map(m => m * mag).find(s => s >= raw) || 10 * mag;
+  const top = Math.ceil(max / step) * step;
+  const ticks = [];
+  for (let v = 0; v <= top + 1e-9; v += step) ticks.push(v);
+  return { max: top, ticks };
+}
+
+function head(card, eyebrow, title, note) {
+  card.appendChild(el("p", { class: "eyebrow", text: eyebrow }));
+  card.appendChild(el("h2", { text: title }));
+  if (note) card.appendChild(el("p", { class: "note", text: note }));
+}
+
+function legend(items) {
+  const box = el("div", { class: "legend" });
+  for (const it of items) {
+    const s = el("span");
+    s.appendChild(el("i", { class: it.line ? "line" : "", style: "background:" + it.color }));
+    s.appendChild(document.createTextNode(it.label));
+    box.appendChild(s);
+  }
+  return box;
+}
+
+const explain = (card, text) => card.appendChild(el("p", { class: "empty", text }));
+
+/** A direct label with the surface painted behind its own letterforms, so it
+ *  stays readable wherever it lands — a value nudged clear of one mark has a
+ *  habit of landing on another. */
+function label(x, y, text, anchor, fill, size) {
+  return el("text", {
+    x, y, "text-anchor": anchor || "middle", fill: fill || INK,
+    "font-size": size || 11, "font-weight": 600,
+    stroke: SURFACE, "stroke-width": 3.5, "stroke-linejoin": "round",
+    "paint-order": "stroke fill", text,
+  });
+}
+
+/** The width actually available to draw in. Measured off the mounted card
+ *  rather than worked out from the grid: the card has padding, and an SVG sized
+ *  to the grid spills out of it by exactly that much. */
+function inner(card) {
+  const cs = getComputedStyle(card);
+  return Math.max(260, card.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight));
+}
+
+/** Draw the line on, once, over its own length. */
+function drawn(path) {
+  const len = Math.ceil(path.getTotalLength());
+  path.style.setProperty("--len", len);
+  path.setAttribute("stroke-dasharray", len);
+  path.classList.add("draw");
+}
+
+// ---- the habit: every day since the log began -------------------------------
+
+/** Every day since the log began, one square each — the shape of a habit, which
+ *  is the one thing none of the other charts can show. Days from before the log
+ *  existed are drawn as blanks rather than as zero breaks: they are not the
+ *  same claim, and a grid that starts mid-week looks broken. */
+const HEAT_MAX_WEEKS = 30, HEAT_MIN_WEEKS = 12, LABELS = 36;
+
+function heatmap(card, width) {
+  const rows = byDay(EVENTS, 0);
+  const counts = new Map(rows.map(r => [r.key, r]));
+
+  // Whole weeks, Monday first, ending with the week that holds today.
+  const last = asDate(dayKey(DATA.generated));
+  const end = new Date(last);
+  end.setDate(end.getDate() + ((7 - ((last.getDay() + 6) % 7)) % 7));
+  const first = asDate(rows[0].key);
+  const spanned = Math.ceil((end - first) / (7 * DAY * 1000)) + 1;
+
+  // A few weeks of margin around what there is, so a log three weeks old reads
+  // as a calendar you have only just started rather than as a stub — and never
+  // so much empty grid that the squares get lost in it. The block is centred,
+  // so it looks placed at every length rather than stranded on the left.
+  let weeks = Math.min(HEAT_MAX_WEEKS, Math.max(HEAT_MIN_WEEKS, spanned + 1));
+  let pitch = Math.floor((width - LABELS - 18) / weeks);
+  if (pitch < 9) { pitch = 9; weeks = Math.max(6, Math.floor((width - LABELS - 18) / pitch)); }
+  pitch = Math.min(pitch, 28);
+  const cell = pitch - 3, r = Math.min(4, cell / 3);
+
+  const start = new Date(end);
+  start.setDate(start.getDate() - (weeks * 7 - 1));
+
+  const busiest = Math.max(1, ...rows.map(x => x.taken + x.credited));
+  const level = n => n === 0 ? 0 : Math.min(5, 1 + Math.floor((n - 1) / Math.max(1, busiest / 5)));
+
+  const top = 22;
+  const svg = el("svg", { width: LABELS + weeks * pitch + 18, height: top + 7 * pitch, role: "img" });
+  const g = el("g");
+  const tiny = Math.min(10.5, Math.max(8, pitch * .62));
+
+  for (const [i, d] of [0, 2, 4].entries()) {
+    g.appendChild(el("text", {
+      x: LABELS - 9, y: top + d * pitch + cell - 2, "text-anchor": "end",
+      fill: FAINT, "font-size": tiny, text: ["Mon", "Wed", "Fri"][i],
+    }));
+  }
+
+  let month = -1;
+  for (let w = 0; w < weeks; w++) {
+    for (let d = 0; d < 7; d++) {
+      const date = new Date(start);
+      date.setDate(date.getDate() + w * 7 + d);
+      if (date > last) continue;
+      const key = dayKey(Math.floor(date.getTime() / 1000));
+      const row = counts.get(key);
+      const n = row ? row.taken + row.credited : 0;
+      const x = LABELS + w * pitch, y = top + d * pitch;
+
+      if (d === 0 && date.getMonth() !== month) {
+        month = date.getMonth();
+        g.appendChild(el("text", {
+          x, y: top - 8, fill: FAINT, "font-size": tiny,
+          text: date.toLocaleDateString(undefined, { month: "short" }),
+        }));
+      }
+
+      const box = el("rect", {
+        x, y, width: cell, height: cell, rx: r, class: "cell",
+        fill: row ? HEAT[level(n)] : "rgba(255,255,255,.028)",
+        style: "animation-delay:" + Math.min(700, w * 14 + d * 5) + "ms",
+      });
+      hoverable(box, () => ({
+        when: date.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" }),
+        rows: !row ? [{ value: "before the log began" }]
+          : n === 0 ? [{ value: "no breaks" }]
+          : [{ color: HEAT[level(n)], value: num(n), label: n === 1 ? "break" : "breaks" },
+             { color: S.s3, value: num(row.steps) + " steps", label: "walked" }],
+      }));
+      g.appendChild(box);
+    }
+  }
+  svg.appendChild(g);
+
+  const totals = rows.reduce((a, x) => ({ steps: a.steps + x.steps, taken: a.taken + x.taken }), { steps: 0, taken: 0 });
+  const left = el("div");
+  left.appendChild(el("p", { class: "eyebrow", text: "Since the log began" }));
+  left.appendChild(el("div", { class: "big", text: num(totals.steps) }));
+  left.appendChild(el("div", {
+    class: "big-sub",
+    text: "steps walked on breaks, across " + num(totals.taken) + " of them since " + short(rows[0].key) + ".",
+  }));
+  const lg = el("div", { class: "heat-legend" });
+  lg.appendChild(document.createTextNode("Fewer"));
+  for (const c of HEAT) lg.appendChild(el("i", { style: "background:" + c }));
+  lg.appendChild(document.createTextNode("More"));
+  left.appendChild(lg);
+
+  const right = el("div", { style: "overflow-x:auto;padding-top:.35rem;display:flex;justify-content:center" });
+  right.appendChild(svg);
+  const box = el("div", { class: "habit" });
+  box.appendChild(left);
+  box.appendChild(right);
+  card.appendChild(box);
+}
+
+// ---- A · steps per break ---------------------------------------------------
+
+function chartSteps(card, width) {
+  const walked = slice().filter(e => e.kind === "break" && e.needed > 0);
+  head(card, "The walk", "Steps per break", "One dot per break. The line is what the gate asks for.");
+  if (!walked.length) {
+    return explain(card, SET.steps_wanted
+      ? "No walked breaks in this window yet."
+      : "Steps aren't being counted. Point [nfc.steps] at a step sensor and the walks turn up here.");
+  }
+
+  const h = 250, w = width;
+  const want = SET.steps_wanted || 0;
+  const top = scale(Math.max(want * 1.05, ...walked.map(e => e.steps)), 4);
+  const t0 = Math.min(...walked.map(e => e.t)), t1 = Math.max(...walked.map(e => e.t));
+  const span = Math.max(t1 - t0, 1);
+  const X = t => M.left + (w - M.left - M.right) * (t - t0) / span;
+  const Y = v => h - M.bottom - (h - M.top - M.bottom) * (v / top.max);
+
+  const svg = el("svg", { width: w, height: h, role: "img" });
+  const defs = el("defs");
+  svg.appendChild(defs);
+  const g = el("g");
+  axes(g, w, top.ticks.map(v => ({ v, y: Y(v) })), num);
+
+  if (want > 0) {
+    // A wash above the line, so "made it" is a region rather than a comparison
+    // the reader has to do twice per dot.
+    g.appendChild(el("rect", {
+      x: M.left, y: Y(top.max), width: w - M.left - M.right, height: Math.max(0, Y(want) - Y(top.max)),
+      fill: gradient(defs, S.s3, .10, .01),
+    }));
+    g.appendChild(el("line", {
+      x1: M.left, y1: Y(want), x2: w - M.right, y2: Y(want),
+      stroke: S.s4, "stroke-width": 2, "stroke-dasharray": "5 5", "stroke-linecap": "round", opacity: .9,
+    }));
+    g.appendChild(label(w - M.right, Y(want) - 9, want + " wanted", "end", DIM, 10.5));
+  }
+
+  walked.forEach((e, i) => {
+    const made = e.steps >= e.needed;
+    g.appendChild(el("circle", {
+      cx: X(e.t), cy: Y(e.steps), r: 4.5, fill: made ? S.s3 : S.s1,
+      stroke: SURFACE, "stroke-width": 2, class: "pop",
+      style: "animation-delay:" + Math.min(600, i * 9) + "ms",
+    }));
+  });
+
+  for (const f of [0, .5, 1]) {
+    const t = t0 + span * f;
+    g.appendChild(el("text", {
+      x: X(t), y: h - 8, "text-anchor": f === 0 ? "start" : f === 1 ? "end" : "middle",
+      fill: FAINT, "font-size": 10.5, text: short(dayKey(t)),
+    }));
+  }
+  svg.appendChild(g);
+
+  // Nearest point, so the pointer only has to be closest rather than dead on.
+  const surface = el("rect", { x: 0, y: 0, width: w, height: h, fill: "transparent" });
+  hoverable(surface, ev => {
+    const box = svg.getBoundingClientRect();
+    const px = ev.clientX - box.left, py = ev.clientY - box.top;
+    let best = null, bd = Infinity;
+    for (const e of walked) {
+      const d = Math.hypot(X(e.t) - px, Y(e.steps) - py);
+      if (d < bd) { bd = d; best = e; }
+    }
+    if (!best || bd > 70) return null;
+    return {
+      when: short(dayKey(best.t)) + " · " + clock(best.t),
+      rows: [
+        { color: best.steps >= best.needed ? S.s3 : S.s1, value: num(best.steps) + " steps", label: "of " + best.needed + " wanted" },
+        { value: mins(best.len), label: best.long ? "long break" : "break" },
+      ],
+    };
+  });
+  svg.appendChild(surface);
+
+  card.appendChild(svg);
+  card.appendChild(legend([
+    { color: S.s3, label: "walk made" },
+    { color: S.s1, label: "short of it" },
+    { color: S.s4, label: "what the gate asks for", line: true },
+  ]));
+}
+
+// ---- B · how breaks ended --------------------------------------------------
+
+const GATES = [
+  { key: "walked",  color: S.s3,  label: "scanned and walked" },
+  { key: "scanned", color: S.s1,  label: "scanned" },
+  { key: "grace",   color: S.s4,  label: "gave up on grace" },
+  { key: "none",    color: S.nil, label: "no gate" },
+];
+
+/** A ring rather than a bar, because a ring is what a break looks like on the
+ *  page this is reporting on. Part-to-whole, four segments, read at a glance. */
+function chartGate(card, width) {
+  const counts = { walked: 0, scanned: 0, grace: 0, none: 0 };
+  for (const e of slice()) if (e.kind === "break") counts[e.gate || "none"]++;
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  head(card, "The gate", "How breaks ended", "Whether the tag on the wall is earning its place.");
+  if (!total) return explain(card, "Nothing recorded in this window.");
+  if (counts.none === total) {
+    return explain(card, "The tag is switched off — every break here ended on its countdown. Turn it on with `tea set-nfc on`.");
+  }
+
+  const size = Math.min(width, 220), R = size / 2 - 12, TH = 18, C = 2 * Math.PI * R;
+  const svg = el("svg", { width, height: size + 8, role: "img" });
+  const g = el("g", { transform: "translate(" + (width / 2) + "," + (size / 2 + 4) + ") rotate(-90)" });
+  g.appendChild(el("circle", { r: R, fill: "none", stroke: "rgba(255,255,255,.045)", "stroke-width": TH }));
+
+  const present = GATES.filter(gt => counts[gt.key] > 0);
+  let at = 0;
+  present.forEach((gt, i) => {
+    const share = counts[gt.key] / total;
+    // A 2px gap of surface between arcs does the separating, as everywhere else.
+    const len = Math.max(0, C * share - (present.length > 1 ? 3 : 0));
+    const arc = el("circle", {
+      r: R, fill: "none", stroke: gt.color, "stroke-width": TH, "stroke-linecap": "butt",
+      "stroke-dasharray": len + " " + (C - len),
+      "stroke-dashoffset": -C * at,
+      style: "--len:" + C + "; animation: fade .5s ease " + (i * 130) + "ms backwards",
+    });
+    hoverable(arc, () => ({
+      when: gt.label,
+      rows: [{ color: gt.color, value: num(counts[gt.key]) + " breaks", label: Math.round(share * 100) + "% of " + num(total) }],
+    }));
+    g.appendChild(arc);
+    at += share;
+  });
+  svg.appendChild(g);
+
+  const walkedPct = Math.round(100 * (counts.walked + counts.scanned) / total);
+  svg.appendChild(el("text", {
+    x: width / 2, y: size / 2 + 4, "text-anchor": "middle", fill: INK,
+    "font-family": "Cantarell, system-ui, sans-serif", "font-size": 34, "font-weight": 300,
+    "letter-spacing": "-1", text: walkedPct + "%",
+  }));
+  svg.appendChild(el("text", {
+    x: width / 2, y: size / 2 + 24, "text-anchor": "middle", fill: FAINT, "font-size": 10.5,
+    text: "ended on the tag",
+  }));
+
+  card.appendChild(svg);
+  card.appendChild(legend(present.map(gt => ({ color: gt.color, label: gt.label + " · " + num(counts[gt.key]) }))));
+}
+
+// ---- C · steps a day -------------------------------------------------------
+
+function chartStepsDaily(card, width) {
+  const rows = byDay(slice(), from());
+  head(card, "Distance", "Steps a day, walked on breaks", "The area is each day; the line is the week around it.");
+  if (!rows.some(r => r.steps > 0)) return explain(card, "No steps counted in this window.");
+
+  const h = 250, w = width;
+  const top = scale(Math.max(1, ...rows.map(r => r.steps)), 4);
+  const step = (w - M.left - M.right) / Math.max(1, rows.length - 1);
+  const X = i => M.left + step * i;
+  const Y = v => h - M.bottom - (h - M.top - M.bottom) * (v / top.max);
+
+  const svg = el("svg", { width: w, height: h, role: "img" });
+  const defs = el("defs");
+  svg.appendChild(defs);
+  const g = el("g");
+  axes(g, w, top.ticks.map(v => ({ v, y: Y(v) })), num);
+
+  const line = rows.map((r, i) => (i ? "L" : "M") + X(i) + "," + Y(r.steps)).join("");
+  g.appendChild(el("path", {
+    d: line + "L" + X(rows.length - 1) + "," + Y(0) + "L" + X(0) + "," + Y(0) + "Z",
+    fill: gradient(defs, S.s1, .30, 0), class: "cell",
+  }));
+  const stroke = el("path", { d: line, fill: "none", stroke: S.s1, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" });
+  g.appendChild(stroke);
+
+  // Seven days is a week, which is the unit a habit has. A window barely wider
+  // than one leaves a single point, and a legend promising a line beside a lone
+  // dot is a legend telling a small lie.
+  const mean = [];
+  if (rows.length >= 9) {
+    for (let i = 6; i < rows.length; i++) {
+      mean.push({ i, v: rows.slice(i - 6, i + 1).reduce((a, r) => a + r.steps, 0) / 7 });
+    }
+    const mpath = el("path", {
+      d: mean.map((m, n) => (n ? "L" : "M") + X(m.i) + "," + Y(m.v)).join(""),
+      fill: "none", stroke: S.s2, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round",
+    });
+    g.appendChild(mpath);
+    const last = mean[mean.length - 1];
+    g.appendChild(el("circle", { cx: X(last.i), cy: Y(last.v), r: 4, fill: S.s2, stroke: SURFACE, "stroke-width": 2, class: "pop" }));
+    g.appendChild(label(X(last.i) - 9, Y(last.v) - 14, num(Math.round(last.v)) + " a day", "end", INK, 10.5));
+  }
+
+  const cross = el("line", { y1: M.top, y2: h - M.bottom, stroke: "rgba(255,255,255,.16)", "stroke-width": 1, opacity: 0 });
+  const knob = el("circle", { r: 4.5, fill: S.s1, stroke: SURFACE, "stroke-width": 2, opacity: 0 });
+  g.appendChild(cross);
+  g.appendChild(knob);
+  svg.appendChild(g);
+
+  // The crosshair finds the X: readers aim at a date, never at a 2px line.
+  const surface = el("rect", { x: 0, y: 0, width: w, height: h, fill: "transparent" });
+  hoverable(surface, ev => {
+    const px = ev.clientX - svg.getBoundingClientRect().left;
+    const i = Math.max(0, Math.min(rows.length - 1, Math.round((px - M.left) / step)));
+    const r = rows[i], m = mean.find(x => x.i === i);
+    for (const n of [cross, knob]) n.setAttribute("opacity", 1);
+    cross.setAttribute("x1", X(i)); cross.setAttribute("x2", X(i));
+    knob.setAttribute("cx", X(i)); knob.setAttribute("cy", Y(r.steps));
+    return {
+      when: short(r.key),
+      rows: [{ color: S.s1, value: num(r.steps) + " steps", label: r.taken ? "over " + r.taken + " " + (r.taken === 1 ? "break" : "breaks") : "no breaks" }]
+        .concat(m ? [{ color: S.s2, value: num(Math.round(m.v)) + " a day", label: "week to here" }] : []),
+    };
+  });
+  surface.addEventListener("pointerleave", () => { for (const n of [cross, knob]) n.setAttribute("opacity", 0); });
+  svg.appendChild(surface);
+
+  const every = Math.max(1, Math.ceil(rows.length / 6));
+  rows.forEach((r, i) => {
+    if (i % every) return;
+    g.appendChild(el("text", { x: X(i), y: h - 8, "text-anchor": "middle", fill: FAINT, "font-size": 10.5, text: short(r.key) }));
+  });
+
+  drawn(stroke);
+  card.appendChild(svg);
+  card.appendChild(legend(mean.length
+    ? [{ color: S.s1, label: "steps that day", line: true }, { color: S.s2, label: "seven-day average", line: true }]
+    : [{ color: S.s1, label: "steps that day", line: true }]));
+}
+
+// ---- D · when breaks happen ------------------------------------------------
+
+function chartHours(card, width) {
+  const hours = new Array(24).fill(0);
+  let any = false;
+  for (const e of slice()) {
+    if (e.kind !== "break") continue;
+    hours[new Date(e.t * 1000).getHours()]++;
+    any = true;
+  }
+  head(card, "The clock", "When breaks happen", "By hour of the day. A hollow afternoon is an afternoon you dodged.");
+  if (!any) return explain(card, "Nothing recorded in this window.");
+
+  const h = 250, w = width;
+  const top = scale(Math.max(1, ...hours), 5);
+  const band = (w - M.left - M.right) / 24;
+  const bw = Math.max(3, Math.min(22, band - 4));
+  const Y = v => h - M.bottom - (h - M.top - M.bottom) * (v / top.max);
+
+  const svg = el("svg", { width: w, height: h, role: "img" });
+  const defs = el("defs");
+  svg.appendChild(defs);
+  const fill = gradient(defs, S.s1, 1, .45);
+  const g = el("g");
+  axes(g, w, top.ticks.map(v => ({ v, y: Y(v) })), num);
+
+  const busiest = hours.indexOf(Math.max(...hours));
+  hours.forEach((n, hr) => {
+    const x = M.left + band * hr + (band - bw) / 2;
+    g.appendChild(column(x, Y(n), bw, Y(0) - Y(n), fill, 5, hr * 22));
+    if (hr === busiest && n > 0) {
+      g.appendChild(label(x + bw / 2, Y(n) - 9, num(n)));
+    }
+    const hit = el("rect", { x: M.left + band * hr, y: 0, width: band, height: h, fill: "transparent" });
+    hoverable(hit, () => ({
+      when: pad2(hr) + ":00 – " + pad2(hr) + ":59",
+      rows: [{ color: S.s1, value: num(n), label: n === 1 ? "break" : "breaks" }],
+    }));
+    g.appendChild(hit);
+  });
+
+  for (let hr = 0; hr < 24; hr += 3) {
+    g.appendChild(el("text", { x: M.left + band * hr + band / 2, y: h - 8, "text-anchor": "middle", fill: FAINT, "font-size": 10.5, text: pad2(hr) }));
+  }
+  svg.appendChild(g);
+  card.appendChild(svg);
+}
+
+// ---- E · breaks a day ------------------------------------------------------
+
+function chartBreaks(card, width) {
+  const rows = byDay(slice(), from());
+  head(card, "The count", "Breaks a day", "Taken on the page, plus the ones you had already earned by being away.");
+  if (!rows.length) return explain(card, "Nothing recorded in this window.");
+
+  // The postponed track is its own small chart sharing this one's x axis, under
+  // a rule of its own: a postpone is not a break, and a bar that added them
+  // together would be saying that it was.
+  const plotH = 214, base = plotH - M.bottom;
+  const RULE = 196, STRIP = 200, STRIP_H = 15;
+  const h = 250, w = width;
+  const top = scale(Math.max(1, ...rows.map(r => r.taken + r.credited)), 5);
+  const band = (w - M.left - M.right) / rows.length;
+  const bw = Math.max(2, Math.min(22, band - 3));
+  const Y = v => base - (plotH - M.top - M.bottom) * (v / top.max);
+
+  const svg = el("svg", { width: w, height: h, role: "img" });
+  const defs = el("defs");
+  svg.appendChild(defs);
+  const takenFill = gradient(defs, S.s1, 1, .5);
+  const g = el("g");
+  axes(g, w, top.ticks.map(v => ({ v, y: Y(v) })), num);
+
+  const maxPost = Math.max(1, ...rows.map(r => r.postponed));
+  rows.forEach((r, i) => {
+    const x = M.left + band * i + (band - bw) / 2;
+    const delay = Math.min(500, i * 14);
+    let cursor = base;
+    if (r.taken > 0) {
+      const seg = base - Y(r.taken);
+      cursor = base - seg;
+      g.appendChild(column(x, cursor, bw, seg, takenFill, r.credited > 0 ? 0 : 5, delay));
+    }
+    if (r.credited > 0) {
+      const seg = base - Y(r.credited);
+      g.appendChild(column(x, cursor - seg - (r.taken > 0 ? 2 : 0), bw, seg, S.s3, 5, delay));
+    }
+    if (r.postponed > 0) {
+      g.appendChild(el("rect", {
+        x, y: STRIP, width: bw, height: 5 + (STRIP_H - 5) * (r.postponed / maxPost),
+        rx: 2, fill: S.s2, class: "cell", style: "animation-delay:" + delay + "ms",
+      }));
+    }
+    const hit = el("rect", { x: M.left + band * i, y: 0, width: band, height: h, fill: "transparent" });
+    hoverable(hit, () => ({
+      when: short(r.key),
+      rows: [
+        { color: S.s1, value: num(r.taken), label: r.taken === 1 ? "break taken" : "breaks taken" },
+        { color: S.s3, value: num(r.credited), label: "credited away from the desk" },
+        { color: S.s2, value: num(r.postponed), label: "postponed" },
+      ],
+    }));
+    g.appendChild(hit);
+  });
+
+  g.appendChild(el("line", { x1: M.left, y1: RULE, x2: w - M.right, y2: RULE, stroke: GRID, "stroke-width": 1 }));
+  g.appendChild(el("text", { x: M.left - 10, y: STRIP + 12, "text-anchor": "end", fill: FAINT, "font-size": 9.5, text: "postponed" }));
+
+  const every = Math.max(1, Math.ceil(rows.length / 6));
+  rows.forEach((r, i) => {
+    if (i % every) return;
+    g.appendChild(el("text", { x: M.left + band * i + band / 2, y: h - 8, "text-anchor": "middle", fill: FAINT, "font-size": 10.5, text: short(r.key) }));
+  });
+  svg.appendChild(g);
+  card.appendChild(svg);
+  card.appendChild(legend([
+    { color: S.s1, label: "taken" },
+    { color: S.s3, label: "credited — you were already away" },
+    { color: S.s2, label: "postponed" },
+  ]));
+}
+
+// ---- tiles -----------------------------------------------------------------
+
+/** Twelve points of shape, no axis and no labels: a tile's chart is there to
+ *  say which way the number has been going, and nothing more. */
+function sparkline(values, color, w, h) {
+  const svg = el("svg", { width: w, height: h, "aria-hidden": "true" });
+  if (values.length < 2) return svg;
+  const defs = el("defs"); svg.appendChild(defs);
+  const max = Math.max(1, ...values);
+  const step = w / (values.length - 1);
+  const Y = v => h - 3 - (h - 8) * (v / max);
+  const line = values.map((v, i) => (i ? "L" : "M") + (i * step) + "," + Y(v)).join("");
+  svg.appendChild(el("path", { d: line + "L" + w + "," + h + "L0," + h + "Z", fill: gradient(defs, color, .28, 0) }));
+  svg.appendChild(el("path", { d: line, fill: "none", stroke: color, "stroke-width": 1.75, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+  const lastY = Y(values[values.length - 1]);
+  svg.appendChild(el("circle", { cx: w, cy: lastY, r: 2.75, fill: color }));
+  return svg;
+}
+
+function tile(eyebrow, value, unit, foot, spark, delay) {
+  const card = el("div", { class: "card tile c3", style: "animation-delay:" + delay + "ms" });
+  card.appendChild(el("p", { class: "eyebrow", text: eyebrow }));
+  const v = el("div", { class: "value", text: value });
+  if (unit) v.appendChild(el("small", { text: unit }));
+  card.appendChild(v);
+  if (foot) card.appendChild(el("div", { class: "foot", text: foot }));
+  if (spark) card.appendChild(spark);
+  return card;
+}
+
+/** Days in a row, counting back from today, with at least one break in them.
+ *  Today not counting yet is not a broken streak — it is the middle of a day. */
+function streak(rows) {
+  let n = 0;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (rows[i].taken + rows[i].credited > 0) n++;
+    else if (i === rows.length - 1) continue;
+    else break;
+  }
+  return n;
+}
+
+function renderTiles() {
+  const box = document.getElementById("tiles");
+  box.replaceChildren();
+
+  const ev = slice();
+  const brk = ev.filter(e => e.kind === "break");
+  const walked = brk.filter(e => e.needed > 0);
+  const credited = ev.filter(e => e.kind === "credited").length;
+  const postponed = ev.filter(e => e.kind === "postpone").length;
+  const rows = byDay(ev, from());
+  const tail = rows.slice(-14);
+  const window_ = days === 0 ? "all time" : "the last " + days + " days";
+  const t = DATA.tally;
+  const SW = 92, SH = 30;
+
+  box.appendChild(tile("Today", t ? num(t.breaks) : "—", t ? (t.breaks === 1 ? " break" : " breaks") : "",
+    t ? num(t.steps) + " steps · " + t.credited + " away from the desk" : "the service has not saved anything yet",
+    null, 0));
+  box.appendChild(tile("Breaks", num(brk.length + credited), brk.length + credited === 1 ? " break" : " breaks",
+    num(brk.length) + " on the page · " + num(credited) + " credited",
+    sparkline(tail.map(r => r.taken + r.credited), S.s1, SW, SH), 60));
+  box.appendChild(tile("Steps a break",
+    walked.length ? num(Math.round(walked.reduce((a, e) => a + e.steps, 0) / walked.length)) : "—",
+    walked.length ? " avg" : "",
+    walked.length ? "over " + num(walked.length) + " walked breaks" : "no walks counted in " + window_,
+    sparkline(tail.map(r => r.walked ? Math.round(r.steps / r.walked) : 0), S.s3, SW, SH), 120));
+  box.appendChild(tile("Streak", num(streak(rows)), " days", "in a row with a break in them",
+    sparkline(tail.map(r => r.taken + r.credited > 0 ? 1 : 0), S.s4, SW, SH), 180));
+
+  if (postponed) box.lastChild.title = "";
+}
+
+// ---- the numbers -----------------------------------------------------------
+
+function table(caption, head_, body) {
+  const t = el("table");
+  t.appendChild(el("caption", { text: caption }));
+  const tr = el("tr");
+  for (const h of head_) tr.appendChild(el("th", { text: h }));
+  t.appendChild(el("thead", {}, [tr]));
+  const tb = el("tbody");
+  for (const row of body) {
+    const r = el("tr");
+    for (const cell of row) r.appendChild(el("td", { text: cell }));
+    tb.appendChild(r);
+  }
+  t.appendChild(tb);
+  return t;
+}
+
+function renderTables() {
+  const box = document.getElementById("tables");
+  box.replaceChildren();
+  const rows = byDay(slice(), from()).slice().reverse();
+  box.appendChild(table("Every day in this window",
+    ["Day", "Taken", "Credited", "Postponed", "Steps"],
+    rows.map(r => [short(r.key), num(r.taken), num(r.credited), num(r.postponed), num(r.steps)])));
+
+  const gateName = k => (GATES.find(g => g.key === k) || GATES[3]).label;
+  box.appendChild(table("Every break in this window",
+    ["When", "Length", "Steps", "Wanted", "Ended"],
+    slice().filter(e => e.kind === "break").reverse().map(e => [
+      short(dayKey(e.t)) + " " + clock(e.t), mins(e.len) + (e.long ? " (long)" : ""),
+      num(e.steps || 0), e.needed ? num(e.needed) : "—", gateName(e.gate),
+    ])));
+}
+
+// ---- the config, read only -------------------------------------------------
+
+function renderConfig() {
+  const cfg = DATA.config;
+  if (!cfg || !cfg.text.trim()) return;
+  document.getElementById("configbox").hidden = false;
+  document.getElementById("configpath").textContent = cfg.path;
+
+  // Built out of text nodes rather than markup: this is a file somebody edits,
+  // and the one thing it must never be is executable.
+  const pre = document.getElementById("configtext");
+  pre.replaceChildren();
+  for (const line of cfg.text.split("\n")) {
+    const hash = line.indexOf("#"), eq = line.indexOf("=");
+    if (hash === 0 || (hash > -1 && (eq === -1 || hash < eq))) pre.appendChild(el("span", { class: "c", text: line + "\n" }));
+    else if (line.trim().startsWith("[")) pre.appendChild(el("span", { class: "t", text: line + "\n" }));
+    else if (eq > -1) {
+      pre.appendChild(el("span", { class: "k", text: line.slice(0, eq + 1) }));
+      pre.appendChild(el("span", { class: "v", text: line.slice(eq + 1) + "\n" }));
+    } else pre.appendChild(document.createTextNode(line + "\n"));
+  }
+}
+
+// ---- putting it on the page ------------------------------------------------
+
+function renderCharts() {
+  const box = document.getElementById("charts");
+  box.replaceChildren();
+  // Every card is mounted before any of them is measured, and only then drawn
+  // into. The grid decides how wide a card is from how many cards there are —
+  // measure the first alone and it answers with the width of a row it is
+  // briefly the only member of.
+  const built = [[chartSteps, "c8"], [chartGate, "c4"], [chartStepsDaily, "c6"],
+                 [chartHours, "c6"], [chartBreaks, "c12"]]
+    .map(([draw, span], i) => {
+      const card = el("div", { class: "card " + span, style: "animation-delay:" + (240 + i * 70) + "ms" });
+      box.appendChild(card);
+      return [draw, card];
+    });
+  for (const [draw, card] of built) draw(card, inner(card));
+}
+
+function render() {
+  hideTip();
+  renderTiles();
+  renderCharts();
+  renderTables();
+}
+
+function boot() {
+  const when = new Date(DATA.generated * 1000);
+  document.getElementById("pilltext").textContent = DATA.running ? "running" : "not running";
+  if (!DATA.running) document.getElementById("pill").classList.add("cold");
+  document.getElementById("meta").textContent =
+    SET.hours + " · " + Math.round(SET.work / 60) + "m work, " + Math.round(SET.brk / 60) + "m break" +
+    (SET.nfc ? " · tag on" : "");
+  document.getElementById("footer").textContent =
+    "Written by tea dash at " + when.toLocaleString() + ". Run it again for fresher numbers.";
+
+  renderConfig();
+
+  const top = document.getElementById("top");
+  if (!EVENTS.length) {
+    const card = el("div", { class: "card" });
+    const v = el("div", { class: "void" });
+    const t = DATA.tally;
+    v.appendChild(el("p", { class: "eyebrow", text: "Today" }));
+    v.appendChild(el("div", { class: "big", text: t ? num(t.breaks) : "—" }));
+    v.appendChild(el("div", { class: "big-sub", style: "margin-bottom:1.6rem", text: t
+      ? (t.breaks === 1 ? "break" : "breaks") + " · " + num(t.steps) + " steps · " + t.credited + " away from the desk"
+      : "the service has not saved anything yet" }));
+    v.appendChild(el("h2", { text: "Nothing to chart yet" }));
+    v.appendChild(el("p", { text: t && t.breaks
+      ? "Today's numbers come from the running service, and it is a build that keeps no log — so there is "
+        + "nothing here to draw the last few weeks from. Install this one and restart it; the charts start "
+        + "filling from the next break."
+      : "tea writes a line per break, and the log is empty. Install this build and restart the service, then "
+        + "check back after a few breaks." }));
+    v.appendChild(el("pre", { text: "./dist/install.sh\nsystemctl --user restart tea" }));
+    card.appendChild(v);
+    top.appendChild(card);
+    return;
+  }
+
+  const habit = el("div", { class: "card" });
+  top.appendChild(habit);
+  heatmap(habit, inner(habit));
+
+  document.getElementById("filters").hidden = false;
+  document.getElementById("numbers").hidden = false;
+  for (const b of document.querySelectorAll(".seg button")) {
+    b.setAttribute("aria-pressed", String(Number(b.dataset.days) === days));
+    b.addEventListener("click", () => {
+      days = Number(b.dataset.days);
+      for (const o of document.querySelectorAll(".seg button")) {
+        o.setAttribute("aria-pressed", String(Number(o.dataset.days) === days));
+      }
+      render();
+    });
+  }
+  render();
+
+  let timer;
+  window.addEventListener("resize", () => { clearTimeout(timer); timer = setTimeout(() => { render(); habit.replaceChildren(); heatmap(habit, inner(habit)); }, 160); });
+}
+
+boot();
+</script>
+</body>
+</html>

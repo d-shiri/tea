@@ -123,11 +123,23 @@ poll = "2s"           # how often to ask, while a break is up
 #   mode    "off" (default) or "on". "enabled"/"active" also read as on.
 #   count   steps this break wants. 20 is out of the room and back.
 #   entity  the sensor holding the count. Any entity whose state is a rising
-#           number will do -- a phone, a watch, a Health Connect feed.
+#           number will do -- a phone, a watch, a Health Connect feed. A total
+#           since the phone last rebooted is as good as a daily one: it is
+#           only ever measured from, never credited, and a drop moves the mark.
+#   sync    "batched" (default) or "live". How promptly the sensor reports.
+#           A batched feed -- Health Connect, a watch that uploads when it
+#           feels like it -- lags by minutes or hours, so the first rise of a
+#           break is the phone catching up on ground covered before the page
+#           went up, and it moves the mark instead of counting. The phone's
+#           own step counter, sent by the companion app every minute or so,
+#           is "live": that same rise is the walk itself and counts. Say
+#           "live" only for a sensor that keeps up; said of a lagging one it
+#           opens the gate from the chair.
 [nfc.steps]
 mode = "off"
 count = 20
 entity = ""           # e.g. "sensor.pixel_daily_steps"
+sync = "batched"
 "#;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -417,9 +429,13 @@ impl<'de> Deserialize<'de> for Dur {
             }
             // TOML hands every integer over as i64.
             fn visit_i64<E: de::Error>(self, n: i64) -> Result<Dur, E> {
+                // Checked, for the reason `parse` is bounded just below: a
+                // number nobody could have meant has to come back as a bad
+                // setting, not wrap into a work interval of a few seconds.
                 u64::try_from(n)
                     .ok()
-                    .map(|n| Dur(Duration::from_secs(n * 60)))
+                    .and_then(|n| n.checked_mul(60))
+                    .map(|secs| Dur(Duration::from_secs(secs)))
                     .ok_or_else(|| E::custom(format!("{n} is not a number of minutes")))
             }
         }

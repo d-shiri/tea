@@ -131,7 +131,7 @@ pub struct Store {
 }
 
 /// `$XDG_STATE_HOME/tea/`, else `~/.local/state/tea/`.
-fn dir() -> Option<PathBuf> {
+pub fn dir() -> Option<PathBuf> {
     let base = match std::env::var_os("XDG_STATE_HOME") {
         Some(v) if !v.is_empty() => PathBuf::from(v),
         _ => PathBuf::from(std::env::var_os("HOME")?).join(".local").join("state"),

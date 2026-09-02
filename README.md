@@ -305,8 +305,27 @@ walk is counted from there, and the badge says *Counting from here* rather
 than *0 of 20 steps* — a page reporting nothing to somebody who has just
 crossed the flat is a page that sends them across it again. The cost is whatever you
 walked between the break starting and that sync; if your phone syncs rarely
-enough that no second one arrives, `grace` ends the break on the clock. A total
-that goes
+enough that no second one arrives, `grace` ends the break on the clock.
+
+That bargain is the right one for a feed that lags and the wrong one for a
+sensor that keeps up. The phone's own step counter — the Home Assistant
+companion app's *Steps sensor*, off by default in the app, reported every
+minute or so once its update frequency is set to *fast always* — is a minute
+old at most when the page goes up, and a minute earlier you were in the chair.
+Its first rise is the walk, and moving the mark on it sends you across the flat
+twice. Say so, and every rise counts:
+
+    [nfc.steps]
+    mode = "on"
+    count = 20
+    entity = "sensor.pixel_steps_sensor"
+    sync = "live"
+
+That counter runs from the phone's last reboot rather than from midnight, which
+changes nothing here: the total is only ever measured from, never credited.
+`sync` defaults to `"batched"` because that is the setting that cannot open the
+gate from the chair; say `"live"` only of a sensor that actually keeps up.
+A total that goes
 *down* — midnight, a phone that re-pairs, a duplicate source dropped — is never
 credited as steps: the new reading simply becomes the mark to measure from, and
 the walk so far stands. Telling a rollover from a correction on one reading is
@@ -426,6 +445,43 @@ it starts again at local midnight. While tea is off or out of hours the gauges
 are replaced by the reason, because a work bar that has not moved since Friday
 is worse than no bar at all.
 
+## The last few weeks
+
+    $ tea dash
+
+Everything above answers *the next five minutes*, and the `today` row starts
+again at midnight — which is right for a status line and useless for the only
+question that matters after the first week: whether any of this is working.
+
+So a break that ends writes a line to
+`$XDG_STATE_HOME/tea/history.jsonl` — when it was, how long it ran, how far it
+was walked, and whether the tag was the thing that ended it. Postpones and
+credited absences get a line each too. `tea dash` reads that log, builds a page
+out of it and opens it:
+
+- **steps per break**, one dot each, against the line the gate asks for. The
+  chart that says whether the walks are walks or a tag within reach of the chair.
+- **breaks a day**, split into the ones the page ran and the ones you had
+  already earned by being away, with postpones on a track beneath.
+- **steps a day**, and the week around each one.
+- **when breaks happen**, by hour. A hollow afternoon is an afternoon you dodged.
+- **how breaks ended** — walked, scanned, or handed back on `grace`.
+
+It is a file, not a server. Nothing listens, no port opens, and nothing is
+fetched from the network to draw it: the page is written to
+`$XDG_STATE_HOME/tea/dash.html` and handed to your browser. `--no-open` prints
+the path and stops there, which is what you want over SSH.
+
+The file carries your config at the foot of it, read-only, with anything called
+`token` blanked out on the way in — and it is written `chmod 600` regardless,
+because the config it quotes is. Read-only because a `file://` page cannot write
+anything back; settings are still changed with `tea set-work 30m` and
+`tea reload`.
+
+The log starts the moment a version that writes it is the one running, and
+nothing can reconstruct the weeks before that. The page says so rather than
+drawing empty axes.
+
 ## Layout
 
     crates/core   pure state machine + the `Blocker` trait — no clock, no I/O
@@ -433,6 +489,10 @@ is worse than no bar at all.
                   and the two ends of the tag: a Home Assistant poll, and a
                   small HTTP ear for anything that would rather push
     dist/         systemd user unit + install script
+
+`crates/cli/src/dash.html` is the dashboard, embedded with `include_str!` and
+filled in at the one placeholder — a real file you can open and edit rather
+than a string built in Rust.
 
 GTK owns the main loop; the scheduler rides a 1s `glib` timeout on it. No
 threads and no locking anywhere in the program.
@@ -451,6 +511,10 @@ five minutes for anything. Everything platform-shaped stays outside it.
   Downtime while the machine was *up* counts as work, so restarting the service
   is not a dodge; downtime across a *reboot* counts as rest. Reboot is detected
   by boottime going backwards, which is the one thing a reboot cannot fake.
+- **The log is never load-bearing** — `history.jsonl` is appended to
+  best-effort, complained about once if it cannot be, and read back a line at a
+  time. A half-written line from a `kill -9` costs that break and nothing else.
+  A chart must never be the reason a break does not happen.
 - **Suspend counts** — timing runs on CLOCK_BOOTTIME (`/proc/uptime`), not
   `Instant`, so a closed lid is rest rather than time that never happened.
 - **Calls count as work** — while an app holds the session awake (a call, a
@@ -512,6 +576,8 @@ wrong manager and reports the unit as missing:
     tea reload                 # pick up edited settings
     tea status                 # what the running service is doing
     tea config                 # every setting, nicely laid out
+    tea dash                   # steps, breaks and how the habit is going
+    tea dash --no-open         # ...write the page without opening it
     tea set-work 30m           # change a setting, comments preserved
     tea set-break 5m
     tea set-warn 30s

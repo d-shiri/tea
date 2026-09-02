@@ -170,6 +170,9 @@ pub struct Steps {
     /// The sensor holding the count -- a phone's daily step total, a watch, a
     /// Health Connect feed. Any entity whose state is a rising number will do.
     pub entity: String,
+    /// How promptly the sensor reports what has been walked. Decides whether
+    /// the first rise seen mid-break is a walk or the phone catching up.
+    pub sync: Sync,
 }
 
 impl Default for Steps {
@@ -177,8 +180,34 @@ impl Default for Steps {
         // Twenty steps is a walk out of the room and back to the doorway. Small
         // enough that nobody games it by shuffling, large enough that it cannot
         // be done from the chair.
-        Self { mode: Mode::Off, count: 20, entity: String::new() }
+        Self { mode: Mode::Off, count: 20, entity: String::new(), sync: Sync::Batched }
     }
+}
+
+/// When the sensor says what has been walked: as it happens, or whenever the
+/// phone gets round to it.
+///
+/// The difference decides what the first rise of a break means. From a feed
+/// that lags -- Health Connect, a watch that uploads when it feels like it --
+/// the reading a break starts from is minutes or hours old, and the first rise
+/// after it holds everything walked since, most of it from before the page went
+/// up. From the phone's own step counter, reported every minute or so, that
+/// same rise is the walk itself, and refusing it sends somebody who has just
+/// crossed the flat back across it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Sync {
+    /// The total arrives in batches, minutes or hours after the steps. The
+    /// first rise of a break moves the mark; only what comes after it counts.
+    /// The default, because it is the one that can never open the gate from
+    /// the chair.
+    #[default]
+    #[serde(alias = "lagging", alias = "delayed", alias = "slow")]
+    Batched,
+    /// The total keeps up with your feet, give or take a minute. Every rise
+    /// counts, the first one included.
+    #[serde(alias = "fast", alias = "realtime", alias = "prompt")]
+    Live,
 }
 
 impl Steps {
@@ -239,9 +268,14 @@ impl<'de> Deserialize<'de> for Grace {
                 })
             }
             fn visit_i64<E: de::Error>(self, n: i64) -> Result<Grace, E> {
+                // Checked, like the bound `config::parse` puts on the string
+                // spelling and for the same reason: a number nobody could have
+                // meant has to come back as a bad setting rather than wrap
+                // silently into a grace of a few seconds.
                 u64::try_from(n)
                     .ok()
-                    .map(|n| Grace(Duration::from_secs(n * 60)))
+                    .and_then(|n| n.checked_mul(60))
+                    .map(|secs| Grace(Duration::from_secs(secs)))
                     .ok_or_else(|| E::custom(format!("{n} is not a number of minutes")))
             }
         }
@@ -694,33 +728,54 @@ fn param(query: &str, name: &str) -> Option<String> {
 
 fn percent_decode(s: &str) -> String {
     let raw = s.as_bytes();
-    let mut out = String::with_capacity(s.len());
+    let mut out: Vec<u8> = Vec::with_capacity(raw.len());
     let mut i = 0;
     while i < raw.len() {
         match raw[i] {
-            b'%' if i + 2 < raw.len() => {
-                match u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                    Ok(byte) => {
-                        out.push(byte as char);
-                        i += 3;
-                    }
-                    Err(_) => {
-                        out.push('%');
-                        i += 1;
-                    }
+            // Read as bytes rather than sliced out of the string. A `%` two
+            // bytes before the middle of a multi-byte character used to be cut
+            // there by index, which panics -- in a socket callback, before the
+            // token is so much as looked at, so anything that can reach the
+            // port could take the daemon down with one malformed request.
+            b'%' if i + 2 < raw.len() => match hex_pair(raw[i + 1], raw[i + 2]) {
+                Some(byte) => {
+                    out.push(byte);
+                    i += 3;
                 }
-            }
+                None => {
+                    out.push(b'%');
+                    i += 1;
+                }
+            },
             b'+' => {
-                out.push(' ');
+                out.push(b' ');
                 i += 1;
             }
             b => {
-                out.push(b as char);
+                out.push(b);
                 i += 1;
             }
         }
     }
-    out
+    // Decoded as bytes and turned back into text once, at the end: pushing each
+    // byte as its own `char` spelled every escaped multi-byte character out in
+    // Latin-1, so a token with one in it never matched the token it was.
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The byte two hex digits spell, or `None` for anything that is not two hex
+/// digits. Deliberately stricter than `from_str_radix`, which also accepts a
+/// leading sign: `%+5` is not an escape.
+fn hex_pair(hi: u8, lo: u8) -> Option<u8> {
+    fn digit(c: u8) -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        }
+    }
+    Some(digit(hi)? * 16 + digit(lo)?)
 }
 
 /// A phone that scanned the tag is holding a browser, and a browser showing
@@ -858,9 +913,16 @@ struct Walker {
     /// this break. Until it is, a rise in the total is ground covered before
     /// the page went up: see `saw`.
     settled: bool,
+    /// Whether the sensor keeps up with the walk. A live feed's first rise is
+    /// the walk itself, and is credited rather than taken as the mark.
+    live: bool,
 }
 
 impl Walker {
+    fn new(sync: Sync) -> Self {
+        Self { live: sync == Sync::Live, ..Self::default() }
+    }
+
     /// One reading from the sensor. Says whether it was taken as this break's
     /// mark rather than credited as a walk -- worth a line in the log, because
     /// steps that visibly do not count are steps somebody walks twice.
@@ -885,7 +947,14 @@ impl Walker {
                 //
                 // The cost is whatever was walked between the break starting
                 // and the first sync after it. That is what `grace` is for.
-                match self.settled {
+                //
+                // None of which holds for a sensor that reports as you walk.
+                // There the reading a break starts from is a minute old at
+                // most, and a minute before the page went up you were in the
+                // chair: the first rise *is* the walk, and taking it as the
+                // mark instead is the page saying *0 of 20* to somebody who
+                // has just done the twenty.
+                match self.settled || self.live {
                     true => self.walked += value - before,
                     false => yardstick = true,
                 }
@@ -911,8 +980,10 @@ impl Walker {
 
     /// Whether the mark being measured from was laid down mid-break -- which
     /// is to say, whether a report has already been taken and not credited.
+    /// Never for a live sensor: it discards nothing, so there is nothing for
+    /// the page to explain.
     fn marked(&self) -> bool {
-        self.settled
+        self.settled && !self.live
     }
 
     fn walked(&self) -> u32 {
@@ -921,9 +992,10 @@ impl Walker {
         self.walked as u32
     }
 
-    /// Between breaks there is nothing to count and nothing worth remembering.
+    /// Between breaks there is nothing to count and nothing worth remembering
+    /// -- except what kind of sensor this is, which does not change.
     fn forget(&mut self) {
-        *self = Self::default();
+        *self = Self { live: self.live, ..Self::default() };
     }
 }
 
@@ -959,7 +1031,7 @@ pub fn watch(cfg: &Config, link: Rc<Link>) -> Result<Watch, String> {
             path: format!("{base}/api/states/{entity}"),
             entity,
             needed: cfg.steps.count,
-            walker: RefCell::new(Walker::default()),
+            walker: RefCell::new(Walker::new(cfg.steps.sync)),
             complained: Cell::new(false),
             misses: Cell::new(0),
             lost: Cell::new(false),
@@ -1432,6 +1504,53 @@ mod tests {
     }
 
     #[test]
+    fn a_malformed_escape_is_answered_rather_than_fatal() {
+        // A `%` followed by a byte that is not UTF-8 used to be sliced by byte
+        // index and panic -- inside a socket callback, so the daemon went with
+        // it, and before the token was checked, so anyone who could reach the
+        // port could do it.
+        let link = link_with(Desk { breaking: true, waiting: true, ..Desk::default() });
+        let mut raw = b"GET /unlock?token=%a".to_vec();
+        raw.push(0xFF);
+        raw.extend_from_slice(b" HTTP/1.1\r\nHost: x\r\n\r\n");
+
+        assert!(answer(&raw, "s3cret", &link, "test").starts_with("HTTP/1.1 401"));
+        assert!(!link.take_scan(), "and it is still not a way in");
+    }
+
+    #[test]
+    fn an_escaped_token_decodes_to_the_token() {
+        assert_eq!(percent_decode("s3cret"), "s3cret");
+        assert_eq!(percent_decode("s%33cret"), "s3cret", "an escape anybody's phone might send");
+        assert_eq!(percent_decode("a+b"), "a b");
+
+        // Whole characters, not one Latin-1 char per byte: a token with a
+        // multi-byte character in it has to come back as what was sent.
+        assert_eq!(percent_decode("caf%C3%A9"), "café");
+
+        // Anything that is not two hex digits is a literal percent sign, and
+        // none of these may panic.
+        for (raw, want) in [("100%", "100%"), ("%zz", "%zz"), ("%a", "%a"), ("%", "%")] {
+            assert_eq!(percent_decode(raw), want, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn a_grace_of_absurd_minutes_is_refused_rather_than_wrapped() {
+        let grace = |line: &str| toml::from_str::<Config>(line).map(|c| c.grace);
+
+        // A bare number is minutes, and ten of them is ten of them.
+        assert_eq!(grace("grace = 10").unwrap(), Grace(Duration::from_secs(600)));
+
+        // 2^63-1 minutes overflows the seconds it would be. That used to wrap
+        // into a grace of moments -- a break that hands the desk straight back
+        // -- rather than report a setting nobody could have meant.
+        let huge = grace(&format!("grace = {}", i64::MAX));
+        assert!(huge.is_err(), "{huge:?}");
+        assert!(grace("grace = -1").is_err(), "and neither is a negative one");
+    }
+
+    #[test]
     fn a_wrong_token_is_refused_and_posts_nothing() {
         let link = link_with(Desk { breaking: true, waiting: true, ..Desk::default() });
         assert!(get(&link, "/unlock?token=guess").starts_with("HTTP/1.1 401"));
@@ -1899,6 +2018,67 @@ mod tests {
         // the phone reported while the page was up.
         w.saw(6_020.0);
         assert_eq!(w.walked(), 20);
+    }
+
+    #[test]
+    fn a_live_sensor_is_credited_its_first_rise() {
+        // The phone's own step counter, reported every minute or so: the
+        // reading a break starts from is a minute old at most, and a minute
+        // ago you were in the chair. The first rise is the walk, and taking
+        // it as the mark would have it walked twice.
+        let mut w = Walker::new(Sync::Live);
+        assert!(!w.saw(24_168.0), "the first reading is still only the mark");
+        assert_eq!(w.walked(), 0);
+        assert!(!w.saw(24_188.0), "and the first rise is not a yardstick");
+        assert_eq!(w.walked(), 20, "it is the walk");
+        assert!(!w.marked(), "so the page has no re-basing to explain");
+
+        // A batched feed, for contrast, still moves the mark first.
+        let mut w = Walker::new(Sync::Batched);
+        w.saw(24_168.0);
+        assert!(w.saw(24_188.0));
+        assert_eq!(w.walked(), 0);
+        assert!(w.marked());
+    }
+
+    #[test]
+    fn a_live_sensor_that_counts_from_boot_still_survives_the_reboot() {
+        // A since-reboot total is what the phone's own counter reports. The
+        // number itself is meaningless -- it is measured from, never credited
+        // -- and a phone restarted mid-break drops to single digits without
+        // undoing the walk or paying for one.
+        let mut w = Walker::new(Sync::Live);
+        w.saw(24_168.0);
+        w.saw(24_180.0);
+        assert_eq!(w.walked(), 12);
+        w.saw(3.0);
+        assert_eq!(w.walked(), 12, "the reboot credits nothing and loses nothing");
+        w.saw(11.0);
+        assert_eq!(w.walked(), 20, "and counting resumes from the new total");
+
+        // Between breaks the walk is forgotten; the kind of sensor is not.
+        w.forget();
+        assert_eq!(w.walked(), 0);
+        w.saw(100.0);
+        w.saw(105.0);
+        assert_eq!(w.walked(), 5, "still live after a break");
+    }
+
+    #[test]
+    fn sync_reads_the_words_people_actually_write() {
+        #[derive(Deserialize)]
+        struct S {
+            sync: Sync,
+        }
+        let read = |word: &str| toml::from_str::<S>(&format!("sync = \"{word}\"")).map(|s| s.sync);
+        for word in ["batched", "lagging", "delayed", "slow"] {
+            assert_eq!(read(word).unwrap(), Sync::Batched, "{word}");
+        }
+        for word in ["live", "fast", "realtime", "prompt"] {
+            assert_eq!(read(word).unwrap(), Sync::Live, "{word}");
+        }
+        assert!(read("instant").is_err(), "a word it does not know is an error, not a guess");
+        assert_eq!(Steps::default().sync, Sync::Batched, "batched unless the file says otherwise");
     }
 
     #[test]

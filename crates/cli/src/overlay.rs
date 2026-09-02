@@ -381,11 +381,12 @@ impl Blocker for GtkBlocker {
         if self.waiting.get() {
             return;
         }
-        let text = clock(remaining);
         for page in self.pages.borrow().iter() {
-            page.count.set_text(&text);
-            // The dial runs itself between ticks so the sweep is smooth; this
-            // is the once-a-second correction back to what the scheduler says.
+            // The dial runs itself between ticks so the sweep is smooth, and
+            // so that the clock moves on when the second does rather than when
+            // the host gets round to saying so. This is the once-a-second
+            // correction back to what the scheduler says, which is what keeps
+            // the free-running countdown from drifting away from it.
             page.dial.borrow_mut().remaining = remaining.as_secs_f64();
         }
     }
@@ -1198,9 +1199,6 @@ fn build_page(
     let slot = slot_height(geometry.width(), geometry.height(), rows);
     let radius = ring_radius(geometry.width(), geometry.height());
 
-    // The layers, sized from the monitor rather than from their own
-    // allocation: the ring's box has to be built before it is measured.
-    let (stage, state) = build_stage(total, remaining, arrival, anim, radius);
 
     // The countdown must land on the exact centre of the screen, where
     // the dial is drawn. Rather than offsetting the other two from the
@@ -1210,6 +1208,11 @@ fn build_page(
     // construction, whatever the text in them turns out to be.
     let count = gtk::Label::new(Some(&clock(remaining)));
     count.add_css_class("tea-count");
+
+    // The layers, sized from the monitor rather than from their own
+    // allocation: the ring's box has to be built before it is measured. Built
+    // after the label because the pace inside it is what moves the clock on.
+    let (stage, state) = build_stage(total, remaining, arrival, anim, radius, &count);
 
     // What the clock is a clock *of*, in the smallest type on the page. It
     // hangs below the numbers, inside the ring, and is balanced by an equal
@@ -1699,6 +1702,7 @@ fn build_stage(
     arrival: f64,
     anim: &Anim,
     radius: f64,
+    count: &gtk::Label,
 ) -> (Stage, Rc<RefCell<Dial>>) {
     let burst_share = anim.burst_share();
     let shards = anim.shard_count();
@@ -1714,42 +1718,51 @@ fn build_stage(
     }));
 
     // ---- the backdrop: drawn once, and then left alone ------------------
+    //
+    // Painted into a surface and blitted from there, because "drawn once" is
+    // not something a draw func gets to decide. `animate_in` washes this layer
+    // in by setting its opacity, and in GTK4 every opacity change queues
+    // another draw -- so the half-second fade was re-rendering the whole thing
+    // on every frame of itself, on every monitor at once. The glow is the
+    // expensive part by three orders of magnitude: a full-screen radial
+    // gradient costs 20ms at 1080p, 36ms at 1440p and 85ms at 4K, against a
+    // 16.7ms frame. That is what made the entrance stutter, and only the
+    // entrance -- nothing else on the page ever touches this layer again.
     let backdrop = gtk::DrawingArea::new();
     backdrop.set_hexpand(true);
     backdrop.set_vexpand(true);
+    let cache: RefCell<Option<(i32, i32, gtk::cairo::ImageSurface)>> = RefCell::new(None);
     backdrop.set_draw_func(move |_, cr, width, height| {
-        let (cx, cy) = (width as f64 / 2.0, height as f64 / 2.0);
-        let reach = (cx * cx + cy * cy).sqrt();
+        // Device pixels rather than logical ones: a cache built at logical
+        // size comes back blurred on a scaled display.
+        let (sx, sy) = cr.user_to_device_distance(1.0, 1.0).unwrap_or((1.0, 1.0));
+        let (sx, sy) = (if sx > 0.0 { sx } else { 1.0 }, if sy > 0.0 { sy } else { 1.0 });
+        let dw = ((width as f64 * sx).round() as i32).max(1);
+        let dh = ((height as f64 * sy).round() as i32).max(1);
 
-        cr.set_source_rgba(0.024, 0.031, 0.051, 1.0);
-        let _ = cr.paint();
-
-        // Graph paper, almost too faint to see: it gives the black somewhere
-        // to be, so a screen that is entirely one colour does not read as a
-        // screen that has died.
-        cr.set_line_width(1.0);
-        cr.set_source_rgba(0.55, 0.70, 1.0, 0.022);
-        let mut x = (width as f64 % GRID) / 2.0;
-        while x < width as f64 {
-            cr.move_to(x.floor() + 0.5, 0.0);
-            cr.line_to(x.floor() + 0.5, height as f64);
-            x += GRID;
+        let mut cache = cache.borrow_mut();
+        if !matches!(&*cache, Some((w, h, _)) if *w == dw && *h == dh) {
+            *cache = gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, dw, dh)
+                .ok()
+                .and_then(|surface| {
+                    let into = gtk::cairo::Context::new(&surface).ok()?;
+                    into.scale(sx, sy);
+                    paint_backdrop(&into, width, height);
+                    Some((dw, dh, surface))
+                });
         }
-        let mut y = (height as f64 % GRID) / 2.0;
-        while y < height as f64 {
-            cr.move_to(0.0, y.floor() + 0.5);
-            cr.line_to(width as f64, y.floor() + 0.5);
-            y += GRID;
-        }
-        let _ = cr.stroke();
 
-        // And a breath of light behind the dial, so the middle of the page is
-        // where the eye goes.
-        let glow = gtk::cairo::RadialGradient::new(cx, cy, 0.0, cx, cy, reach * 0.62);
-        glow.add_color_stop_rgba(0.0, 0.29, 0.42, 0.85, 0.10);
-        glow.add_color_stop_rgba(1.0, 0.29, 0.42, 0.85, 0.0);
-        let _ = cr.set_source(&glow);
-        let _ = cr.paint();
+        match &*cache {
+            Some((_, _, surface)) => {
+                let _ = cr.save();
+                cr.scale(1.0 / sx, 1.0 / sy);
+                let _ = cr.set_source_surface(surface, 0.0, 0.0);
+                let _ = cr.paint();
+                let _ = cr.restore();
+            }
+            // A surface too large to allocate is no reason to show nothing.
+            None => paint_backdrop(cr, width, height),
+        }
     });
 
     // ---- the burst: the blast and the confetti, and nothing else --------
@@ -1866,9 +1879,11 @@ fn build_stage(
         dial: Rc::clone(&state),
         burst: burst.clone(),
         ring: ring.clone(),
+        count: count.clone(),
         arrival,
         radius,
         painted: Cell::new(NEVER_PAINTED),
+        shown: Cell::new(u64::MAX),
         ticking: Cell::new(false),
     });
 
@@ -1895,6 +1910,45 @@ fn build_stage(
     (Stage { backdrop, burst, ring }, state)
 }
 
+/// The dark, the graph paper and the glow.
+///
+/// Split out from the draw func so it can be painted into a cache, used as the
+/// fallback when one cannot be allocated, and timed without a display.
+fn paint_backdrop(cr: &gtk::cairo::Context, width: i32, height: i32) {
+    let (cx, cy) = (width as f64 / 2.0, height as f64 / 2.0);
+    let reach = (cx * cx + cy * cy).sqrt();
+
+    cr.set_source_rgba(0.024, 0.031, 0.051, 1.0);
+    let _ = cr.paint();
+
+    // Graph paper, almost too faint to see: it gives the black somewhere to
+    // be, so a screen that is entirely one colour does not read as a screen
+    // that has died.
+    cr.set_line_width(1.0);
+    cr.set_source_rgba(0.55, 0.70, 1.0, 0.022);
+    let mut x = (width as f64 % GRID) / 2.0;
+    while x < width as f64 {
+        cr.move_to(x.floor() + 0.5, 0.0);
+        cr.line_to(x.floor() + 0.5, height as f64);
+        x += GRID;
+    }
+    let mut y = (height as f64 % GRID) / 2.0;
+    while y < height as f64 {
+        cr.move_to(0.0, y.floor() + 0.5);
+        cr.line_to(width as f64, y.floor() + 0.5);
+        y += GRID;
+    }
+    let _ = cr.stroke();
+
+    // And a breath of light behind the dial, so the middle of the page is
+    // where the eye goes. The costly line on this page: see `backdrop`.
+    let glow = gtk::cairo::RadialGradient::new(cx, cy, 0.0, cx, cy, reach * 0.62);
+    glow.add_color_stop_rgba(0.0, 0.29, 0.42, 0.85, 0.10);
+    glow.add_color_stop_rgba(1.0, 0.29, 0.42, 0.85, 0.0);
+    let _ = cr.set_source(&glow);
+    let _ = cr.paint();
+}
+
 /// How often the page is looked at when nothing is animating.
 ///
 /// Eight times a second, which sounds slow for a countdown and is not: the ring
@@ -1915,10 +1969,16 @@ struct Pace {
     dial: Rc<RefCell<Dial>>,
     burst: gtk::DrawingArea,
     ring: gtk::DrawingArea,
+    /// The countdown itself. Written from here rather than once a second by
+    /// the host: see `step`.
+    count: gtk::Label,
     arrival: f64,
     radius: f64,
     /// The arc as it was last actually painted, to compare against.
     painted: Cell<f64>,
+    /// The whole second the label is currently showing. `u64::MAX` until it
+    /// has written one, and only ever counts down -- see `step`.
+    shown: Cell<u64>,
     /// Whether the frame clock is currently driving this.
     ticking: Cell<bool>,
 }
@@ -1942,7 +2002,7 @@ impl Pace {
     /// whether anything is still animating.
     fn step(&self) -> bool {
         let now = glib::monotonic_time();
-        let (animating, spent, arc) = {
+        let (animating, spent, arc, left) = {
             let mut dial = self.dial.borrow_mut();
             let delta = if dial.last_frame == 0 {
                 0.0
@@ -1960,8 +2020,28 @@ impl Pace {
                 dial.celebrate = Some((t + delta / CELEBRATE).min(1.0));
             }
             let playing = dial.entrance < 1.0 || dial.celebrate.is_some_and(|t| t < 1.0);
-            (playing, dial.spent, arc_of(&dial))
+            (playing, dial.spent, arc_of(&dial), dial.remaining)
         };
+
+        // The clock, moved on as soon as the second it shows has actually run
+        // out. Written from here rather than once a second by the host,
+        // because the host's tick and the second boundary drift against each
+        // other: a label written only on the tick holds one number for two
+        // seconds about once a break and skips another somewhere else, which
+        // is the countdown visibly stalling. Looked at eight times a second,
+        // every change lands within 125ms of the truth.
+        //
+        // Only ever downwards. The dial free-runs on the frame clock and is
+        // corrected once a second from `/proc/uptime`, which lags by up to the
+        // 10ms it is quantised to; without this the correction could nudge the
+        // number back up for a single frame.
+        if !spent {
+            let want = left.max(0.0).ceil() as u64;
+            if want < self.shown.get() {
+                self.shown.set(want);
+                self.count.set_text(&clock_secs(want));
+            }
+        }
 
         // The blast and the confetti live on a full-screen layer, so it is
         // hidden rather than merely left undrawn: a transparent layer the size
@@ -2367,7 +2447,201 @@ fn words(d: Duration) -> String {
     }
 }
 
-fn clock(d: Duration) -> String {
-    let s = d.as_secs();
+fn clock_secs(s: u64) -> String {
     format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// A countdown, in whole seconds, rounded *up*.
+///
+/// Down was wrong at both ends. It showed `0:00` for the whole last second of
+/// a break -- a clock that has plainly stopped above a page that is plainly
+/// still up -- and it dropped a five-minute break straight from 5:00 to 4:58,
+/// because the first tick lands a hair past the second and 298.99 floors to
+/// 298. Rounding up, every number is on screen for the second it names.
+fn clock(d: Duration) -> String {
+    clock_secs(d.as_secs() + u64::from(d.subsec_nanos() > 0))
+}
+
+
+#[cfg(test)]
+mod paint_tests {
+    use super::*;
+
+    fn surface(w: i32, h: i32) -> gtk::cairo::ImageSurface {
+        gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, w, h).unwrap()
+    }
+
+    /// What the fade was costing, and what it costs now.
+    ///
+    /// `animate_in` sets the backdrop's opacity once a frame, and every
+    /// opacity change queues a draw -- so this ran for every frame of the wash
+    /// in, on every monitor. Against a 16.7ms frame it was not close.
+    #[test]
+    fn painting_the_backdrop_costs_more_than_a_frame() {
+        let s = surface(1920, 1080);
+        let cr = gtk::cairo::Context::new(&s).unwrap();
+        paint_backdrop(&cr, 1920, 1080); // warm
+
+        let t = std::time::Instant::now();
+        for _ in 0..5 {
+            paint_backdrop(&cr, 1920, 1080);
+        }
+        s.flush();
+        let each = t.elapsed().as_secs_f64() / 5.0;
+
+        // Not a threshold anybody has to keep green -- it is the reason the
+        // cache exists, asserted so that a future "just draw it again" has to
+        // argue with a number.
+        assert!(
+            each > 0.008,
+            "the backdrop got cheap enough to redraw ({:.1}ms) -- the cache may be moot",
+            each * 1000.0
+        );
+    }
+
+    /// Blitting the cache is what the fade actually pays now.
+    #[test]
+    fn blitting_the_cache_fits_in_a_frame() {
+        let (w, h) = (1920, 1080);
+        let cached = surface(w, h);
+        {
+            let into = gtk::cairo::Context::new(&cached).unwrap();
+            paint_backdrop(&into, w, h);
+        }
+        let target = surface(w, h);
+        let cr = gtk::cairo::Context::new(&target).unwrap();
+        let _ = cr.set_source_surface(&cached, 0.0, 0.0);
+        let _ = cr.paint();
+
+        let t = std::time::Instant::now();
+        for _ in 0..20 {
+            let _ = cr.set_source_surface(&cached, 0.0, 0.0);
+            let _ = cr.paint();
+        }
+        target.flush();
+        let each = t.elapsed().as_secs_f64() / 20.0;
+
+        assert!(
+            each < 0.0167 / 2.0,
+            "a blit has to leave most of the frame for everything else: {:.2}ms",
+            each * 1000.0
+        );
+    }
+
+    /// The countdown, driven the way `Pace::step` drives it, against the way
+    /// the host used to.
+    ///
+    /// The host ticks on its own clock and the second boundary moves on
+    /// another; sampling the label only on the tick means the two drift
+    /// through each other, and every time they cross, a number is either held
+    /// for two seconds or skipped entirely. That is the countdown stalling.
+    #[test]
+    fn the_clock_never_holds_a_number_or_skips_one() {
+        // A five-minute break, a host tick a hair over a second, and a
+        // boottime clock quantised to the 10ms `/proc/uptime` reports in.
+        const TOTAL: f64 = 300.0;
+        const TICK: f64 = 1.0004;
+
+        // How it was: the label written once per host tick, rounding down.
+        let mut old_seq = vec![TOTAL.floor() as u64];
+        let (mut t, mut prev_q, mut rem) = (0.0f64, 0.0f64, TOTAL);
+        while rem > 0.0 {
+            t += TICK;
+            let q = (t * 100.0).floor() / 100.0;
+            rem -= q - prev_q;
+            prev_q = q;
+            if rem <= 0.0 {
+                break;
+            }
+            old_seq.push(rem.floor() as u64);
+        }
+
+        // How it is: the dial free-runs, the host corrects it once a tick, and
+        // the label is looked at eight times a second and only ever counts
+        // down -- exactly what `Pace::step` does.
+        let mut shown = u64::MAX;
+        let mut new_seq: Vec<u64> = Vec::new();
+        let (mut prev_q, mut sched) = (0.0f64, TOTAL);
+        let mut dial = TOTAL;
+        let mut next_tick = TICK;
+        let mut now = 0.0f64;
+        while now < TOTAL + 1.0 {
+            now += 1.0 / 8.0;
+            dial = (dial - 1.0 / 8.0).max(0.0);
+            if now >= next_tick {
+                let q = (next_tick * 100.0).floor() / 100.0;
+                next_tick += TICK;
+                sched -= q - prev_q;
+                prev_q = q;
+                if sched <= 0.0 {
+                    break;
+                }
+                dial = sched; // the once-a-second correction
+            }
+            let want = dial.max(0.0).ceil() as u64;
+            if want < shown {
+                shown = want;
+                new_seq.push(want);
+            }
+        }
+
+        let holds = |v: &[u64]| v.windows(2).filter(|w| w[0] == w[1]).count();
+        let skips = |v: &[u64]| v.windows(2).filter(|w| w[0] - w[1] > 1).count();
+
+        // The old way stumbles; that is the reported symptom.
+        assert!(
+            holds(&old_seq) + skips(&old_seq) > 0,
+            "the old sampling was supposed to stumble: {:?}",
+            &old_seq[..12.min(old_seq.len())]
+        );
+
+        // The new way does not, and still counts every number exactly once.
+        assert_eq!(holds(&new_seq), 0, "a number was held for two seconds");
+        assert_eq!(skips(&new_seq), 0, "a number was skipped");
+        assert!(new_seq.windows(2).all(|w| w[0] - w[1] == 1), "every step is one second");
+    }
+
+    /// A countdown rounds up: the last second of a break reads 0:01, not a
+    /// clock that has stopped at 0:00 above a page that is plainly still up.
+    #[test]
+    fn the_last_second_of_a_break_is_not_zero() {
+        assert_eq!(clock(Duration::from_millis(1)), "0:01");
+        assert_eq!(clock(Duration::from_millis(999)), "0:01");
+        assert_eq!(clock(Duration::ZERO), "0:00", "and nothing left really is nothing");
+
+        // The first tick of a five-minute break lands a hair past the second;
+        // rounding down turned that into a break that opens 5:00 -> 4:58.
+        assert_eq!(clock(Duration::from_secs_f64(298.996)), "4:59");
+        assert_eq!(clock(Duration::from_secs(300)), "5:00");
+        assert_eq!(clock(Duration::from_secs(90)), "1:30");
+    }
+
+    /// The cache has to be pixel-for-pixel what the draw func would have put
+    /// there, or the fix is a redesign wearing a performance hat.
+    #[test]
+    fn the_cache_is_what_the_draw_func_would_have_drawn() {
+        let (w, h) = (321, 197); // deliberately not round
+        let direct = surface(w, h);
+        {
+            let cr = gtk::cairo::Context::new(&direct).unwrap();
+            paint_backdrop(&cr, w, h);
+        }
+
+        let cached = surface(w, h);
+        {
+            let into = gtk::cairo::Context::new(&cached).unwrap();
+            paint_backdrop(&into, w, h);
+        }
+        let blitted = surface(w, h);
+        {
+            let cr = gtk::cairo::Context::new(&blitted).unwrap();
+            let _ = cr.set_source_surface(&cached, 0.0, 0.0);
+            let _ = cr.paint();
+        }
+
+        let a = direct.take_data().unwrap();
+        let b = blitted.take_data().unwrap();
+        assert_eq!(a.len(), b.len());
+        assert!(a.iter().eq(b.iter()), "the blit is not the same picture");
+    }
 }
