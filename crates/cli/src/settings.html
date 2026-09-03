@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>tea — settings</title>
+<link rel="icon" href="data:image/png;base64,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">
+<style>
+  html { color-scheme: dark }
+  body {
+    margin: 0; padding: 0 1rem 5rem; background: #0d1017; color: #e6e9f0;
+    font: 400 13.5px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    position: sticky; top: 0; z-index: 2; background: #0d1017; border-bottom: 1px solid rgba(255,255,255,.08);
+    display: flex; align-items: center; gap: .8rem; padding: .7rem 0; margin-bottom: .6rem;
+  }
+  header img { width: 32px; height: 32px }
+  header h1 { font: 300 1.3rem/1 system-ui, sans-serif; margin: 0 }
+  header p { margin: 0; color: #626d86; font-size: .8rem }
+  #q {
+    margin-left: auto; width: min(18rem, 45vw); background: #171d2c; color: #eef1f7; border: 1px solid rgba(255,255,255,.1);
+    border-radius: 2rem; padding: .4rem .9rem; font: inherit;
+  }
+  #q:focus { outline: none; border-color: #7aa2ff }
+  main { max-width: 84rem; margin: 0 auto }
+  #f { columns: 1; column-gap: 2.5rem }
+  @media (min-width: 60rem) { #f { columns: 2 } }
+  section { break-inside: avoid; margin-bottom: 1rem }
+  h2 {
+    font: 500 .72rem/1 system-ui, sans-serif; letter-spacing: .12em; text-transform: uppercase;
+    color: #79839c; margin: 0 0 .3rem; padding-bottom: .3rem; border-bottom: 1px solid rgba(255,255,255,.08);
+  }
+  label { display: grid; grid-template-columns: 7.5rem 11rem 1fr; gap: .6rem; align-items: center; padding: .15rem 0 }
+  label > span { color: #b8c0d2; font: .85rem ui-monospace, "DejaVu Sans Mono", monospace; overflow: hidden; text-overflow: ellipsis }
+  label > small { color: #626d86; font-size: .76rem; line-height: 1.25 }
+  input, select {
+    box-sizing: border-box; width: 100%; background: #171d2c; color: #eef1f7; border: 1px solid rgba(255,255,255,.1);
+    border-radius: .35rem; padding: .25rem .5rem; font: .85rem ui-monospace, "DejaVu Sans Mono", monospace;
+  }
+  input:focus, select:focus { outline: none; border-color: #7aa2ff }
+  .changed { border-color: #c98500 }
+  footer {
+    position: fixed; left: 0; right: 0; bottom: 0; background: #0d1017; border-top: 1px solid rgba(255,255,255,.08);
+    padding: .6rem 1rem; display: flex; gap: .6rem; align-items: center; flex-wrap: wrap;
+  }
+  button {
+    background: #171d2c; color: #b8c0d2; border: 1px solid rgba(255,255,255,.1); border-radius: .45rem;
+    padding: .45rem 1rem; font: 500 .9rem system-ui, sans-serif; cursor: pointer;
+  }
+  #save { background: #7aa2ff; color: #0d1017; border-color: transparent }
+  #apply { background: #4ade80; color: #0d1017; border-color: transparent }
+  button:disabled { opacity: .4; cursor: default }
+  #note { color: #79839c; white-space: pre-wrap; font: .8rem ui-monospace, monospace; flex: 1 1 12rem }
+  #note.bad { color: #ff8a80 }
+  #note.good { color: #4ade80 }
+  [hidden] { display: none !important }
+  @media (max-width: 40rem) { label { grid-template-columns: 1fr 1fr } label > small { grid-column: 1 / -1 } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <img src="data:image/png;base64,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" alt="">
+    <div><h1>tea</h1><p>Save writes the file. Apply restarts tea with it.</p></div>
+    <input id="q" type="search" placeholder="Search settings…" autocomplete="off" spellcheck="false">
+  </header>
+  <form id="f"></form>
+</main>
+<footer>
+  <button id="save" form="f" disabled>Save</button>
+  <button id="apply" type="button" hidden>Apply changes</button>
+  <button id="undo" type="button">Reload from disk</button>
+  <div id="note"></div>
+</footer>
+<script>
+(() => {
+  // The token arrives once, in the address bar, and is taken out of it again
+  // so it is not left in the history. Every request after that carries it as
+  // a header, which is what stops any other page open in this browser from
+  // saving a config of its own here.
+  const token = new URLSearchParams(location.search).get('token') || '';
+  history.replaceState(null, '', location.pathname);
+  const auth = { 'X-Tea-Token': token };
+
+  const form = document.getElementById('f');
+  const note = document.getElementById('note');
+  const save = document.getElementById('save');
+  const apply = document.getElementById('apply');
+  const q = document.getElementById('q');
+  let lines = [];    // the file, one entry per line, exactly as read
+  let fields = [];   // the lines that are `key = value`, with their inputs
+  let sections = []; // {el, rows}
+  let pending = false; // saved, but the daemon is still running the old file
+
+  const el = (tag, text) => { const e = document.createElement(tag); if (text != null) e.textContent = text; return e; };
+  const say = (text, tone) => { note.textContent = text; note.className = tone || ''; };
+  const dirty = () => fields.some(f => f.input.value !== f.shown);
+  function buttons() {
+    save.disabled = !dirty();
+    apply.hidden = !(dirty() || pending);
+  }
+
+  // Where the value ends and the comment starts, minding quotes: `"#7aa2ff"`
+  // is a colour, not a remark.
+  function split(rest) {
+    let quote = null;
+    for (let i = 0; i < rest.length; i++) {
+      const c = rest[i];
+      if (quote) { if (c === '\\' && quote === '"') i++; else if (c === quote) quote = null; }
+      else if (c === '"' || c === "'") quote = c;
+      else if (c === '#') return [rest.slice(0, i), rest.slice(i)];
+    }
+    return [rest, ''];
+  }
+  const unquote = s => s.replace(/\\(["\\])/g, '$1');
+  const quote = s => '"' + s.replace(/["\\]/g, '\\$&') + '"';
+
+  function render(text) {
+    lines = text.split('\n');
+    fields = [];
+    sections = [];
+    form.textContent = '';
+    let section = null;
+    const open = name => { section = { el: el('section'), name, rows: [] }; section.el.append(el('h2', name)); form.append(section.el); sections.push(section); };
+    lines.forEach((line, i) => {
+      let m = line.match(/^\s*\[([^\]]+)\]\s*(#.*)?$/);
+      if (m) { open(m[1]); return; }
+      m = line.match(/^(\s*[A-Za-z0-9_.-]+\s*=\s*)(.*)$/);
+      if (!m) return;
+      if (!section) open('general');
+      const [value, comment] = split(m[2]);
+      const raw = value.trim();
+      const str = /^"(.*)"$/.exec(raw);
+      const shown = str ? unquote(str[1]) : raw;
+      const key = m[1].replace(/\s*=\s*$/, '').trim();
+      const help = comment.replace(/^#\s?/, '');
+      const row = el('label');
+      row.append(el('span', key));
+      let input;
+      if (str && /^(on|off)$/.test(shown)) {
+        input = el('select');
+        for (const o of ['on', 'off']) { const op = el('option', o); op.value = o; input.append(op); }
+      } else {
+        input = el('input');
+        input.spellcheck = false;
+      }
+      input.value = shown;
+      input.title = help;
+      input.addEventListener('input', () => { input.classList.toggle('changed', input.value !== shown); buttons(); });
+      row.append(input);
+      row.append(el('small', help));
+      section.el.append(row);
+      section.rows.push({ row, text: (section.name + ' ' + key + ' ' + help).toLowerCase() });
+      // Everything needed to put the line back together with only the value
+      // swapped: the comment stays in its column when the new value fits.
+      fields.push({ i, lead: m[1], raw, string: !!str, shown, column: m[1].length + value.length, comment, input });
+    });
+    if (!fields.length) say('nothing here looks like a setting', 'bad');
+    search();
+    buttons();
+  }
+
+  function search() {
+    const words = q.value.toLowerCase().split(/\s+/).filter(Boolean);
+    for (const s of sections) {
+      let shown = 0;
+      for (const r of s.rows) {
+        const hit = words.every(w => r.text.includes(w));
+        r.row.hidden = !hit;
+        if (hit) shown++;
+      }
+      s.el.hidden = shown === 0;
+    }
+  }
+  q.addEventListener('input', search);
+
+  function compose() {
+    const out = lines.slice();
+    for (const f of fields) {
+      const v = f.input.value;
+      if (v === f.shown) continue;
+      const value = f.string ? quote(v) : v.trim();
+      const pad = f.comment ? ' '.repeat(Math.max(1, f.column - f.lead.length - value.length)) : '';
+      out[f.i] = f.lead + value + pad + f.comment;
+    }
+    return out.join('\n');
+  }
+
+  async function load(quiet) {
+    let r;
+    try { r = await fetch('/config', { headers: auth }); } catch (e) { return false; }
+    const text = await r.text();
+    if (!r.ok) { say(text.trim(), 'bad'); return false; }
+    render(text);
+    if (!quiet) say('');
+    return true;
+  }
+
+  // After an apply the daemon goes away for a second or two. Knock until it
+  // is back, then show the file as it now reads it.
+  async function wait() {
+    for (let n = 0; n < 40; n++) {
+      await new Promise(r => setTimeout(r, 750));
+      if (await load(true)) { pending = false; buttons(); say('applied — tea is running your settings', 'good'); return; }
+    }
+    say('saved, but tea has not come back yet — `systemctl --user status tea` will say why', 'bad');
+  }
+
+  // One request does both jobs: the file goes back, and the header says
+  // whether tea should restart on it.
+  async function send(applying) {
+    save.disabled = apply.disabled = true;
+    say(applying ? 'applying…' : 'saving…');
+    let r, text;
+    try {
+      const headers = { ...auth, 'Content-Type': 'text/plain; charset=utf-8' };
+      if (applying) headers['X-Tea-Apply'] = '1';
+      r = await fetch('/config', { method: 'POST', headers, body: compose() });
+      text = await r.text();
+    } catch (e) { say('tea did not answer', 'bad'); apply.disabled = false; buttons(); return; }
+    apply.disabled = false;
+    if (!r.ok) { say(text.trim(), 'bad'); buttons(); return; }
+    if (applying && /restarting/.test(text)) { await wait(); return; }
+    pending = !applying;
+    await load(true);
+    say(applying ? text.trim() : 'saved — apply when you are ready', 'good');
+  }
+
+  form.addEventListener('submit', ev => { ev.preventDefault(); if (dirty()) send(false); });
+  apply.addEventListener('click', () => send(true));
+  document.getElementById('undo').addEventListener('click', () => load());
+  load();
+})();
+</script>
+</body>
+</html>

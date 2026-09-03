@@ -12,6 +12,7 @@
 //! engine leaves its state there once a second, the server leaves its scan
 //! there whenever one arrives, exactly the way the postpone button works.
 
+use crate::clock;
 use crate::config::{self, human};
 use gtk::gio;
 use gtk::glib;
@@ -25,8 +26,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-/// Requests are one small packet. Anything past this is not a tag.
-const REQUEST_CAP: usize = 8 * 1024;
+/// A scan is one small packet; the settings page sends the whole config file
+/// back. Anything past this is neither.
+const REQUEST_CAP: usize = 64 * 1024;
 /// A connection that has not finished asking by now never will.
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the list gets to answer before the poll gives up on it for this
@@ -58,12 +60,11 @@ pub enum Mode {
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
     pub mode: Mode,
-    /// `address:port`. Loopback answers only this machine, which is useful for
-    /// trying it out and useless for an actual tag — a phone in another room
-    /// needs an address it can reach.
+    /// `address:port`. Filled in from `[port]` when the file is loaded; a
+    /// file from before `[port]` existed still writes it here, and is read.
     pub listen: String,
-    /// Shared secret. Anyone who can reach the port and knows this can end your
-    /// break, so it is not optional when the ear is open.
+    /// Shared secret, likewise from `[port]`. Anyone who can reach the port
+    /// and knows this can end your break, so the ear stays shut without it.
     pub token: String,
     /// Give up on the tag after this long and hand the desk back anyway.
     /// `"off"` waits for as long as it takes.
@@ -92,7 +93,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             mode: Mode::Off,
-            listen: "127.0.0.1:9797".into(),
+            listen: String::new(),
             token: String::new(),
             grace: Grace(Duration::from_secs(10 * 60)),
             prompt: "Scan the tag to get your desk back".into(),
@@ -358,10 +359,12 @@ pub struct Job {
 /// The list as the page shows it: which list, and the handful of lines from it
 /// that fit in the corner.
 ///
-/// Fixed at the first answer of a break and not re-sorted afterwards. A panel
-/// that re-ordered itself the moment you ticked something off would move the
-/// next job out from under your eye while you were reading it; the statuses
-/// keep updating in place, which is the part worth seeing.
+/// Laid out afresh on every answer: what is still to do at the top, in the
+/// list's own order, and what has been ticked off underneath it, freshest
+/// first. Tick a job off from the phone and it drops below the open ones
+/// rather than sitting struck through in the middle of them -- the top of
+/// the corner is always the next thing to do, and the bottom is always what
+/// has been done.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Board {
     /// What the page draws above the jobs.
@@ -372,6 +375,15 @@ pub struct Board {
     /// is a corner whose arithmetic does not check out, and the reader is the
     /// one left doing the subtraction.
     pub hidden: u32,
+    /// How many jobs on the list were ticked off today, by the hub's own
+    /// stamps and the local calendar. The whole list, not just the rows shown.
+    ///
+    /// Read off the list rather than counted by whoever has the page up, so
+    /// it is the same number on a real break, on `tea run`, and after a
+    /// restart -- and a job done at the kitchen table between breaks is still
+    /// a job done today. What a *break* is credited with is a different
+    /// question, and stays with the tally.
+    pub today: u32,
 }
 
 impl Board {
@@ -928,15 +940,15 @@ pub struct Ear {
 
 /// Open the port. The error is returned rather than fatal: a break timer that
 /// refuses to start because a socket is busy would be a poor trade.
-pub fn listen(cfg: &Config, link: Rc<Link>) -> Result<Ear, String> {
+pub fn listen(cfg: &Config, link: Rc<Link>, site: Option<crate::web::Site>) -> Result<Ear, String> {
     if cfg.token.trim().is_empty() {
-        return Err("nfc.token is empty — anyone who can reach the port could end your break \
-                    (tea set-nfc on writes one)"
+        return Err("port.token is empty — anyone who can reach the port could end your break \
+                    or rewrite your settings (`tea settings` or `tea set-nfc on` writes one)"
             .into());
     }
 
     let addr: SocketAddr = cfg.listen.parse().map_err(|_| {
-        format!("nfc.listen: {:?} is not an address:port, like \"0.0.0.0:9797\"", cfg.listen)
+        format!("port.listen: {:?} is not an address:port, like \"0.0.0.0:9797\"", cfg.listen)
     })?;
 
     let service = gio::SocketService::new();
@@ -950,8 +962,9 @@ pub fn listen(cfg: &Config, link: Rc<Link>) -> Result<Ear, String> {
         .map_err(|e| format!("cannot listen on {addr}: {e}"))?;
 
     let token = Rc::new(cfg.token.clone());
+    let site = Rc::new(site);
     service.connect_incoming(move |_, conn, _| {
-        greet(conn.clone(), Rc::clone(&token), Rc::clone(&link));
+        greet(conn.clone(), Rc::clone(&token), Rc::clone(&link), Rc::clone(&site));
         // Handled: nothing else is listening for these.
         true
     });
@@ -961,7 +974,7 @@ pub fn listen(cfg: &Config, link: Rc<Link>) -> Result<Ear, String> {
 }
 
 /// Read one request, answer it, hang up.
-fn greet(conn: gio::SocketConnection, token: Rc<String>, link: Rc<Link>) {
+fn greet(conn: gio::SocketConnection, token: Rc<String>, link: Rc<Link>, site: Rc<Option<crate::web::Site>>) {
     let who = conn
         .remote_address()
         .ok()
@@ -981,7 +994,7 @@ fn greet(conn: gio::SocketConnection, token: Rc<String>, link: Rc<Link>) {
         Vec::new(),
         cancel,
         Box::new(move |raw| {
-            let reply = answer(&raw, &token, &link, &who);
+            let reply = answer(&raw, &token, &link, &who, site.as_ref().as_ref());
             // Best effort: a phone that has already walked out of range is not
             // an error worth reporting, and the scan itself is already counted.
             out.write_all_async(reply.into_bytes(), glib::Priority::DEFAULT, gio::Cancellable::NONE, move |_| {
@@ -991,8 +1004,8 @@ fn greet(conn: gio::SocketConnection, token: Rc<String>, link: Rc<Link>) {
     );
 }
 
-/// Accumulate until the headers end, the cap is hit, or the client stops
-/// talking. Boxed rather than generic so it can call itself.
+/// Accumulate until the request is all here, the cap is hit, or the client
+/// stops talking. Boxed rather than generic so it can call itself.
 fn read_request(
     input: gio::InputStream,
     acc: Vec<u8>,
@@ -1007,8 +1020,7 @@ fn read_request(
         match res {
             Ok(bytes) if !bytes.is_empty() => {
                 acc.extend_from_slice(&bytes);
-                let ended = acc.windows(4).any(|w| w == b"\r\n\r\n");
-                if ended || acc.len() >= REQUEST_CAP {
+                if complete(&acc) || acc.len() >= REQUEST_CAP {
                     done(acc);
                 } else {
                     read_request(next, acc, again, done);
@@ -1022,8 +1034,31 @@ fn read_request(
     });
 }
 
+/// Where the headers stop, if they have: the index just past the blank line.
+fn headers_end(raw: &[u8]) -> Option<usize> {
+    raw.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
+}
+
+/// What `Content-Length` promised, or nothing at all.
+fn promised(head: &str) -> Option<usize> {
+    head.split("\r\n")
+        .filter_map(|l| l.split_once(':'))
+        .find(|(k, _)| k.trim().eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, v)| v.trim().parse().ok())
+}
+
+/// Whether everything the request said it would send has arrived: the
+/// headers, and as much body as they promised. A tag's GET is complete at the
+/// blank line; the settings page's POST is complete when the file is.
+fn complete(raw: &[u8]) -> bool {
+    match headers_end(raw) {
+        Some(end) => raw.len() >= end + promised(&String::from_utf8_lossy(&raw[..end])).unwrap_or(0),
+        None => false,
+    }
+}
+
 /// Work out what was asked and produce the whole response.
-fn answer(raw: &[u8], token: &str, link: &Link, who: &str) -> String {
+fn answer(raw: &[u8], token: &str, link: &Link, who: &str, site: Option<&crate::web::Site>) -> String {
     let text = String::from_utf8_lossy(raw);
     let mut lines = text.split("\r\n");
     let Some(request) = lines.next() else {
@@ -1069,6 +1104,51 @@ fn answer(raw: &[u8], token: &str, link: &Link, who: &str) -> String {
 
     match path {
         "/unlock" | "/unlock/" => unlock(link, html, who),
+        // The settings page, only when the file says so. The page itself is
+        // harmless to hand out; the file is handed out and taken back only
+        // behind the same token, which is what keeps every other page open in
+        // that browser from writing a config here.
+        "/settings" | "/settings/" if site.is_some() => {
+            http(200, "text/html; charset=utf-8", crate::web::PAGE)
+        }
+        "/config" | "/config/" if site.is_some() => {
+            let site = site.expect("checked above");
+            match method {
+                "POST" => {
+                    // The body is the file. Not a byte less: a client that
+                    // hung up early must not have half a config written in
+                    // its name, and the timeout answers with whatever came.
+                    let end = headers_end(raw).unwrap_or(raw.len());
+                    let body = &raw[end..];
+                    if promised(&String::from_utf8_lossy(&raw[..end])).is_some_and(|n| n != body.len()) {
+                        return http(400, "text/plain", "tea: the file did not all arrive\n");
+                    }
+                    let Ok(text) = std::str::from_utf8(body) else {
+                        return http(400, "text/plain", "tea: the file is not UTF-8\n");
+                    };
+                    // Saving and applying are two buttons on the page, and
+                    // one request: the header says whether tea should
+                    // restart on what it has just written.
+                    let applying = header("x-tea-apply").is_some();
+                    match crate::web::write(site, text) {
+                        Ok(()) => {
+                            println!("[web]   settings saved from {who}");
+                            let note = match (applying, applying && crate::web::restart_soon()) {
+                                (false, _) => "saved\n",
+                                (true, true) => "saved — tea is restarting to pick it up\n",
+                                (true, false) => "saved — restart tea to pick it up\n",
+                            };
+                            http(200, "text/plain", note)
+                        }
+                        Err(e) => http(400, "text/plain; charset=utf-8", &format!("{e}\n")),
+                    }
+                }
+                _ => match crate::web::read(site) {
+                    Ok(text) => http(200, "text/plain; charset=utf-8", &text),
+                    Err(e) => http(500, "text/plain; charset=utf-8", &format!("{e}\n")),
+                },
+            }
+        }
         "/status" | "/status/" => {
             let desk = link.desk();
             let body = if !desk.breaking {
@@ -1253,6 +1333,7 @@ fn http(code: u16, kind: &str, body: &str) -> String {
         404 => "Not Found",
         405 => "Method Not Allowed",
         409 => "Conflict",
+        500 => "Internal Server Error",
         _ => "Whatever",
     };
     format!(
@@ -1419,18 +1500,31 @@ impl Jobs {
         }
     }
 
-    /// The first answer of a break decides what the page shows for the rest of
-    /// it: the open jobs in the list's own order, then the ones most recently
-    /// ticked off, and no more of either than fits.
+    /// The first answer of a break: lay the page out, and remember what was
+    /// still open, which is what "ticked off during this break" is measured
+    /// against from here on.
+    fn settle_on(&self, items: Vec<Job>, today: &str) -> Board {
+        *self.open.borrow_mut() = items.iter().filter(|j| !j.done).map(|j| j.uid.clone()).collect();
+        self.lay_out(&items, today)
+    }
+
+    /// What the page shows, worked out from the list as it stands: the open
+    /// jobs in the list's own order, then the ones most recently ticked off,
+    /// and no more of either than fits.
+    ///
+    /// Done again on every answer, so a job ticked off from the phone moves
+    /// down under the ones still open, the row it had goes to the next open
+    /// job that did not fit, and the "more" marker shrinks to match. A job
+    /// deleted from the list simply goes.
     ///
     /// The two are not simply concatenated and cut. A couple of lines are held
     /// back for finished jobs whenever there are any, so a list with eleven
     /// things still on it does not fill the corner with nothing but work; and
     /// when there is barely anything left to do, the finished ones take the
     /// slack rather than leaving the page half empty.
-    fn settle_on(&self, items: Vec<Job>) -> Board {
+    fn lay_out(&self, items: &[Job], today: &str) -> Board {
         let (open, mut done): (Vec<Job>, Vec<Job>) = items.iter().cloned().partition(|j| !j.done);
-        *self.open.borrow_mut() = open.iter().map(|j| j.uid.clone()).collect();
+        let today = done.iter().filter(|j| clock::day_of(&j.completed).as_deref() == Some(today)).count();
 
         // Freshest first. The hub writes these as UTC instants, so the string
         // order is the time order, and one without a stamp at all sorts last
@@ -1444,33 +1538,8 @@ impl Jobs {
         Board {
             title: self.title.clone(),
             hidden: (open.len() - open_rows) as u32,
+            today: today as u32,
             jobs: open.into_iter().take(open_rows).chain(done.into_iter().take(done_rows)).collect(),
-        }
-    }
-
-    /// How many open jobs are not on the page, worked out again from the list
-    /// as it stands now.
-    ///
-    /// Recounted on every answer rather than fixed with the rows: tick a job
-    /// off from the phone and it may well be one of the ones that never fit,
-    /// and a marker still saying "2 more" when there is one left is the same
-    /// sum failing to check out, one row lower down.
-    fn hidden_now(&self, board: &Board, items: &[Job]) -> u32 {
-        let shown: HashSet<&str> = board.jobs.iter().map(|job| job.uid.as_str()).collect();
-        items.iter().filter(|job| !job.done && !shown.contains(job.uid.as_str())).count() as u32
-    }
-
-    /// Every answer after the first: the rows stay where they are, and only
-    /// what is ticked off changes. A job deleted from the list mid-break keeps
-    /// the row it had, saying what it last said -- the alternative is a panel
-    /// that closes a gap under the line you were reading.
-    fn restate(&self, board: &mut Board, items: &[Job]) {
-        for row in &mut board.jobs {
-            if let Some(now) = items.iter().find(|j| j.uid == row.uid) {
-                row.done = now.done;
-                row.summary.clone_from(&now.summary);
-                row.completed.clone_from(&now.completed);
-            }
         }
     }
 
@@ -2050,25 +2119,17 @@ fn settle_jobs(ask: &Ask, jobs: &Jobs, answer: Result<Vec<Job>, String>) {
         println!("[ha]    the to-do list is answering again");
     }
 
+    let today = clock::today();
     let mut held = jobs.board.borrow_mut();
-    let mut board = match held.as_mut() {
-        // Every answer after the first: the rows stay put, the statuses do not.
-        Some(board) => {
-            jobs.restate(board, &items);
-            board.clone()
-        }
-        // The first of this break decides what the page shows for the rest of
-        // it -- and what "ticked off during this break" is measured against.
-        None => {
-            let board = jobs.settle_on(items.clone());
-            *held = Some(board.clone());
-            board
-        }
+    let board = match held.is_some() {
+        // Every answer after the first: the same list, laid out again, so
+        // what has just been ticked off drops under what has not.
+        true => jobs.lay_out(&items, &today),
+        // The first of this break also fixes what "ticked off during this
+        // break" is measured against.
+        false => jobs.settle_on(items.clone(), &today),
     };
-    board.hidden = jobs.hidden_now(&board, &items);
-    if let Some(held) = held.as_mut() {
-        held.hidden = board.hidden;
-    }
+    *held = Some(board.clone());
     drop(held);
 
     ask.link.post_chores_done(jobs.tally(&items));
@@ -2377,7 +2438,7 @@ pub fn knock(cfg: &Config) -> Result<String, String> {
     let addr: SocketAddr = cfg
         .listen
         .parse()
-        .map_err(|_| format!("nfc.listen: {:?} is not an address:port", cfg.listen))?;
+        .map_err(|_| format!("port.listen: {:?} is not an address:port", cfg.listen))?;
     // 0.0.0.0 is where it listens, not somewhere anything can connect to.
     let target = if addr.ip().is_unspecified() {
         SocketAddr::from(([127, 0, 0, 1], addr.port()))
@@ -2423,7 +2484,7 @@ mod tests {
     }
 
     fn get(link: &Link, target: &str) -> String {
-        answer(format!("GET {target} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes(), "s3cret", link, "test")
+        answer(format!("GET {target} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes(), "s3cret", link, "test", None)
     }
 
     #[test]
@@ -2444,7 +2505,7 @@ mod tests {
         raw.push(0xFF);
         raw.extend_from_slice(b" HTTP/1.1\r\nHost: x\r\n\r\n");
 
-        assert!(answer(&raw, "s3cret", &link, "test").starts_with("HTTP/1.1 401"));
+        assert!(answer(&raw, "s3cret", &link, "test", None).starts_with("HTTP/1.1 401"));
         assert!(!link.take_scan(), "and it is still not a way in");
     }
 
@@ -2501,14 +2562,14 @@ mod tests {
     fn a_header_token_works_too_for_anything_that_is_not_a_tag() {
         let link = link_with(Desk { breaking: true, waiting: true, ..Desk::default() });
         let raw = "POST /unlock HTTP/1.1\r\nAuthorization: Bearer s3cret\r\n\r\n";
-        assert!(answer(raw.as_bytes(), "s3cret", &link, "test").starts_with("HTTP/1.1 200"));
+        assert!(answer(raw.as_bytes(), "s3cret", &link, "test", None).starts_with("HTTP/1.1 200"));
     }
 
     #[test]
     fn a_browser_gets_a_page_and_a_hub_gets_a_line() {
         let link = link_with(Desk { breaking: true, waiting: true, ..Desk::default() });
         let phone = "GET /unlock?token=s3cret HTTP/1.1\r\nAccept: text/html,*/*\r\n\r\n";
-        assert!(answer(phone.as_bytes(), "s3cret", &link, "test").contains("<!doctype html>"));
+        assert!(answer(phone.as_bytes(), "s3cret", &link, "test", None).contains("<!doctype html>"));
         assert!(get(&link, "/unlock?token=s3cret").contains("text/plain"));
     }
 
@@ -2566,7 +2627,7 @@ mod tests {
     fn junk_gets_a_refusal_rather_than_a_panic() {
         let link = link_with(Desk { breaking: true, waiting: true, ..Desk::default() });
         for raw in ["", "\r\n\r\n", "GET", "PUT /unlock?token=s3cret HTTP/1.1\r\n\r\n", "%%%"] {
-            let reply = answer(raw.as_bytes(), "s3cret", &link, "test");
+            let reply = answer(raw.as_bytes(), "s3cret", &link, "test", None);
             assert!(reply.starts_with("HTTP/1.1 4"), "{raw:?} → {reply}");
         }
         assert!(!link.take_scan());
@@ -2576,12 +2637,12 @@ mod tests {
     fn a_token_with_awkward_characters_survives_the_query_string() {
         let link = link_with(Desk { breaking: true, waiting: true, ..Desk::default() });
         let raw = "GET /unlock?token=a%20b%2Bc HTTP/1.1\r\n\r\n";
-        assert!(answer(raw.as_bytes(), "a b+c", &link, "test").starts_with("HTTP/1.1 200"));
+        assert!(answer(raw.as_bytes(), "a b+c", &link, "test", None).starts_with("HTTP/1.1 200"));
     }
 
     #[test]
     fn the_tag_url_follows_whatever_the_front_door_is() {
-        let mut cfg = Config { token: "t0ken".into(), ..Config::default() };
+        let mut cfg = Config { listen: "127.0.0.1:9797".into(), token: "t0ken".into(), ..Config::default() };
         assert_eq!(cfg.tag_url(), "http://127.0.0.1:9797/unlock?token=t0ken");
         assert!(!cfg.fronted());
 
@@ -3252,6 +3313,18 @@ mod chore_tests {
         Job { uid: uid.into(), summary: summary.into(), done: true, completed: at.into() }
     }
 
+    /// The day every test lives on: the one the stamps below are written in.
+    const DAY: &str = "2026-09-02";
+
+    impl Jobs {
+        fn settle_on_day(&self, items: Vec<Job>) -> Board {
+            self.settle_on(items, DAY)
+        }
+        fn lay_out_day(&self, items: &[Job]) -> Board {
+            self.lay_out(items, DAY)
+        }
+    }
+
     fn list(cap: usize) -> Jobs {
         Jobs {
             entity: "todo.jobs".into(),
@@ -3309,7 +3382,7 @@ mod chore_tests {
     #[test]
     fn the_page_shows_the_open_ones_first_and_no_more_than_it_can_hold() {
         let jobs = list(4);
-        let board = jobs.settle_on(vec![
+        let board = jobs.settle_on_day(vec![
             finished("a", "Make tea", "2026-09-02T09:00:00+00:00"),
             open("b", "Luft"),
             finished("c", "Clean windows", "2026-09-02T11:00:00+00:00"),
@@ -3325,7 +3398,7 @@ mod chore_tests {
         // Six things to do and five lines: without a slot held back, the page
         // would be nothing but work, which is the opposite of the point.
         let jobs = list(5);
-        let board = jobs.settle_on(vec![
+        let board = jobs.settle_on_day(vec![
             open("a", "Luft"),
             open("b", "Tidy up the Kitchen"),
             open("c", "Vacuum"),
@@ -3345,7 +3418,7 @@ mod chore_tests {
         // The other way round: one job left, and the rest of the corner given
         // over to the afternoon's work rather than left blank.
         let jobs = list(4);
-        let board = jobs.settle_on(vec![
+        let board = jobs.settle_on_day(vec![
             open("a", "Luft"),
             finished("b", "Bins", "2026-09-02T09:00:00+00:00"),
             finished("c", "Windows", "2026-09-02T10:00:00+00:00"),
@@ -3358,7 +3431,7 @@ mod chore_tests {
     #[test]
     fn a_list_of_nothing_but_work_still_fills_the_page() {
         let jobs = list(3);
-        let board = jobs.settle_on(vec![open("a", "Luft"), open("b", "Bins"), open("c", "Tea")]);
+        let board = jobs.settle_on_day(vec![open("a", "Luft"), open("b", "Bins"), open("c", "Tea")]);
         assert_eq!(shown(&board), ["Luft", "Bins", "Tea"], "no finished jobs, no slots held");
     }
 
@@ -3371,36 +3444,89 @@ mod chore_tests {
     }
 
     #[test]
-    fn the_rows_do_not_move_when_something_is_ticked_off() {
+    fn what_is_ticked_off_drops_under_what_is_still_to_do() {
         let jobs = list(5);
-        let mut board = jobs.settle_on(vec![open("a", "Luft"), open("b", "Tidy up")]);
-        // The hub now has them the other way round, one of them done, and one
-        // brand new. None of that is allowed to move a line out from under the
-        // eye that is reading it.
-        jobs.restate(
-            &mut board,
-            &[open("c", "Vacuum"), done("a", "Luft"), open("b", "Tidy up")],
-        );
+        let board = jobs.settle_on_day(vec![open("a", "Luft"), open("b", "Tidy up"), open("c", "Mirrors")]);
+        assert_eq!(shown(&board), ["Luft", "Tidy up", "Mirrors"]);
+        // The middle one is done from the phone: it goes to the bottom, struck
+        // through, and the ones still open close up above it.
+        let board = jobs.lay_out_day(&[
+            open("a", "Luft"),
+            finished("b", "Tidy up", "2026-09-03T09:10:00+00:00"),
+            open("c", "Mirrors"),
+        ]);
         assert_eq!(
             board.jobs.iter().map(|j| (j.summary.as_str(), j.done)).collect::<Vec<_>>(),
-            [("Luft", true), ("Tidy up", false)]
+            [("Luft", false), ("Mirrors", false), ("Tidy up", true)]
         );
     }
 
     #[test]
-    fn a_job_deleted_mid_break_keeps_its_line() {
+    fn a_freed_row_goes_to_the_job_that_did_not_fit() {
+        // The page as it was on the morning this was written: five lines, four
+        // open jobs, two done, so one open job is only a "1 more" marker.
         let jobs = list(5);
-        let mut board = jobs.settle_on(vec![open("a", "Luft"), open("b", "Tidy up")]);
-        jobs.restate(&mut board, &[open("b", "Tidy up")]);
-        assert_eq!(board.jobs.len(), 2, "closing the gap would shuffle the page");
-        assert_eq!(board.jobs[0].summary, "Luft");
+        let before = vec![
+            open("a", "Luft"),
+            open("b", "Tidy up the Kitchen"),
+            open("c", "Clean Mirros"),
+            open("d", "Clean bathroom"),
+            finished("e", "Vacuum", "2026-09-02T15:00:00+00:00"),
+            finished("f", "Clean dish rack", "2026-09-02T14:00:00+00:00"),
+        ];
+        let board = jobs.settle_on_day(before);
+        assert_eq!(shown(&board), ["Luft", "Tidy up the Kitchen", "Clean Mirros", "Vacuum", "Clean dish rack"]);
+        assert_eq!(board.hidden, 1);
+
+        // The kitchen gets done. Its row goes to the bathroom, the marker goes
+        // away, and the kitchen is the freshest of the finished ones.
+        let after = vec![
+            open("a", "Luft"),
+            finished("b", "Tidy up the Kitchen", "2026-09-03T09:10:00+00:00"),
+            open("c", "Clean Mirros"),
+            open("d", "Clean bathroom"),
+            finished("e", "Vacuum", "2026-09-02T15:00:00+00:00"),
+            finished("f", "Clean dish rack", "2026-09-02T14:00:00+00:00"),
+        ];
+        let board = jobs.lay_out_day(&after);
+        assert_eq!(shown(&board), ["Luft", "Clean Mirros", "Clean bathroom", "Tidy up the Kitchen", "Vacuum"]);
+        assert_eq!(board.hidden, 0);
+    }
+
+    #[test]
+    fn the_day_is_counted_off_the_list_not_off_the_page() {
+        // Three lines of room. Three things done today by the hub's stamps,
+        // one yesterday evening, and only two of them fit on the page -- the
+        // count is still three, and it is three on whichever page shows it.
+        let jobs = list(3);
+        let board = jobs.settle_on_day(vec![
+            open("a", "Clean Mirros"),
+            finished("b", "Luft", "2026-09-02T12:21:05.222188+00:00"),
+            finished("c", "Tidy up the Kitchen", "2026-09-02T12:10:22+00:00"),
+            finished("d", "Vacuum", "2026-09-01T12:38:05+00:00"),
+            finished("e", "Dishes", "2026-09-02T11:00:00+00:00"),
+        ]);
+        assert_eq!(shown(&board), ["Clean Mirros", "Luft", "Tidy up the Kitchen"]);
+        assert_eq!(board.today, 3);
+        // And one ticked off with no stamp at all is done, but not datably.
+        let unstamped = Job { uid: "a".into(), summary: "Clean Mirros".into(), done: true, completed: String::new() };
+        let board = jobs.lay_out_day(&[unstamped]);
+        assert_eq!(board.today, 0);
+    }
+
+    #[test]
+    fn a_job_deleted_mid_break_goes() {
+        let jobs = list(5);
+        jobs.settle_on_day(vec![open("a", "Luft"), open("b", "Tidy up")]);
+        let board = jobs.lay_out_day(&[open("b", "Tidy up")]);
+        assert_eq!(shown(&board), ["Tidy up"]);
     }
 
     #[test]
     fn only_what_was_open_when_the_page_went_up_counts() {
         let jobs = list(5);
         let items = vec![open("a", "Luft"), open("b", "Tidy up"), done("c", "Make tea")];
-        jobs.settle_on(items.clone());
+        jobs.settle_on_day(items.clone());
         // Nothing has happened yet, and the job that was already done when the
         // break started is not this break's doing.
         assert_eq!(jobs.tally(&items), 0);
@@ -3415,7 +3541,7 @@ mod chore_tests {
     fn a_job_ticked_off_and_put_back_was_still_done() {
         let jobs = list(5);
         let items = vec![open("a", "Luft")];
-        jobs.settle_on(items.clone());
+        jobs.settle_on_day(items.clone());
         assert_eq!(jobs.tally(&[done("a", "Luft")]), 1);
         assert_eq!(jobs.tally(&items), 1, "un-ticking is not un-doing");
     }
@@ -3430,15 +3556,17 @@ mod chore_tests {
             open("d", "Bins"),
             finished("e", "Make tea", "2026-09-02T09:00:00+00:00"),
         ];
-        let board = jobs.settle_on(items.clone());
+        let board = jobs.settle_on_day(items.clone());
         // Two open jobs on the page, one line kept for the finished one, and
         // two open jobs with nowhere to go -- which the page has to say.
         assert_eq!(shown(&board), ["Luft", "Tidy up", "Make tea"]);
         assert_eq!(board.hidden, 2);
 
-        // One of the two nobody could see is ticked off from the phone. The
-        // rows cannot change -- they are fixed for the break -- but a marker
-        // still saying "2 more" would be the same arithmetic failing again.
+        // One of the two nobody could see is ticked off from the phone. Two
+        // finished now, so two lines are held for them and the page is down
+        // to one open row -- but the marker says how many did not fit, and
+        // that is still two, not the "1" a fixed page would have needed to
+        // recount its way to.
         let after = vec![
             open("a", "Luft"),
             open("b", "Tidy up"),
@@ -3446,14 +3574,16 @@ mod chore_tests {
             finished("d", "Bins", "2026-09-02T14:00:00+00:00"),
             finished("e", "Make tea", "2026-09-02T09:00:00+00:00"),
         ];
-        assert_eq!(jobs.hidden_now(&board, &after), 1);
+        let board = jobs.lay_out_day(&after);
+        assert_eq!(shown(&board), ["Luft", "Bins", "Make tea"]);
+        assert_eq!(board.hidden, 2);
         assert_eq!(jobs.tally(&after), 1, "and it counts, page or no page");
     }
 
     #[test]
     fn a_list_that_fits_hides_nothing() {
         let jobs = list(8);
-        let board = jobs.settle_on(vec![open("a", "Luft"), finished("b", "Tea", "2026-09-02T09:00:00+00:00")]);
+        let board = jobs.settle_on_day(vec![open("a", "Luft"), finished("b", "Tea", "2026-09-02T09:00:00+00:00")]);
         assert_eq!(board.hidden, 0);
     }
 
@@ -3464,7 +3594,7 @@ mod chore_tests {
         let jobs = list(2);
         let items =
             vec![open("a", "Luft"), open("b", "Tidy up"), open("c", "Vacuum"), open("d", "Bins")];
-        jobs.settle_on(items.clone());
+        jobs.settle_on_day(items.clone());
         let after = vec![open("a", "Luft"), open("b", "Tidy up"), open("c", "Vacuum"), done("d", "Bins")];
         assert_eq!(jobs.tally(&after), 1);
     }
@@ -3481,7 +3611,7 @@ mod chore_tests {
     #[test]
     fn a_break_that_has_ended_forgets_the_list() {
         let jobs = list(5);
-        jobs.settle_on(vec![open("a", "Luft")]);
+        jobs.settle_on_day(vec![open("a", "Luft")]);
         assert_eq!(jobs.tally(&[done("a", "Luft")]), 1);
         jobs.forget();
         assert!(jobs.board.borrow().is_none());
@@ -3527,5 +3657,71 @@ mod chore_tests {
         assert_eq!(chores.cap(), 1, "clamped, not zero -- `show = 0` is off, not empty");
         chores.show = 8;
         assert_eq!(chores.cap(), 8, "eight is the default and well under the ceiling");
+    }
+}
+
+/// The settings page, served off the same ear as the tag.
+#[cfg(test)]
+mod web_tests {
+    use super::*;
+
+    fn ask(raw: &str, site: Option<&crate::web::Site>) -> String {
+        answer(raw.as_bytes(), "s3cret", &Link::new(), "test", site)
+    }
+
+    #[test]
+    fn without_a_site_the_page_is_not_there() {
+        let reply = ask("GET /settings?token=s3cret HTTP/1.1\r\n\r\n", None);
+        assert!(reply.starts_with("HTTP/1.1 404"), "{reply}");
+    }
+
+    #[test]
+    fn a_request_is_complete_when_its_body_is() {
+        assert!(!complete(b"POST /config HTTP/1.1\r\nContent-Length: 5\r\n"));
+        assert!(!complete(b"POST /config HTTP/1.1\r\nContent-Length: 5\r\n\r\nab"));
+        assert!(complete(b"POST /config HTTP/1.1\r\ncontent-length: 5\r\n\r\nabcde"));
+        assert!(complete(b"GET /unlock HTTP/1.1\r\n\r\n"), "no body promised, none waited for");
+    }
+
+    #[test]
+    fn the_file_goes_out_and_comes_back_behind_the_token() {
+        let dir = std::env::temp_dir().join(format!("tea-ear-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "work = \"30m\"\n").unwrap();
+        let site = crate::web::Site { path: path.clone() };
+
+        let page = ask("GET /settings?token=s3cret HTTP/1.1\r\n\r\n", Some(&site));
+        assert!(page.starts_with("HTTP/1.1 200") && page.contains("<title>tea — settings"), "{page}");
+
+        let read = ask("GET /config HTTP/1.1\r\nX-Tea-Token: s3cret\r\n\r\n", Some(&site));
+        assert!(read.ends_with("\r\n\r\nwork = \"30m\"\n"), "{read}");
+
+        let body = "work = \"25m\"\n";
+        let post = format!(
+            "POST /config HTTP/1.1\r\nX-Tea-Token: s3cret\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let saved = ask(&post, Some(&site));
+        assert!(saved.starts_with("HTTP/1.1 200") && saved.contains("saved"), "{saved}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+
+        // Short of what it promised: nothing written.
+        let short = "POST /config HTTP/1.1\r\nX-Tea-Token: s3cret\r\nContent-Length: 40\r\n\r\nwork = \"1m\"\n";
+        assert!(ask(short, Some(&site)).starts_with("HTTP/1.1 400"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+
+        // Wrong token: not even a read.
+        let wrong = ask("GET /config HTTP/1.1\r\nX-Tea-Token: nope\r\n\r\n", Some(&site));
+        assert!(wrong.starts_with("HTTP/1.1 401"), "{wrong}");
+
+        // A file that would not load is refused with the reason.
+        let bad = "banana = 1\n";
+        let post = format!("POST /config HTTP/1.1\r\nX-Tea-Token: s3cret\r\nContent-Length: {}\r\n\r\n{bad}", bad.len());
+        let refused = ask(&post, Some(&site));
+        assert!(refused.starts_with("HTTP/1.1 400") && refused.contains("not saved"), "{refused}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

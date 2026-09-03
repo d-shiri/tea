@@ -72,11 +72,13 @@ matching flag that overrides the file (`tea --help`).
     prompts = "off"
     prompt_every = "20s"
 
+    [port]
+    listen = "127.0.0.1:9797"
+    token = ""
+
     [nfc]
     mode = "off"
-    listen = "127.0.0.1:9797"
     url = ""
-    token = ""
     grace = "10m"
     prompt = "Scan the tag to get your desk back"
 
@@ -492,7 +494,7 @@ and the break page grows a list in the top-left corner:
     ├─ Clean windows
     └─ Take out the bins
     ─────────────
-    today · 2 jobs done
+    today · 2 tasks done
 
 The open ones first, in the list's own order, then the ones already done —
 struck through, green, and fading as they go down. The last two lines are kept
@@ -509,7 +511,7 @@ it says it is hiding **is** the list, and no number on the page can disagree wit
 the rows beneath it. It costs no job its place, so `show = 8` means eight jobs.
 
 Under a hairline, once the day has something to report, the day itself: *today ·
-2 jobs done*, the count in the same green the finished jobs are struck through
+2 tasks done*, the count in the same green the finished jobs are struck through
 in. The rule and the leading word are doing a job — above the line is this list
 now, below it is you today — because a bare number beside a sample of a list
 invites you to count the rows, and the rows will not add up to it. It says
@@ -526,11 +528,11 @@ your phone while you are standing at the window and the line goes green behind
 you; tea will not tick anything off on your behalf, because a job marked done
 from the laptop you were just sent away from is a claim nothing here can check.
 
-The rows are fixed the moment the page first gets an answer and are never
-re-ordered afterwards — only their statuses change. A panel that re-sorted
-itself as you ticked things off would move the next job out from under the eye
-reading it. A job deleted mid-break keeps its line for the same reason, and a
-job that never fit on screen still counts if you do it.
+What is still to do is always at the top, in the list's own order, and what
+has been done is always underneath it, freshest first. Tick a job off and it
+drops below the open ones; its row goes to the next job that did not fit, and
+the *N more* marker shrinks to match. A job that never fit on screen still
+counts if you do it.
 
 None of this is part of the gate. The list holds nothing back, ends no break
 early, and a hub that cannot be asked about it costs one line on stderr and an
@@ -621,10 +623,10 @@ button has always worked.
 
 ### Two ways in
 
-`listen` defaults to loopback, which answers this machine and nothing else. A
-phone in another room needs one of two things.
+`listen`, under `[port]`, defaults to loopback, which answers this machine and
+nothing else. A phone in another room needs one of two things.
 
-**Bind it to the network.** `listen = "0.0.0.0:9797"`, plus — on Ubuntu, where
+**Bind it to the network.** `listen = "0.0.0.0:9797"` under `[port]`, plus — on Ubuntu, where
 the firewall drops it before tea ever sees it — a hole opened only to the
 network the tag is on:
 
@@ -642,13 +644,57 @@ buys a real hostname and TLS over the token. tea has no idea that happened, so
 tell it where its front door is, or the URL it prints for the tag will be the
 one nothing can reach:
 
-    [nfc]
+    [port]
     listen = "127.0.0.1:9797"
+
+    [nfc]
     url = "https://tea.example.home/unlock"
 
 Scans then arrive from the proxy rather than the phone, so the log names
 whoever the proxy says it was carrying — `X-Forwarded-For`, for the log and
 nothing else. A header is a claim, never an authorisation.
+
+## The settings page
+
+Everything in the config file, in a browser, without the browser owning the
+file:
+
+```
+tea settings
+```
+
+does whatever is still needed — switches the page on in the file, writes a
+token under `[port]` if there is none, restarts the service so it hears about
+both — and opens `http://127.0.0.1:9797/settings` with the token in the
+address. No tag is involved and none is needed. The page shows the file one
+setting to a row, two columns of sections on a wide screen — the comment
+beside each one as its help, `"on"`/`"off"` as a switch, everything else as
+text — with a search box at the top that narrows it to the rows whose name,
+section or help mention what you typed. *Save* sends the whole file back; tea
+parses it the way it parses it at start-up, refuses it with the line and
+column if it would not load, and writes it in one move if it would. *Apply
+changes* does the same and then restarts tea on it, the way `tea reload`
+does; it appears whenever there is something to apply. Comments, blank lines
+and column alignment survive a save, because the page only ever swaps the
+value on the lines you touched.
+
+Nothing new is listening. The page is served on `[port]`, the same socket
+that hears the tag when tea does its own listening, behind the same token —
+sent once in the address, taken out of it again, and carried as a header on
+every request after, which is what keeps any other page open in your browser
+from writing a config here.
+It costs nothing while nobody is looking at it: a socket nobody connects to
+never wakes the main loop.
+
+```toml
+[settings]
+page = "on"
+```
+
+Off by default, because an upgrade must never quietly put a file editor on a
+port; `tea settings` is the one thing that turns it on, and only when asked.
+Loopback only unless `[port] listen` says otherwise; if it does, the page is
+reachable from wherever the tag is, behind the same token.
 
 ## Status
 
@@ -660,7 +706,7 @@ nothing else. A header is a claim, never an authorisation.
                 15m of 25m — next break in 10m
 
       postpone  1 of 2 left — resets in 40m
-      today     3 breaks · 1 away from the desk · 187 steps walked · 2 jobs done
+      today     3 breaks · 1 away from the desk · 187 steps walked · 2 tasks done
       long      15m — after 2 more ordinary breaks
       now       idle 4s · nothing is holding a break
       service   running · saved 2s ago

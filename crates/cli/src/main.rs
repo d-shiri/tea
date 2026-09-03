@@ -13,6 +13,7 @@ mod settings;
 mod sound;
 mod state;
 mod status;
+mod web;
 
 use config::human;
 use gtk::glib;
@@ -69,6 +70,7 @@ fn main() {
     let mut show_config = false;
     let mut show_dash = false;
     let mut open_dash = true;
+    let mut open_settings = false;
     /// The default `tea off` with no duration named. Long enough to be worth
     /// asking for, short enough that forgetting to say `tea on` costs you one
     /// afternoon rather than the habit.
@@ -139,6 +141,7 @@ fn main() {
             "status" => show_status = true,
             "config" => show_config = true,
             "dash" => show_dash = true,
+            "settings" => open_settings = true,
             "--no-open" => open_dash = false,
             "run" | "--test-overlay" => {
                 run_page = true;
@@ -273,7 +276,10 @@ fn main() {
     // A named file that is not there is a typo, wherever it is named. The
     // daemon path already refuses it; these two were quietly showing defaults
     // instead, which reads as "your settings are gone".
-    if (show_config || show_status || show_dash) && explicit_path.is_some() && !path.exists() {
+    if (show_config || show_status || show_dash || open_settings)
+        && explicit_path.is_some()
+        && !path.exists()
+    {
         fail(&format!("no config at {}", path.display()));
     }
 
@@ -301,6 +307,15 @@ fn main() {
         let mut cfg: tea_core::Config = file.clone().into();
         let _ = config::reconcile(&mut cfg);
         return dash::show(&file, &cfg, &path, boottime(), open_dash);
+    }
+
+    // Opens a browser at the running daemon's page. No daemon of its own: the
+    // page is served by the service, and this only knows where.
+    if open_settings {
+        if !path.exists() {
+            fail(&format!("no config at {} (--write-config creates one)", path.display()));
+        }
+        return web::open(&path);
     }
 
     if show_status {
@@ -341,8 +356,22 @@ fn main() {
     let anim_cfg = file.animation.clone();
     let hold_cfg = file.hold;
     let look_cfg = file.page.clone();
-    let nfc_cfg = file.nfc.clone();
+    let mut nfc_cfg = file.nfc.clone();
     let hours_cfg = file.hours.clone();
+    let site = file.settings.on().then(|| web::Site { path: path.clone() });
+    // A page switched on by hand, in a file that has never had a token: mint
+    // one now rather than refuse the port and send somebody to read about
+    // tags. The line is written into the file so the next start finds it.
+    if site.is_some() && nfc_cfg.token.trim().is_empty() {
+        match settings::ensure_token(&path) {
+            Ok(Some(token)) => {
+                println!("tea: wrote a token into {} for the settings page", path.display());
+                nfc_cfg.token = token;
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("tea: {e}"),
+        }
+    }
     let mut cfg: tea_core::Config = file.into();
     let Overrides { work, brk, warn_before, idle_credit, idle_pause, postpone, postpone_budget } =
         over;
@@ -473,9 +502,9 @@ fn main() {
     }
 
     if headless {
-        run_headless(cfg, sound_cfg, nfc_cfg, hours_cfg);
+        run_headless(cfg, sound_cfg, nfc_cfg, hours_cfg, site);
     } else {
-        run_gtk(cfg, sound_cfg, anim_cfg, hold_cfg, look_cfg, nfc_cfg, hours_cfg);
+        run_gtk(cfg, sound_cfg, anim_cfg, hold_cfg, look_cfg, nfc_cfg, hours_cfg, site);
     }
 }
 
@@ -551,8 +580,8 @@ fn tag_instructions(cfg: &nfc::Config) {
     println!("       {}", cfg.tag_url());
     if host.starts_with("127.") || host == "localhost" || host == "::1" {
         println!(
-            "tea: note — nfc.listen is loopback, so only this machine can reach it.\n\
-             \x20    A phone in another room needs either listen = \"0.0.0.0:{port}\"\n\
+            "tea: note — port.listen is loopback, so only this machine can reach it.\n\
+             \x20    A phone in another room needs either [port] listen = \"0.0.0.0:{port}\"\n\
              \x20    and a hole in the firewall, or nfc.url pointing at something\n\
              \x20    that is already listening. See \"The ear\" in the README."
         );
@@ -565,8 +594,9 @@ fn run_headless(
     sound: sound::Config,
     nfc: nfc::Config,
     hours: config::Hours,
+    site: Option<web::Site>,
 ) {
-    let mut engine = Engine::start(cfg, sound, nfc, hours);
+    let mut engine = Engine::start(cfg, sound, nfc, hours, site);
     let mut ui = TerminalBlocker;
     // There is no GTK main loop out here, but the socket that listens for the
     // tag still dispatches on glib's. Pumping whatever is pending each second
@@ -583,6 +613,7 @@ fn run_headless(
 
 /// The real thing. GTK owns the main loop; the engine rides a 1s timeout on it,
 /// so there are no threads and no locking anywhere in this program.
+#[allow(clippy::too_many_arguments)]
 fn run_gtk(
     cfg: tea_core::Config,
     sound: sound::Config,
@@ -591,6 +622,7 @@ fn run_gtk(
     look: overlay::Look,
     nfc: nfc::Config,
     hours: config::Hours,
+    site: Option<web::Site>,
 ) {
     let app = gtk::Application::builder().application_id(APP_ID).build();
 
@@ -609,7 +641,7 @@ fn run_gtk(
         // its last window closes -- so keep it open explicitly.
         let keep_open = app.hold();
         let engine =
-            RefCell::new(Engine::start(cfg.clone(), sound.clone(), nfc.clone(), hours.clone()));
+            RefCell::new(Engine::start(cfg.clone(), sound.clone(), nfc.clone(), hours.clone(), site.clone()));
         let ui = RefCell::new(GtkBlocker::new(
             app,
             engine.borrow().postpone_flag(),
@@ -670,7 +702,9 @@ fn preview(
         let mut ear = None;
         let mut watch = None;
         if asking {
-            match nfc::listen(&nfc, Rc::clone(&link)) {
+            // The settings page stays with the service: a preview that
+            // served it would be a second editor of the same file.
+            match nfc::listen(&nfc, Rc::clone(&link), None) {
                 Ok(e) => {
                     println!("nfc: listening on {}", e.addr);
                     ear = Some(e);
@@ -769,13 +803,12 @@ fn preview(
             if let Some(m) = motion {
                 ui.borrow_mut().motion_seen(m.secs, m.needed, m.lost);
             }
-            // And the list, so a preview shows the corner as a real break will.
-            // A preview is not a day, so the only jobs it knows about are the
-            // ones ticked off while it has been on screen.
-            let done = link.chores_done();
+            // And the list, so a preview shows the corner as a real break will
+            // -- the day's count included, which is the list's to give and
+            // not this page's: a preview is not a day, but it is on one.
             match link.board() {
                 Some(board) => {
-                    ui.borrow_mut().chores_seen(&board.title, &board.chores(), board.hidden, done)
+                    ui.borrow_mut().chores_seen(&board.title, &board.chores(), board.hidden, board.today)
                 }
                 None => ui.borrow_mut().chores_seen("", &[], 0, 0),
             }
@@ -990,6 +1023,7 @@ impl Engine {
         sound: sound::Config,
         nfc_cfg: nfc::Config,
         hours: config::Hours,
+        site: Option<web::Site>,
     ) -> Self {
         let now = boottime();
         let store = state::Store::new();
@@ -1013,18 +1047,23 @@ impl Engine {
         let link = nfc::Link::new();
         // A port that will not open must not stop the timer: the break page
         // still works, the grace still ends it, and the reason is on stderr.
-        let ear = nfc_cfg.on().then(|| nfc::listen(&nfc_cfg, Rc::clone(&link))).and_then(|r| {
-            match r {
+        // The same port serves the settings page, so it opens for either.
+        let serving = site.is_some();
+        let ear = (nfc_cfg.on() || serving)
+            .then(|| nfc::listen(&nfc_cfg, Rc::clone(&link), site))
+            .and_then(|r| match r {
                 Ok(ear) => {
                     println!("nfc: listening on {}", ear.addr);
+                    if serving {
+                        println!("settings: page at {}", web::url(&nfc_cfg));
+                    }
                     Some(ear)
                 }
                 Err(e) => {
-                    eprintln!("tea: nfc is off — {e}");
+                    eprintln!("tea: the port is closed — {e}");
                     None
                 }
-            }
-        });
+            });
 
         // Asking is the tidier half of this: nothing has to be forwarded in, and
         // an unreachable hub is a thing tea finds out about by itself.
@@ -1383,13 +1422,12 @@ impl Engine {
         // The list in the corner, told every tick for the same reason the
         // badges are: a page rebuilt by `insist` has to come back carrying the
         // same jobs, and the blocker does the work only when something moved.
-        // Today's count is the breaks already banked plus what this one has
-        // done so far: the tally only takes a break's jobs when the page comes
-        // down, and a corner that waited for that would sit there saying two
-        // while you watched a third line go green.
-        let today = self.tally.chores + chores;
+        // Today's count comes with the list, off the hub's own stamps, rather
+        // than from the tally: the tally only knows what was done while one
+        // of *these* pages was up, and a job ticked off over lunch, or on a
+        // `tea run` page, is still a job done today.
         match self.link.board() {
-            Some(board) => ui.chores_seen(&board.title, &board.chores(), board.hidden, today),
+            Some(board) => ui.chores_seen(&board.title, &board.chores(), board.hidden, board.today),
             None => ui.chores_seen("", &[], 0, 0),
         }
         if let Some(m) = motion {
@@ -1752,6 +1790,7 @@ fn usage() {
         ("status", "what the background service is doing"),
         ("config", "show every setting"),
         ("dash", "steps, breaks and how the habit is going"),
+        ("settings", "open the settings page in your browser"),
         ("reload", "pick up changed settings"),
         ("off [dur]", "no breaks for a while (an hour by default)"),
         ("on", "start again, now"),

@@ -973,7 +973,7 @@ function renderTiles() {
   // off by default, and a hard zero here would read as a failure rather than
   // as a feature nobody switched on.
   if (chores > 0 || (t && t.chores > 0)) {
-    box.appendChild(tile("Jobs done", num(chores), chores === 1 ? " job" : " jobs",
+    box.appendChild(tile("Tasks done", num(chores), chores === 1 ? " task" : " tasks",
       "ticked off on breaks in " + window_ + (t ? " · " + num(t.chores) + " today" : ""),
       sparkline(tail.map(r => r.chores), S.s2, SW, SH), 180));
   }
@@ -1088,7 +1088,7 @@ function boot() {
     v.appendChild(el("p", { class: "eyebrow", text: "Today" }));
     v.appendChild(el("div", { class: "big", text: t ? num(t.breaks) : "—" }));
     v.appendChild(el("div", { class: "big-sub", style: "margin-bottom:1.6rem", text: t
-      ? (t.breaks === 1 ? "break" : "breaks") + " · " + num(t.steps) + " steps · " + num(t.chores) + " jobs · " + t.credited + " away from the desk"
+      ? (t.breaks === 1 ? "break" : "breaks") + " · " + num(t.steps) + " steps · " + num(t.chores) + " tasks · " + t.credited + " away from the desk"
       : "the service has not saved anything yet" }));
     v.appendChild(el("h2", { text: "Nothing to chart yet" }));
     v.appendChild(el("p", { text: t && t.breaks

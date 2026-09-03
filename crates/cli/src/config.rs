@@ -87,6 +87,15 @@ font = ""
 prompts = "off"
 prompt_every = "20s"
 
+# The one port tea answers on. The tag's URL points here when tea does its own
+# listening (see [nfc]), and the settings page is served here (see [settings]).
+# Loopback by default, which answers this machine and nothing else; a phone in
+# another room needs an address on your network, "0.0.0.0:9797". The token is
+# the secret both need -- `tea settings` or `tea set-nfc on` writes one.
+[port]
+listen = "127.0.0.1:9797"
+token = ""
+
 [nfc]
 # Sitting out a break at your own desk is not a break. With this on, the page
 # does not lift when the countdown ends -- it lifts when a tag you have to get
@@ -94,23 +103,16 @@ prompt_every = "20s"
 # full time, and then simply ends.
 #
 #   mode    "off" (default) or "on". "enabled"/"active" also read as on.
-#   listen  address:port to answer on. Loopback by default, which answers this
-#           machine and nothing else. A phone in another room needs either an
-#           address on your network ("0.0.0.0:9797", plus a hole in the
-#           firewall) or `url` below, which needs neither.
 #   url     where the tag's URL really points, when something else is the front
 #           door -- a reverse proxy on a box that is already listening, with
 #           this machine dialling out to it. Nothing here listens to the
-#           network in that arrangement. See "The ear" in the README.
-#   token   the secret in the tag's URL. Anyone who can reach the door and
-#           knows it can end your break. `tea set-nfc on` writes a fresh one.
+#           network in that arrangement. See "The ear" in the README. Where
+#           tea itself answers, and the secret in the tag's URL, are [port].
 #   grace   give up on the tag after this long and hand the desk back anyway,
 #           so a flat phone does not cost you an afternoon. "off" waits.
 #   prompt  what the page says while it waits. Yours knows where your tag is.
 mode = "off"
-listen = "127.0.0.1:9797"
 url = ""
-token = ""
 grace = "10m"
 prompt = "Scan the tag to get your desk back"
 
@@ -231,10 +233,9 @@ states = ["walking", "on_foot", "running"]
 #
 # Not part of the gate. A list that cannot be read costs one line on stderr and
 # an empty corner; it can never hold your desk, and it can never end a break
-# early. The rows are fixed when the page first gets an answer and never
-# re-ordered afterwards -- only their statuses change -- because a list that
-# re-sorted itself as you ticked things off would move the next job out from
-# under the eye reading it.
+# early. What is still to do is always at the top, in the list's own order,
+# and what has been done is always underneath it, freshest first: tick a job
+# off and it drops below the open ones.
 #
 # Whatever gets ticked off while a page is up is counted: `tea status` says how
 # many today, and `tea dash` has them per day and in total.
@@ -248,7 +249,7 @@ states = ["walking", "on_foot", "running"]
 # same grey as the branches -- so what you can see plus what it says it is
 # hiding is the whole list, and no number on the page can disagree with the rows
 # under it. Under that, once the day has something to report, the day's own
-# score: "today · 2 jobs done", below a hairline, because it is a fact about you
+# score: "today · 2 tasks done", below a hairline, because it is a fact about you
 # rather than about the list.
 #
 #   mode    "off" (default) or "on".
@@ -261,6 +262,14 @@ mode = "off"
 entity = ""           # e.g. "todo.household"
 title = ""            # e.g. "While you're up"
 show = 8
+
+# This file, in a browser. `tea settings` switches this on, writes a token
+# into [port] if there is none, and opens the page; saving writes the file
+# back and restarts tea, the way `tea reload` does. Reachable from wherever
+# [port] listen says. Off by default, because an upgrade must never quietly
+# put a file editor on a port.
+[settings]
+page = "off"
 "##;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -280,6 +289,48 @@ pub struct FileConfig {
     pub hold: crate::overlay::Hold,
     pub page: crate::overlay::Look,
     pub nfc: crate::nfc::Config,
+    pub port: Port,
+    pub settings: crate::web::Config,
+}
+
+/// `[port]`: the one address tea answers on, and the secret it wants.
+///
+/// Two things use it -- the tag, when tea does its own listening, and the
+/// settings page -- and neither owns it, which is why it is not under either.
+/// It used to live under `[nfc]`, and a file that still keeps it there is
+/// read the same way; see [`FileConfig::settled`].
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
+pub struct Port {
+    /// `address:port`. Loopback answers only this machine.
+    pub listen: String,
+    /// Shared secret. Anyone who can reach the port and knows this can end
+    /// your break and rewrite your settings, so the port stays shut without it.
+    pub token: String,
+}
+
+impl Default for Port {
+    fn default() -> Self {
+        Self { listen: "127.0.0.1:9797".into(), token: String::new() }
+    }
+}
+
+impl FileConfig {
+    /// One address and one token, wherever the file put them.
+    ///
+    /// `[port]` is where they live now; `[nfc]` is where they lived, and a
+    /// file from before still says so. The new place wins when both are
+    /// written, the old one is honoured when only it is, and the runtime only
+    /// ever reads the copy under `nfc`, so nothing downstream has to know.
+    pub fn settled(mut self) -> Self {
+        if self.nfc.listen.trim().is_empty() || self.port.listen != Port::default().listen {
+            self.nfc.listen = self.port.listen.clone();
+        }
+        if self.nfc.token.trim().is_empty() || !self.port.token.trim().is_empty() {
+            self.nfc.token = self.port.token.clone();
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -398,8 +449,11 @@ impl Default for FileConfig {
             animation: crate::overlay::Anim::default(),
             hold: crate::overlay::Hold::default(),
             page: crate::overlay::Look::default(),
+            settings: crate::web::Config::default(),
             nfc: crate::nfc::Config::default(),
+            port: Port::default(),
         }
+        .settled()
     }
 }
 
@@ -469,7 +523,9 @@ pub fn load(path: &Path) -> Result<FileConfig, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     // toml's errors already carry line/column and a caret; don't bury that.
-    toml::from_str(&text).map_err(|e| format!("in {}:\n{e}", path.display()))
+    toml::from_str::<FileConfig>(&text)
+        .map(FileConfig::settled)
+        .map_err(|e| format!("in {}:\n{e}", path.display()))
 }
 
 /// Write the commented default file. Never overwrites.
@@ -708,6 +764,7 @@ mod tests {
     #[test]
     fn shipped_default_file_parses_to_the_code_defaults() {
         let parsed: FileConfig = toml::from_str(DEFAULT_FILE).expect("default file must parse");
+        let parsed = parsed.settled();
         let mut got: tea_core::Config = parsed.into();
         assert_eq!(got, tea_core::Config::default());
         assert!(reconcile(&mut got).unwrap().is_empty(), "defaults must need no clamping");
@@ -836,5 +893,34 @@ mod tests {
     fn zero_durations_are_still_fatal() {
         let mut c = tea_core::Config { brk: Duration::ZERO, ..Default::default() };
         assert!(reconcile(&mut c).is_err());
+    }
+
+    #[test]
+    fn the_port_is_read_from_wherever_the_file_put_it() {
+        // A file from before there was a [port]: listen and token under [nfc].
+        let old: FileConfig = toml::from_str("[nfc]\nlisten = \"0.0.0.0:9797\"\ntoken = \"abc\"\n").unwrap();
+        let old = old.settled();
+        assert_eq!(old.nfc.listen, "0.0.0.0:9797");
+        assert_eq!(old.nfc.token, "abc");
+
+        // Today's shape.
+        let new: FileConfig = toml::from_str("[port]\nlisten = \"0.0.0.0:9898\"\ntoken = \"xyz\"\n").unwrap();
+        let new = new.settled();
+        assert_eq!(new.nfc.listen, "0.0.0.0:9898");
+        assert_eq!(new.nfc.token, "xyz");
+
+        // Both, half-migrated: the new place wins where it says something.
+        let both: FileConfig =
+            toml::from_str("[nfc]\nlisten = \"0.0.0.0:9797\"\ntoken = \"abc\"\n[port]\ntoken = \"xyz\"\n").unwrap();
+        let both = both.settled();
+        assert_eq!(both.nfc.listen, "0.0.0.0:9797", "the old listen, as [port] left it alone");
+        assert_eq!(both.nfc.token, "xyz", "the new token");
+
+        // Neither: loopback, no token, same as the starter file.
+        let none: FileConfig = toml::from_str("").unwrap();
+        let none = none.settled();
+        assert_eq!(none.nfc.listen, "127.0.0.1:9797");
+        assert!(none.nfc.token.is_empty());
+        assert_eq!(FileConfig::default().nfc.listen, "127.0.0.1:9797");
     }
 }

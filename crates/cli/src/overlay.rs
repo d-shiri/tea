@@ -15,6 +15,7 @@ use crate::nfc::{Motion, Walk};
 use crate::session::Session;
 use tea_core::{Blocker, Chore, Snooze};
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::cell::{Cell, RefCell};
 use std::f64::consts::{FRAC_PI_2, TAU};
 use std::rc::Rc;
@@ -1520,8 +1521,8 @@ fn day_line(today: u32, clear: bool) -> Option<(String, usize)> {
     const SUBJECT: &str = "today · ";
     match (clear, today) {
         (false, 0) => None,
-        (false, 1) => Some((format!("{SUBJECT}1 job done"), SUBJECT.len())),
-        (false, n) => Some((format!("{SUBJECT}{n} jobs done"), SUBJECT.len())),
+        (false, 1) => Some((format!("{SUBJECT}1 task done"), SUBJECT.len())),
+        (false, n) => Some((format!("{SUBJECT}{n} tasks done"), SUBJECT.len())),
         // An empty list is worth saying outright. "0 to go" is the same fact
         // told as an absence, and this is the one moment the corner gets to be
         // pleased with somebody -- so the whole line is green, not just a
@@ -1629,10 +1630,12 @@ impl Todo {
     /// Put the list up, or bring what is up to date.
     ///
     /// The first call of a break deals the lines out; every call after it
-    /// repaints the ones whose status has moved and leaves the rest completely
-    /// alone. Nothing here re-orders anything: a panel that re-sorted itself as
-    /// you ticked things off would move the next job out from under the eye
-    /// reading it.
+    /// repaints the ones that have changed and leaves the rest completely
+    /// alone. The order is the hub's business: open jobs come first and
+    /// finished ones after, so a job ticked off from the phone arrives here
+    /// already moved to the bottom, and the line that catches the eye is the
+    /// one that has just gone green -- not every line that shuffled up a row
+    /// to make room for it.
     fn show(&self, corner: &Corner) {
         if corner.nothing_to_show() {
             self.root.set_visible(false);
@@ -1641,10 +1644,21 @@ impl Todo {
 
         let lines = lines_of(&corner.jobs, corner.hidden);
         let mut limbs = self.limbs.borrow_mut();
+        // What was already struck through last time, by name: the one thing
+        // worth a flash is a job that was not in this set and now is.
+        let was_done: HashSet<String> = self
+            .last
+            .borrow()
+            .iter()
+            .filter_map(|line| match line {
+                Line::Job(job) if job.done => Some(job.summary.clone()),
+                _ => None,
+            })
+            .collect();
         // True on the first list of a break, on a page built to replace one
-        // that already had it, and on the one other occasion the row count can
-        // move: the last job the page had no room for being ticked off
-        // elsewhere, which takes the marker away with it.
+        // that already had it, and whenever the hub has a different number of
+        // rows for us: a job the page had no room for taking the row of one
+        // just ticked off, or the marker going away with the last of them.
         if limbs.len() != lines.len() {
             for limb in limbs.drain(..) {
                 self.root.remove(&limb.row);
@@ -1697,10 +1711,13 @@ impl Todo {
             }
             // A job going green while you are out of the room is the one thing
             // this panel does that is worth catching the eye on the way back.
-            // Only ever the line that changed, and only once it is already up:
-            // a fade on every line every ten seconds is a flicker in the corner
-            // of a page whose whole job is to be restful.
-            if moved && dealt && matches!(line, Line::Job(job) if job.done) {
+            // Only ever the job that has just been done, and only once the
+            // list is already up: a fade on every line every ten seconds, or
+            // on every line that moved up a row, is a flicker in the corner of
+            // a page whose whole job is to be restful.
+            let just_done =
+                matches!(line, Line::Job(job) if job.done && !was_done.contains(&job.summary));
+            if moved && dealt && just_done {
                 animate_in(&limb.row, 0.25, 0, 0.0);
             }
         }
@@ -3188,13 +3205,13 @@ mod corner_tests {
     #[test]
     fn the_day_names_its_subject_before_its_number() {
         let (line, green) = day_line(1, false).unwrap();
-        assert_eq!(line, "today · 1 job done");
+        assert_eq!(line, "today · 1 task done");
         // The green starts at the number, not at the word that says what the
         // number is about.
-        assert_eq!(&line[green..], "1 job done");
+        assert_eq!(&line[green..], "1 task done");
 
         let (line, _) = day_line(4, false).unwrap();
-        assert_eq!(line, "today · 4 jobs done");
+        assert_eq!(line, "today · 4 tasks done");
     }
 
     #[test]

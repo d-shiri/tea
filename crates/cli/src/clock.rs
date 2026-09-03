@@ -46,6 +46,18 @@ pub fn today() -> String {
     }
 }
 
+/// The local date, as [`today`] writes it, of an instant written the way
+/// Home Assistant writes one -- `2026-09-03T07:21:05.222188+00:00`. `None`
+/// for anything that does not read as a moment at all.
+///
+/// Local rather than UTC on purpose: a job ticked off at one in the morning
+/// is tonight's job, not tomorrow's, and the day line under the list is read
+/// by somebody standing in a kitchen, not at Greenwich.
+pub fn day_of(iso: &str) -> Option<String> {
+    let t = glib::DateTime::from_iso8601(iso.trim(), None).ok()?.to_local().ok()?;
+    Some(format!("{:04}-{:02}-{:02}", t.year(), t.month(), t.day_of_month()))
+}
+
 /// `17:30` for a moment given as minutes since midnight.
 pub fn oclock(minute: u32) -> String {
     format!("{:02}:{:02}", (minute / 60) % 24, minute % 60)
@@ -227,6 +239,15 @@ impl<'de> Deserialize<'de> for Days {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stamp_from_the_hub_has_a_day() {
+        // Noon UTC is the same date in every timezone anybody lives in.
+        assert_eq!(day_of("2026-09-03T12:00:00+00:00").as_deref(), Some("2026-09-03"));
+        assert_eq!(day_of("2026-09-03T12:00:00.222188+00:00").as_deref(), Some("2026-09-03"));
+        assert_eq!(day_of(""), None);
+        assert_eq!(day_of("yesterday"), None);
+    }
 
     #[test]
     fn a_time_of_day_reads_the_way_it_is_written() {

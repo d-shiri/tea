@@ -154,8 +154,8 @@ pub fn show(cfg: Config, hours: &Hours, config_path: &std::path::Path, boottime:
             }
             if today.chores > 0 {
                 parts.push(match today.chores {
-                    1 => "1 job done".to_string(),
-                    n => format!("{n} jobs done"),
+                    1 => "1 task done".to_string(),
+                    n => format!("{n} tasks done"),
                 });
             }
             if today.worked_ms >= 60_000 {
