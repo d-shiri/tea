@@ -252,6 +252,37 @@ own does the same with your words:
 Only while the countdown runs. Once the page is waiting on the tag it has one
 thing to say and says that.
 
+### What moves on it
+
+Four things, and each of them is the page saying something it cannot say in
+words to somebody who has stopped reading it.
+
+- The **arrival**: the dark washes in, a blast goes out past the corners and
+  the dial lands in the middle of it. `[animation] entrance` is how long that
+  takes; `0` skips it and the page is simply there.
+- The **last ten seconds**: a ghost of the ring pushes outward on each one,
+  getting more insistent as they run out. Your desk is coming back and you
+  should not have to be watching the numbers to know it.
+- The **waiting page**, once the countdown is spent and the tag has not been
+  scanned: a ring is pushed out from where the dial was, every few seconds,
+  the way anything listening rather than counting ought to look. It stops the
+  moment the gate opens — the confetti takes over — and a screen that can sit
+  still for a ten-minute grace stops reading as a program that has died. It
+  rests for longer than it moves, which is what makes it affordable.
+- The **exit**: the ring draws itself back in and the page fades out from
+  under it, over a share of whatever the entrance was set to. Switching the
+  entrance off takes the exit with it.
+
+And on a break that is being walked off, each square of the step meter lands
+rather than appears — a little too big, with a glow, settling into the grid.
+A batch of twenty arriving at once is dealt along the row rather than flashed,
+so twenty reads as twenty.
+
+None of it loops, nothing on this page ever strobes, and every part of it goes
+quiet when it has nothing to say: the countdown is looked at eight times a
+second for most of a break, and the frame clock is only asked for while
+something is genuinely moving.
+
 ## The tag on the wall
 
 The break page is scrupulous about time and completely blind to you. You can
@@ -722,6 +753,12 @@ port; `tea settings` is the one thing that turns it on, and only when asked.
 Loopback only unless `[port] listen` says otherwise; if it does, the page is
 reachable from wherever the tag is, behind the same token.
 
+Where this page is on, the dashboard below is served beside it at `/dash` on
+the same port and behind the same token, and the two link to each other in
+their headers. Served, its numbers are gathered per request rather than frozen
+at the moment a file was written. It rides on this switch rather than having
+one of its own: wanting to look at a chart is not a reason to open a port.
+
 ## Status
 
     $ tea status
@@ -771,10 +808,17 @@ out of it and opens it:
 - **when breaks happen**, by hour. A hollow afternoon is an afternoon you dodged.
 - **how breaks ended** — walked, scanned, or handed back on `grace`.
 
-It is a file, not a server. Nothing listens, no port opens, and nothing is
-fetched from the network to draw it: the page is written to
+It is a file first. Nothing listens on its account, no port opens for it, and
+nothing is fetched from the network to draw it: the page is written to
 `$XDG_STATE_HOME/tea/dash.html` and handed to your browser. `--no-open` prints
 the path and stops there, which is what you want over SSH.
+
+Where the settings page above is switched on there is a port already, and the
+same page is served on it at `/dash` behind the same token — one link from the
+settings page, and one link back. That copy reads its numbers when you ask for
+them rather than when a file was written, and it carries a *Refresh* of its
+own, because the token is taken back out of the address bar the moment the
+page has read it.
 
 The file carries your config at the foot of it, read-only, with anything called
 `token` blanked out on the way in — and it is written `chmod 600` regardless,

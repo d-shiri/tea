@@ -3,7 +3,9 @@
 //!
 //! Nothing new listens. The ear that hears the tag already answers HTTP on
 //! `[port]`, behind its token, so the page is two more paths on it: one
-//! that serves the HTML, one that reads and writes the file. The page itself
+//! that serves the HTML, one that reads and writes the file. (`/dash` is a
+//! third, and rides on this switch rather than one of its own -- see
+//! [`crate::dash::page`].) The page itself
 //! is a few hundred lines of plain HTML and script with no library behind it,
 //! and it costs the daemon nothing until somebody opens it -- a socket that
 //! nobody connects to is a socket the main loop never wakes up for.
@@ -163,9 +165,11 @@ mod tests {
 
     #[test]
     fn the_address_is_one_a_browser_can_open() {
-        let mut nfc = crate::nfc::Config::default();
-        nfc.token = "abc".into();
-        nfc.listen = "0.0.0.0:9797".into();
+        let mut nfc = crate::nfc::Config {
+            token: "abc".into(),
+            listen: "0.0.0.0:9797".into(),
+            ..Default::default()
+        };
         assert_eq!(url(&nfc), "http://127.0.0.1:9797/settings?token=abc");
         nfc.listen = "192.168.2.7:9797".into();
         assert_eq!(url(&nfc), "http://192.168.2.7:9797/settings?token=abc");

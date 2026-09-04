@@ -299,6 +299,71 @@ impl GtkBlocker {
         (self.face())()
     }
 
+    /// How much longer the page stays on screen once `release` is called:
+    /// whatever is left of a celebration, and then the bow.
+    ///
+    /// For anything that has to outlive the break by exactly that much. The
+    /// daemon does not care -- it goes back to counting and the timers run
+    /// themselves out -- but `tea run` quits when the break ends, and a main
+    /// loop that has stopped draws no fade at all.
+    pub fn leaving_for(&self) -> Duration {
+        let linger = self
+            .pages
+            .borrow()
+            .iter()
+            .filter_map(|p| p.dial.borrow().celebrate)
+            .map(|t| CELEBRATE * (1.0 - t))
+            .fold(0.0, f64::max);
+        Duration::from_secs_f64(linger + self.anim.exit_seconds())
+    }
+
+    /// Take the break page off the screen, over `fade` seconds.
+    ///
+    /// Split from `release` for the one caller that must not be given a fade:
+    /// `engage` clears the last break before building this one, and a set of
+    /// old pages dissolving over the top of the new ones is a break that starts
+    /// by showing you the end of the one before it.
+    fn take_down(&mut self, fade: f64) {
+        // Before anything else: whatever is still insisting must stop insisting
+        // now, not on its next tick.
+        self.live.set(false);
+        self.waiting.set(false);
+        // And the keyboard comes back before the page goes, whichever way the
+        // break ended. Nothing written down is nothing to do.
+        if self.hold.strict() {
+            match crate::strict::release() {
+                Ok(0) => {}
+                Ok(n) => println!("[hold]  {n} shortcuts back"),
+                Err(e) => eprintln!("tea: strict — {e}"),
+            }
+        }
+        if let Some((monitors, watch)) = self.monitors_watch.take() {
+            monitors.disconnect(watch);
+        }
+        let pages: Vec<Page> = self.pages.borrow_mut().drain(..).collect();
+        if pages.is_empty() {
+            return;
+        }
+        // A celebration still playing gets to finish: the pages hang on for
+        // whatever is left of it and then go. A scan is the one way a break
+        // ends that the user personally earned, and tearing the page down
+        // mid-confetti hands them a desk instead of a reward. Insisting has
+        // already stopped -- `live` is down -- so the linger is only a linger.
+        let linger = pages
+            .iter()
+            .filter_map(|p| p.dial.borrow().celebrate)
+            .map(|t| CELEBRATE * (1.0 - t))
+            .fold(0.0, f64::max);
+        if linger > 0.05 {
+            glib::timeout_add_local_once(Duration::from_secs_f64(linger), move || {
+                bow_out(pages, fade);
+            });
+        } else {
+            bow_out(pages, fade);
+        }
+        println!("[back]  break over, timer reset.");
+    }
+
     /// The waiting page's big line, worked out again.
     ///
     /// What the page is asking for changes as the gate closes: with the tag in
@@ -386,7 +451,7 @@ fn monitors_in(list: &gio::ListModel) -> Vec<gdk::Monitor> {
 
 impl Blocker for GtkBlocker {
     fn engage(&mut self, total: Duration) {
-        self.release();
+        self.take_down(0.0);
         println!("\n[BREAK] stop. {} of rest.", clock(total));
         self.live = Rc::new(Cell::new(true));
         // A break that is resumed mid-wait engages and is told to ask again in
@@ -527,51 +592,9 @@ impl Blocker for GtkBlocker {
     }
 
     fn release(&mut self) {
-        // Before anything else: whatever is still insisting must stop insisting
-        // now, not on its next tick.
-        self.live.set(false);
-        self.waiting.set(false);
-        // And the keyboard comes back before the page goes, whichever way the
-        // break ended. Nothing written down is nothing to do.
-        if self.hold.strict() {
-            match crate::strict::release() {
-                Ok(0) => {}
-                Ok(n) => println!("[hold]  {n} shortcuts back"),
-                Err(e) => eprintln!("tea: strict — {e}"),
-            }
-        }
-        if let Some((monitors, watch)) = self.monitors_watch.take() {
-            monitors.disconnect(watch);
-        }
-        let pages: Vec<Page> = self.pages.borrow_mut().drain(..).collect();
-        if pages.is_empty() {
-            return;
-        }
-        // A celebration still playing gets to finish: the pages hang on for
-        // whatever is left of it and then go. A scan is the one way a break
-        // ends that the user personally earned, and tearing the page down
-        // mid-confetti hands them a desk instead of a reward. Insisting has
-        // already stopped -- `live` is down -- so the linger is only a linger.
-        let linger = pages
-            .iter()
-            .filter_map(|p| p.dial.borrow().celebrate)
-            .map(|t| CELEBRATE * (1.0 - t))
-            .fold(0.0, f64::max);
-        if linger > 0.05 {
-            glib::timeout_add_local_once(Duration::from_secs_f64(linger), move || {
-                for page in &pages {
-                    page.win.destroy();
-                }
-            });
-        } else {
-            for page in pages {
-                // close_request is wired to Stop, so ask the window to go away
-                // in a way it cannot veto.
-                page.win.destroy();
-            }
-        }
-        println!("[back]  break over, timer reset.");
+        self.take_down(self.anim.exit_seconds());
     }
+
 
     fn warn(&mut self, until_break: Duration, snooze: Option<Snooze>) {
         println!("[warn]  break in {}", clock(until_break));
@@ -1267,6 +1290,14 @@ struct Page {
     /// of the same window's panel with two ideas of what it is showing would
     /// repaint each other's lines.
     todo: Rc<Todo>,
+    /// The layers a page fades on its way out: the dark, the column of words
+    /// and the list in the corner. Named here, where they are built, rather
+    /// than fished back out of the window later -- and the ring is deliberately
+    /// not among them, because it leaves by drawing itself back in to nothing.
+    fading: Vec<gtk::Widget>,
+    /// Who draws this page. Held so the bow on the way out can start on the
+    /// next frame rather than on the next heartbeat: see [`Pace::wake`].
+    pace: Rc<Pace>,
     dial: Rc<RefCell<Dial>>,
 }
 
@@ -1280,11 +1311,53 @@ struct Page {
 struct Stage {
     /// Never changes once drawn: the dark, the grid, the glow.
     backdrop: gtk::DrawingArea,
+    /// Who repaints all three of these, and how often.
+    pace: Rc<Pace>,
     /// The blast and the confetti. Full screen, but hidden except while one of
     /// them is actually playing, which is a few seconds of a five-minute break.
     burst: gtk::DrawingArea,
     /// The ring, in a box just big enough to hold it.
     ring: gtk::DrawingArea,
+}
+
+/// Take these pages off the screen: the bow first, then the windows.
+///
+/// The entrance had no bookend for a long time -- a page that washed in over
+/// three seconds went out inside one frame, which reads less like a break
+/// ending than like the program falling over. So the ring draws itself back in,
+/// the dark and the words fade under it, and only then are the windows
+/// destroyed.
+///
+/// `fade` of zero destroys them where they stand, which is what the entrance
+/// being switched off asks for and what re-engaging needs whatever the config
+/// says.
+fn bow_out(pages: Vec<Page>, fade: f64) {
+    if fade <= 0.05 {
+        for page in pages {
+            // close_request is wired to Stop, so ask the window to go away in a
+            // way it cannot veto.
+            page.win.destroy();
+        }
+        return;
+    }
+
+    for page in &pages {
+        // The ring's half of it, and the frame clock started for it here rather
+        // than left to the next heartbeat -- see `Pace::wake`.
+        page.dial.borrow_mut().leaving = Some(0.0);
+        page.pace.wake();
+        for layer in &page.fading {
+            fade_out(layer, fade);
+        }
+    }
+    // And the windows go once it has played, whatever the frame clock managed:
+    // a compositor that never delivered a frame must still not leave a break
+    // page on the screen after the break.
+    glib::timeout_add_local_once(Duration::from_secs_f64(fade), move || {
+        for page in pages {
+            page.win.destroy();
+        }
+    });
 }
 
 /// Soft mode's one concession: a single window asks once for the focus back,
@@ -1410,6 +1483,90 @@ impl Badge {
 struct Meter {
     area: gtk::DrawingArea,
     state: Rc<Cell<Walk>>,
+    /// The squares still coming on. Shared with the draw func, which is the
+    /// only thing that reads it.
+    lighting: Rc<Cell<Lighting>>,
+    /// Whether the frame clock is currently driving this, so a batch of twenty
+    /// steps leaves one tick callback on this widget rather than twenty.
+    ticking: Rc<Cell<bool>>,
+}
+
+/// The run of squares the last count lit, and when it landed.
+///
+/// `from == to` is nothing happening, which is the meter's resting state and
+/// the state a page rebuilt mid-walk is born in: a page put back in front by
+/// `insist` must not replay fifty squares that were lit ten minutes ago.
+#[derive(Clone, Copy)]
+struct Lighting {
+    from: u32,
+    to: u32,
+    since: i64,
+}
+
+/// How long one square takes to come on.
+const PIP_POP: f64 = 0.34;
+/// And the gap between one square being dealt and the next, so a batch arrives
+/// as a wave along the row rather than as a flash. Steps come in batches --
+/// `sync = "batched"` is the default, and a phone reports a walk all at once --
+/// and a batch dealt one square every forty-five milliseconds is what makes
+/// twenty of them read as twenty.
+const PIP_DEAL: f64 = 0.045;
+/// Unless the batch is long enough that the wave would outlast the interest in
+/// it, in which case the whole run is compressed into this.
+const PIP_DEAL_ALL: f64 = 0.55;
+/// The air the landing needs around each square: half the gap between them, so
+/// the glow of one never touches its neighbour. The drawing area is grown by it
+/// on every side, because GTK clips a draw func to the widget and a halo on the
+/// end square would otherwise be a halo with a straight edge.
+const BLOOM: f64 = PIP_GAP / 2.0;
+
+impl Lighting {
+    /// Nothing coming on: `lit` squares are simply lit.
+    fn still(lit: u32) -> Self {
+        Self { from: lit, to: lit, since: 0 }
+    }
+
+    fn batch(self) -> u32 {
+        self.to.saturating_sub(self.from)
+    }
+
+    fn deal(self) -> f64 {
+        match self.batch() {
+            0 | 1 => 0.0,
+            n => (PIP_DEAL_ALL / (n - 1) as f64).min(PIP_DEAL),
+        }
+    }
+
+    /// How far the square at `pip` has got coming on, 0 to 1. Squares outside
+    /// the run are already there -- they were lit before this count arrived,
+    /// and one is exactly what a square at rest looks like.
+    fn at(self, pip: u32, now: i64) -> f64 {
+        if pip < self.from || pip >= self.to {
+            return 1.0;
+        }
+        let waited = self.deal() * (pip - self.from) as f64;
+        let age = (now - self.since) as f64 / 1_000_000.0 - waited;
+        (age / PIP_POP).clamp(0.0, 1.0)
+    }
+
+    /// Whether the last square in the run has landed and the frame clock can
+    /// be handed back. A run with nothing in it is over before it starts.
+    fn over(self, now: i64) -> bool {
+        if self.batch() == 0 {
+            return true;
+        }
+        let age = (now - self.since) as f64 / 1_000_000.0;
+        age >= self.deal() * self.batch() as f64 + PIP_POP
+    }
+}
+
+/// How many squares `walk` has earned. Rounded off rather than up: a square
+/// that lit before its step had been taken would be a promise the gate is not
+/// going to keep.
+fn lit_pips(walk: Walk) -> u32 {
+    let pips = Meter::pips(walk.needed);
+    let share = walk.walked as f64 / walk.needed.max(1) as f64;
+    ((share * pips as f64).floor() as u32).min(pips)
 }
 
 /// A square, and the air after it.
@@ -1431,17 +1588,24 @@ const PIPS_MOST: u32 = 4 * PIPS_ROW;
 impl Meter {
     fn new(walk: Walk, palette: Palette) -> Self {
         let state = Rc::new(Cell::new(walk));
+        let lighting = Rc::new(Cell::new(Lighting::still(lit_pips(walk))));
         let area = gtk::DrawingArea::new();
         let (cols, rows) = Self::grid(walk.needed);
-        area.set_content_width((cols as f64 * (PIP + PIP_GAP) - PIP_GAP).ceil() as i32);
-        area.set_content_height((rows as f64 * (PIP + ROW_GAP) - ROW_GAP).ceil() as i32);
+        // The grid, plus the air a landing square needs around it: see `BLOOM`.
+        // The block itself stays centred in whatever this comes to, so the
+        // margin costs the layout six pixels and costs the reading nothing.
+        let span = cols as f64 * (PIP + PIP_GAP) - PIP_GAP + 2.0 * BLOOM;
+        let tall = rows as f64 * (PIP + ROW_GAP) - ROW_GAP + 2.0 * BLOOM;
+        area.set_content_width(span.ceil() as i32);
+        area.set_content_height(tall.ceil() as i32);
         area.set_halign(gtk::Align::Center);
 
         let drawing = Rc::clone(&state);
+        let coming = Rc::clone(&lighting);
         area.set_draw_func(move |_, cr, width, height| {
-            draw_meter(cr, width, height, drawing.get(), &palette);
+            draw_meter(cr, width, height, drawing.get(), coming.get(), &palette);
         });
-        Self { area, state }
+        Self { area, state, lighting, ticking: Rc::new(Cell::new(false)) }
     }
 
     /// How many squares stand for `needed` steps.
@@ -1459,8 +1623,37 @@ impl Meter {
     }
 
     fn paint(&self, walk: Walk) {
+        let before = lit_pips(self.state.get());
         self.state.set(walk);
+        let now = lit_pips(walk);
+        // Squares only ever come on. A count that has gone backwards -- a hub
+        // correcting itself, a walk started over -- simply redraws.
+        if now > before {
+            self.lighting.set(Lighting { from: before, to: now, since: glib::monotonic_time() });
+            self.light_them();
+        }
         self.area.queue_draw();
+    }
+
+    /// Repaint every frame until the last square of the run has landed.
+    ///
+    /// One callback at a time: steps arrive in batches and a hundred-step walk
+    /// would otherwise leave a hundred tick callbacks on one small drawing
+    /// area, every one of them asking for the same frames.
+    fn light_them(&self) {
+        if self.ticking.replace(true) {
+            return;
+        }
+        let lighting = Rc::clone(&self.lighting);
+        let ticking = Rc::clone(&self.ticking);
+        self.area.add_tick_callback(move |area, _| {
+            area.queue_draw();
+            if lighting.get().over(glib::monotonic_time()) {
+                ticking.set(false);
+                return glib::ControlFlow::Break;
+            }
+            glib::ControlFlow::Continue
+        });
     }
 }
 
@@ -2054,30 +2247,58 @@ fn paint_line(limb: &Limb, line: &Line, first: bool, last: bool, fade: f64) {
     limb.job.set_attributes(Some(&attrs));
 }
 
-fn draw_meter(cr: &gtk::cairo::Context, width: i32, height: i32, walk: Walk, palette: &Palette) {
+fn draw_meter(
+    cr: &gtk::cairo::Context,
+    width: i32,
+    height: i32,
+    walk: Walk,
+    lighting: Lighting,
+    palette: &Palette,
+) {
     let pips = Meter::pips(walk.needed);
     let (cols, rows) = Meter::grid(walk.needed);
-    // Rounded off rather than up: a square that lights before its step has
-    // been taken is a promise the gate will not keep.
-    let lit = ((walk.walked as f64 / walk.needed.max(1) as f64) * pips as f64).floor() as u32;
+    let lit = lit_pips(walk);
     let span = cols as f64 * (PIP + PIP_GAP) - PIP_GAP;
     let tall = rows as f64 * (PIP + ROW_GAP) - ROW_GAP;
     let left = (width as f64 - span) / 2.0;
     let top = (height as f64 - tall) / 2.0;
+    let now = glib::monotonic_time();
 
     for i in 0..pips {
         // Left to right and then down, the way the squares light and the way
         // anybody looking at them reads.
         let x = left + (i % PIPS_ROW) as f64 * (PIP + PIP_GAP);
         let y = top + (i / PIPS_ROW) as f64 * (PIP + ROW_GAP);
-        if i < lit {
-            let (r, g, b) = palette.pip;
-            cr.set_source_rgba(r, g, b, 1.0);
-        } else {
+        if i >= lit {
             let (r, g, b) = palette.pip_unlit;
             cr.set_source_rgba(r, g, b, 0.22);
+            rounded(cr, x, y, PIP, PIP, 2.0);
+            let _ = cr.fill();
+            continue;
         }
-        rounded(cr, x, y, PIP, PIP, 2.0);
+
+        // A square that has just been earned lands rather than appears: it
+        // arrives a little too big with a glow around it and settles into the
+        // grid. This is the only reward the page gives for the walk it is
+        // asking for, and it is one square, once, per step actually taken --
+        // the badge above says the number, which is a thing you have to read.
+        let t = lighting.at(i, now);
+        let (r, g, b) = palette.pip;
+        if t < 1.0 {
+            cr.set_source_rgba(r, g, b, (1.0 - t).powi(2) * 0.4);
+            // Out to half the gap and no further, so a run of five landing at
+            // once is five squares and not one cloud.
+            let bloom = BLOOM * (1.0 - t);
+            rounded(cr, x - bloom, y - bloom, PIP + 2.0 * bloom, PIP + 2.0 * bloom, 2.0 + bloom);
+            let _ = cr.fill();
+        }
+        // Overshooting a touch on the way in, and back to exactly the grid at
+        // rest: `ease_out_back` is 1 at 1, so a settled square is the same
+        // square it always was.
+        let size = PIP * (0.30 + 0.70 * ease_out_back(t));
+        let off = (PIP - size) / 2.0;
+        cr.set_source_rgba(r, g, b, 1.0);
+        rounded(cr, x + off, y + off, size, size, 2.0 * size / PIP);
         let _ = cr.fill();
     }
 }
@@ -2289,7 +2510,14 @@ fn ask_for_the_tag(page: &Page, ask: &str) {
     // The time really is spent, so the ring stops being drawn -- see `Dial`.
     let mut dial = page.dial.borrow_mut();
     dial.remaining = 0.0;
+    // Only on the way in. What this page asks for changes as the gate closes,
+    // and every step counted brings it back through here -- a wait restarted
+    // on each of them would be a ping that never finished travelling.
+    if !dial.spent {
+        dial.waited = 0.0;
+    }
     dial.spent = true;
+    dial.settled = false;
 }
 
 /// What size to set a prompt of `chars` characters on a screen `width` wide,
@@ -2324,6 +2552,9 @@ const ASK_SMALLEST: f64 = 13.0;
 fn thank_them(page: &Page) {
     page.count.set_text("Off you go");
     page.sub.set_text("That's the break done.");
+    // Nothing left to call out for: the ping stops, and the confetti has the
+    // middle of the page to itself.
+    page.dial.borrow_mut().settled = true;
 }
 
 /// Whether a page plays the arrival animation.
@@ -2568,6 +2799,15 @@ fn build_page(
     win.fullscreen_on_monitor(monitor);
     win.present();
 
+    // What this page fades when it is let go: the dark, the words and the
+    // list. Collected here, where the layers are, so `bow_out` never has to go
+    // looking through a window for them.
+    let fading: Vec<gtk::Widget> = vec![
+        stage.backdrop.clone().upcast(),
+        column.clone().upcast(),
+        todo.root.clone().upcast(),
+    ];
+
     let page = Page {
         win,
         monitor: monitor.clone(),
@@ -2581,6 +2821,8 @@ fn build_page(
         motion: moving,
         meter,
         todo,
+        fading,
+        pace: stage.pace.clone(),
         dial: state,
     };
     // A page built mid-break -- by `insist`, or by a monitor arriving -- is
@@ -2759,6 +3001,12 @@ impl Anim {
     fn shard_count(&self) -> u32 {
         self.shards.min(400)
     }
+
+    /// How long the page takes to leave. See [`EXIT_SHARE`] for why this is
+    /// not a setting of its own.
+    fn exit_seconds(&self) -> f64 {
+        self.seconds() * EXIT_SHARE
+    }
 }
 
 /// What the dial is showing. The clock ticks once a second; this runs on the
@@ -2778,6 +3026,19 @@ pub struct Dial {
     /// page that has never seen a scan -- including one rebuilt by `insist`
     /// mid-play: a celebration replayed on every rebuild stops being one.
     celebrate: Option<f64>,
+    /// `Some` from the moment the break is let go, running 0 to 1 over
+    /// [`Anim::exit_seconds`] while the page bows out. `None` on a page that is
+    /// still holding the screen, which is every page until the last half second
+    /// of its life.
+    leaving: Option<f64>,
+    /// How long this page has been waiting, once the countdown is spent. The
+    /// only clock a waiting page has -- its own is over -- and the one the ping
+    /// is drawn from: see [`draw_ping`].
+    waited: f64,
+    /// The gate is open and the page is about to lift. The ping stops here: it
+    /// asks for something that has now arrived, and a page still calling out
+    /// for it under the confetti is asking for what it has already got.
+    settled: bool,
     last_frame: i64,
 }
 
@@ -2789,6 +3050,37 @@ const GRID: f64 = 72.0;
 /// seconds: long enough to land as a reward, short enough that the desk it
 /// just unlocked is not held hostage by its own applause.
 const CELEBRATE: f64 = 3.0;
+
+/// How long is left when the ring starts marking the seconds off.
+///
+/// Ten of them: long enough to be a warning that the desk is coming back,
+/// short enough that it is not a thing flashing at somebody for the last tenth
+/// of their break.
+const FINAL: f64 = 10.0;
+
+/// The waiting page's ping: how long one takes to travel out, and how often
+/// another sets off.
+///
+/// The gap is deliberately longer than the travel. What is left over is the
+/// only reason this is affordable: `Pace::step` asks for frames while a ping is
+/// moving and lets them go while it is not, so a page that waits ten minutes
+/// for a tag spends under half of them being drawn -- and what is being drawn
+/// is the small box in the middle, never the screen.
+const PING_FOR: f64 = 1.4;
+const PING_EVERY: f64 = 4.4;
+/// Checked here rather than in a test, because it is a fact about two numbers
+/// in this file and nothing that runs can make it false. A ping that travelled
+/// for longer than it rested would hold the frame clock for the whole of a
+/// ten-minute wait.
+const _: () = assert!(PING_FOR < PING_EVERY - PING_FOR);
+
+/// What share of the entrance the page takes to leave.
+///
+/// A share rather than a setting of its own: the exit is the entrance's
+/// bookend, one number should move both, and switching the entrance off has to
+/// take the exit with it. Somebody who wants the page to appear instantly does
+/// not want it dissolving for half a second on the way out.
+const EXIT_SHARE: f64 = 0.14;
 
 /// How tall the mark is drawn inside the chip at the top of the page. Fixed,
 /// and small: it is a full stop next to the word BREAK, not a poster.
@@ -2925,6 +3217,9 @@ fn build_stage(
         // With the animation switched off, start already arrived.
         entrance: if arrival <= 0.0 { 1.0 } else { 0.0 },
         celebrate: None,
+        leaving: None,
+        waited: 0.0,
+        settled: false,
         last_frame: 0,
     }));
 
@@ -3051,11 +3346,19 @@ fn build_stage(
     let drawing = Rc::clone(&state);
     ring.set_draw_func(move |_, cr, width, height| {
         let dial = drawing.borrow();
-        if dial.spent {
-            return;
-        }
         let (cx, cy) = (width as f64 / 2.0, height as f64 / 2.0);
         cr.set_line_cap(gtk::cairo::LineCap::Round);
+
+        // The countdown is over and there is no ring to draw. What this box
+        // holds instead, while the page waits on somebody in another room, is
+        // the ping -- and nothing at all once the gate has opened or the page
+        // is already on its way out.
+        if dial.spent {
+            if waiting_on_someone(&dial) {
+                draw_ping(cr, cx, cy, radius, dial.waited, &palette);
+            }
+            return;
+        }
 
         // The dial arrives in the middle, once the blast is on its way out.
         let arriving = phase(dial.entrance, 0.22, 0.80);
@@ -3063,13 +3366,39 @@ fn build_stage(
             return;
         }
         // Overshoot slightly at the end, so it lands rather than stops.
-        let radius = radius * (0.25 + 0.75 * ease_out_back(arriving));
+        let landed = radius * (0.25 + 0.75 * ease_out_back(arriving));
+        // And it leaves the way it came: in to nothing, fading as it shrinks.
+        // Squared, so it holds its size for a moment and then goes -- the
+        // bookend to the overshoot above rather than a mirror of it.
+        let leaving = dial.leaving.unwrap_or(0.0);
+        let radius = landed * (1.0 - 0.80 * leaving * leaving);
+        let here = arriving * (1.0 - leaving).powi(2);
+
+        // The last few seconds get a beat: on each one a ghost of the ring
+        // pushes outward and fades, growing more insistent as the number of
+        // them left runs down. It exists for somebody who has stopped reading
+        // the clock -- which, on a page whose whole point is to be rested in,
+        // is everybody.
+        //
+        // Sized so it stays inside the box the ring was given: eight per cent
+        // out from a ring drawn at full radius, against the ten the box has,
+        // and this never runs while the entrance is still overshooting.
+        if dial.leaving.is_none() && dial.remaining <= FINAL {
+            let since = 1.0 - dial.remaining.fract();
+            let force = 1.0 - (dial.remaining / FINAL).clamp(0.0, 1.0);
+            cr.new_path();
+            cr.set_line_width((2.5 * (1.0 - since)).max(0.4));
+            let (r, g, b) = palette.accent;
+            cr.set_source_rgba(r, g, b, (1.0 - since).powi(2) * 0.6 * force);
+            cr.arc(cx, cy, radius * (1.0 + 0.08 * ease_out_cubic(since)), 0.0, TAU);
+            let _ = cr.stroke();
+        }
 
         // A hairline, not a hoop: the ring is a boundary drawn around the
         // clock, and the only heavy thing on this page should be the time.
         cr.set_line_width(2.5);
         let (r, g, b) = palette.hairline;
-        cr.set_source_rgba(r, g, b, 0.9 * arriving);
+        cr.set_source_rgba(r, g, b, 0.9 * here);
         cr.arc(cx, cy, radius, 0.0, TAU);
         let _ = cr.stroke();
 
@@ -3082,7 +3411,7 @@ fn build_stage(
             for (thickness, alpha) in [(16.0, 0.07), (8.0, 0.16), (3.0, 1.0)] {
                 cr.set_line_width(thickness);
                 let (r, g, b) = palette.accent;
-                cr.set_source_rgba(r, g, b, alpha * arriving);
+                cr.set_source_rgba(r, g, b, alpha * here);
                 cr.arc(cx, cy, radius, -FRAC_PI_2, -FRAC_PI_2 + TAU * drawn);
                 let _ = cr.stroke();
             }
@@ -3092,10 +3421,12 @@ fn build_stage(
     // ---- what actually asks for a repaint, and how often ----------------
     let pace = Rc::new(Pace {
         dial: Rc::clone(&state),
+        backdrop: backdrop.clone(),
         burst: burst.clone(),
         ring: ring.clone(),
         count: count.clone(),
         arrival,
+        exit: anim.exit_seconds(),
         radius,
         painted: Cell::new(NEVER_PAINTED),
         shown: Cell::new(u64::MAX),
@@ -3105,6 +3436,7 @@ fn build_stage(
     // The arrival is playing from the first frame, so the frame clock starts
     // with it. It takes itself off again the moment nothing needs it.
     pace.follow_the_frame_clock(&backdrop);
+    let keep = Rc::clone(&pace);
 
     // And underneath, a slow heartbeat for the rest of the break: it moves the
     // clock on, repaints the ring when its arc has actually gone somewhere, and
@@ -3122,7 +3454,7 @@ fn build_stage(
         glib::ControlFlow::Continue
     });
 
-    (Stage { backdrop, burst, ring }, state)
+    (Stage { backdrop, pace: keep, burst, ring }, state)
 }
 
 /// The dark, the graph paper and the glow.
@@ -3188,12 +3520,19 @@ const HEARTBEAT: Duration = Duration::from_millis(120);
 /// overlapped.
 struct Pace {
     dial: Rc<RefCell<Dial>>,
+    /// What the frame clock is asked through. The backdrop rather than either
+    /// of the other two, because it is the one layer that is never hidden --
+    /// and a tick callback on a hidden widget does not fire.
+    backdrop: gtk::DrawingArea,
     burst: gtk::DrawingArea,
     ring: gtk::DrawingArea,
     /// The countdown itself. Written from here rather than once a second by
     /// the host: see `step`.
     count: gtk::Label,
     arrival: f64,
+    /// How long the bow on the way out takes. Zero with the entrance switched
+    /// off, in which case a page that is let go is simply gone.
+    exit: f64,
     radius: f64,
     /// The arc as it was last actually painted, to compare against.
     painted: Cell<f64>,
@@ -3205,6 +3544,19 @@ struct Pace {
 }
 
 impl Pace {
+    /// Start drawing again now, rather than at the next heartbeat.
+    ///
+    /// For anything short enough that up to [`HEARTBEAT`] of waiting would show.
+    /// The bow on the way out is: a fifth of a second late on a fade of under
+    /// half of one is not a late start, it is the ring jumping a third of the
+    /// way in on its first frame while the words beside it fade from the top.
+    fn wake(self: &Rc<Self>) {
+        if !self.ticking.get() {
+            let backdrop = self.backdrop.clone();
+            self.follow_the_frame_clock(&backdrop);
+        }
+    }
+
     /// Ask for every frame until nothing needs one.
     fn follow_the_frame_clock(self: &Rc<Self>, backdrop: &gtk::DrawingArea) {
         self.ticking.set(true);
@@ -3220,10 +3572,10 @@ impl Pace {
     }
 
     /// Move everything on to now, and repaint whatever that changed. Says
-    /// whether anything is still animating.
+    /// whether anything still wants the next frame.
     fn step(&self) -> bool {
         let now = glib::monotonic_time();
-        let (animating, spent, arc, left) = {
+        let beat = {
             let mut dial = self.dial.borrow_mut();
             let delta = if dial.last_frame == 0 {
                 0.0
@@ -3240,9 +3592,27 @@ impl Pace {
             if let Some(t) = dial.celebrate {
                 dial.celebrate = Some((t + delta / CELEBRATE).min(1.0));
             }
-            let playing = dial.entrance < 1.0 || dial.celebrate.is_some_and(|t| t < 1.0);
-            (playing, dial.spent, arc_of(&dial), dial.remaining)
+            if let Some(t) = dial.leaving {
+                // Guarded, because a page told to leave in no time at all must
+                // arrive at 1.0 rather than at infinity.
+                dial.leaving = Some((t + delta / self.exit.max(0.01)).min(1.0));
+            }
+            let waiting = waiting_on_someone(&dial);
+            if waiting {
+                dial.waited += delta;
+            }
+            Beat {
+                playing: dial.entrance < 1.0 || dial.celebrate.is_some_and(|t| t < 1.0),
+                spent: dial.spent,
+                waiting,
+                pinging: waiting && dial.waited % PING_EVERY < PING_FOR,
+                bowing: dial.leaving.is_some_and(|t| t < 1.0),
+                counting: !dial.spent && dial.remaining <= FINAL,
+                arc: arc_of(&dial),
+                left: dial.remaining,
+            }
         };
+        let (spent, arc, left) = (beat.spent, beat.arc, beat.left);
 
         // The clock, moved on as soon as the second it shows has actually run
         // out. Written from here rather than once a second by the host,
@@ -3267,8 +3637,11 @@ impl Pace {
         // The blast and the confetti live on a full-screen layer, so it is
         // hidden rather than merely left undrawn: a transparent layer the size
         // of the screen still costs something to composite, every frame, on
-        // every monitor.
-        if animating {
+        // every monitor. Keyed on `playing` alone, and deliberately not on
+        // everything else that wants a frame: the ping, the last ten seconds
+        // and the bow all happen inside the small box in the middle, and not
+        // one of them is a reason to composite a screenful of nothing.
+        if beat.playing {
             if !self.burst.is_visible() {
                 self.burst.set_visible(true);
             }
@@ -3278,17 +3651,56 @@ impl Pace {
         }
 
         if spent {
-            // The countdown is over and the ring is not drawn any more. Take
-            // the whole layer out rather than compositing an empty one.
-            if self.ring.is_visible() {
-                self.ring.set_visible(false);
+            // The countdown is over and the ring is not drawn any more -- but
+            // the ping is drawn where it was, so the layer stays for as long as
+            // there might be another one. Once the gate has opened there will
+            // not be, and it goes rather than being composited empty for the
+            // rest of the page's life.
+            if self.ring.is_visible() != beat.waiting {
+                self.ring.set_visible(beat.waiting);
             }
-        } else if animating || worth_repainting(arc, self.painted.get(), self.radius) {
+            if beat.pinging {
+                self.ring.queue_draw();
+            }
+        } else if beat.driving() || worth_repainting(arc, self.painted.get(), self.radius) {
             self.painted.set(arc);
             self.ring.queue_draw();
         }
 
-        animating
+        beat.driving()
+    }
+}
+
+/// What one look at the dial found, and what each layer is to do about it.
+///
+/// A struct rather than the tuple this used to be: `step` reads eight answers
+/// out of one borrow, and the two that matter most -- what the full-screen
+/// layer needs and what merely needs a frame -- are the ones a tuple would
+/// invite somebody to mix up. Mixing them up is a screenful of empty
+/// compositing for the last ten seconds of every break.
+struct Beat {
+    /// The full-screen layer has something on it: the blast, or the confetti.
+    playing: bool,
+    /// The countdown is over.
+    spent: bool,
+    /// ...and the page is still waiting on somebody, so the ping's layer stays.
+    waiting: bool,
+    /// ...and a ping is travelling right now, rather than resting between two.
+    pinging: bool,
+    /// The page is on its way off the screen.
+    bowing: bool,
+    /// The clock is inside its last few seconds and the ring is marking them.
+    counting: bool,
+    arc: f64,
+    left: f64,
+}
+
+impl Beat {
+    /// Whether anything at all wants the next frame. The heartbeat asks this
+    /// eight times a second and hands the frame clock back the moment it is
+    /// false -- which, for most of a break, it is.
+    fn driving(&self) -> bool {
+        self.playing || self.pinging || self.bowing || self.counting
     }
 }
 
@@ -3375,6 +3787,48 @@ fn draw_celebration(
         let _ = cr.fill();
         let _ = cr.restore();
     }
+}
+
+/// Whether a spent page still has somebody to wait for.
+///
+/// The ping's whole condition, in one place because the ring's draw func and
+/// [`Pace::step`] both have to agree about it -- one drawing a ping the other
+/// has stopped asking for frames for is a ring that judders and then stops.
+fn waiting_on_someone(dial: &Dial) -> bool {
+    dial.spent && !dial.settled && dial.leaving.is_none()
+}
+
+/// The waiting page's one moving thing.
+///
+/// Once the countdown is spent the middle of the screen is a sentence and
+/// nothing else: no ring, no numbers, no confetti until somebody in another
+/// room does something about it. On a page that can sit like that for the
+/// whole of a ten-minute grace, a still screen reads as a program that has
+/// died -- so a ring is pushed out from where the dial was, every few seconds,
+/// the way anything that is listening rather than counting ought to look.
+///
+/// Drawn from the page's own wait rather than from the clock, because the
+/// clock is exactly what has run out.
+fn draw_ping(cr: &gtk::cairo::Context, cx: f64, cy: f64, radius: f64, waited: f64, palette: &Palette) {
+    let t = (waited % PING_EVERY) / PING_FOR;
+    // Between one ping and the next there is nothing to draw, which is most of
+    // the time and the point: see `PING_EVERY`.
+    if t >= 1.0 {
+        return;
+    }
+    let out = ease_out_cubic(t);
+    cr.new_path();
+    // Both the fade and the thinning are linear, and the thinning has a floor.
+    // Squared, as everything else that fades on this page is, the ring went
+    // invisible at half its journey and the frames spent on the other half
+    // drew nothing at all.
+    cr.set_line_width((2.2 * (1.0 - t)).max(0.9));
+    let (r, g, b) = palette.accent;
+    cr.set_source_rgba(r, g, b, (1.0 - t) * 0.5);
+    // Out to where the ring was and a little past, which is as far as the box
+    // this is drawn in goes.
+    cr.arc(cx, cy, (radius * (0.18 + 0.92 * out)).max(1.0), 0.0, TAU);
+    let _ = cr.stroke();
 }
 
 /// The corner's arithmetic: what the rows say, and what the day says.
@@ -3521,6 +3975,64 @@ mod tests {
         assert_eq!(at(Duration::from_secs(3600)), Duration::from_secs(5));
         assert_eq!(at(Duration::from_millis(250)), Duration::from_millis(250));
         assert_eq!(Hold::default().every(), Duration::from_millis(400));
+    }
+
+    /// A square lit before this count arrived is simply lit. No second landing
+    /// for a step taken ten minutes ago, which is what a page rebuilt mid-walk
+    /// by `insist` would otherwise deal out all over again.
+    #[test]
+    fn a_square_already_lit_does_not_land_again() {
+        let still = Lighting::still(12);
+        for pip in 0..20 {
+            assert_eq!(still.at(pip, 5_000_000), 1.0, "pip {pip}");
+        }
+        assert!(still.over(0), "and nothing is left waiting on a frame");
+    }
+
+    #[test]
+    fn a_run_of_squares_is_dealt_in_order() {
+        const NOW: i64 = 9_000_000;
+        let run = Lighting { from: 3, to: 8, since: NOW };
+
+        // The moment it lands: the first of the run is starting, the last has
+        // not been dealt, and the squares either side of the run are untouched.
+        assert_eq!(run.at(2, NOW), 1.0, "lit before this count arrived");
+        assert_eq!(run.at(3, NOW), 0.0, "the first of the run, starting");
+        assert_eq!(run.at(7, NOW), 0.0, "the last of the run, not dealt yet");
+        assert_eq!(run.at(8, NOW), 1.0, "not in the run at all");
+
+        // A moment on, and the wave has a front to it.
+        let later = NOW + 100_000;
+        assert!(run.at(3, later) > run.at(4, later));
+        assert!(run.at(4, later) > run.at(7, later));
+
+        assert!(!run.over(later));
+        assert!(run.over(NOW + 2_000_000), "and it does end");
+    }
+
+    /// Twenty steps arriving at once must not take twenty times as long to show
+    /// as one does -- and `sync = "batched"` means they usually do arrive at
+    /// once. See `PIP_DEAL_ALL`.
+    #[test]
+    fn a_long_run_is_compressed_rather_than_dealt_forever() {
+        let lands_in = |n: u32| {
+            let run = Lighting { from: 0, to: n, since: 0 };
+            run.deal() * run.batch() as f64 + PIP_POP
+        };
+        assert!(lands_in(1) <= PIP_POP + f64::EPSILON, "one step is one square");
+        assert!(lands_in(5) < lands_in(100), "a longer walk still reads as longer");
+        assert!(lands_in(100) <= PIP_DEAL_ALL + PIP_POP + 0.05, "{}", lands_in(100));
+    }
+
+    /// The exit is the entrance's bookend and goes when it goes. Somebody who
+    /// asked for the page to arrive instantly did not ask for it to spend half
+    /// a second dissolving.
+    #[test]
+    fn switching_the_entrance_off_switches_the_exit_off() {
+        let anim = |secs| Anim { entrance: Dur(Duration::from_secs(secs)), ..Anim::default() };
+        assert_eq!(anim(0).exit_seconds(), 0.0);
+        assert!(anim(3).exit_seconds() > 0.0);
+        assert!(anim(3).exit_seconds() < anim(3).seconds(), "and it is the shorter half");
     }
 
     /// The three cells a page is rebuilt from, with no walk in the break.
@@ -3997,6 +4509,36 @@ fn slide_in(widget: &impl IsA<gtk::Widget>, seconds: f64, slide: Slide, delay: f
         }
 
         if progress >= 1.0 { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
+    });
+}
+
+/// Fade a widget out and leave it gone.
+///
+/// The mirror of [`slide_in`], on the same frame clock, and with one deliberate
+/// difference: nothing ever puts the opacity back. What fades here is a layer
+/// of a page that is being taken down, and the window goes a moment later.
+fn fade_out(widget: &gtk::Widget, seconds: f64) {
+    let widget = widget.clone();
+    if seconds <= 0.0 {
+        widget.set_opacity(0.0);
+        return;
+    }
+    let from = widget.opacity();
+    let started = Cell::new(0i64);
+    widget.add_tick_callback(move |w, clock| {
+        let now = clock.frame_time();
+        if started.get() == 0 {
+            started.set(now);
+        }
+        let progress = (((now - started.get()) as f64) / 1_000_000.0 / seconds).clamp(0.0, 1.0);
+        // Ease in rather than out: it holds for a moment and then goes, which
+        // reads as the screen being handed back rather than as a dimmer being
+        // turned down on it.
+        w.set_opacity(from * (1.0 - progress * progress));
+        match progress < 1.0 {
+            true => glib::ControlFlow::Continue,
+            false => glib::ControlFlow::Break,
+        }
     });
 }
 

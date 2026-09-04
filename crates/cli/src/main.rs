@@ -922,8 +922,15 @@ fn preview(
                 if !late.get() {
                     player.break_ends();
                 }
+                // Asked before the release, because releasing is what consumes
+                // it, and the app is held open for exactly that long: quitting
+                // the moment the break ends stops the main loop mid-bow, and
+                // the preview is the one place anybody looks at the page on
+                // purpose.
+                let bow = ui.borrow().leaving_for();
                 ui.borrow_mut().release();
-                app.quit();
+                let going = app.clone();
+                glib::timeout_add_local_once(bow, move || going.quit());
                 return glib::ControlFlow::Break;
             }
 

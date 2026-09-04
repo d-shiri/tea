@@ -1,12 +1,18 @@
 //! `tea dash` — the last three weeks, as a page.
 //!
-//! A file rather than a server. Nothing listens, nothing is asked of the
-//! network, and no library is fetched from anywhere: the page is built here,
-//! written once, and opened. That decision costs the dashboard the ability to
-//! *write* anything back -- a `file://` page cannot edit your config -- and buys
-//! everything else. It can be copied to a phone, mailed to yourself, or opened
-//! on a plane, and there is no port on this machine that exists because you
-//! wanted to look at a chart.
+//! A file first, and a served page only where one is already being served. The
+//! page is built here and written to disk: nothing is asked of the network and
+//! no library is fetched from anywhere, so it can be copied to a phone, mailed
+//! to yourself, or opened on a plane, and no port on this machine exists
+//! because you wanted to look at a chart. What that file cannot do is *write*
+//! anything back -- a `file://` page cannot edit your config.
+//!
+//! Where the settings page is switched on there is a port already, and the
+//! daemon serves the same page at `/dash` behind the same token, so the two
+//! pages are one link apart and the numbers are gathered per request rather
+//! than frozen at the moment the file was written. See [`page`]. It stays off
+//! wherever the settings page is off; a dashboard is not a reason to open a
+//! port that was not open.
 //!
 //! The numbers come from two places. Today's are read from the state file, the
 //! same way `tea status` reads them; everything older comes from the history
@@ -14,7 +20,7 @@
 //! started running. Nothing can reconstruct the weeks before that, so the page
 //! says as much rather than drawing empty axes.
 
-use crate::config::FileConfig;
+use crate::config::{self, FileConfig};
 use crate::history;
 use crate::state;
 use crate::status;
@@ -62,6 +68,27 @@ pub fn show(file: &FileConfig, cfg: &tea_core::Config, config_path: &Path, boott
         Ok(_) => println!("tea: opened in your browser"),
         Err(_) => println!("tea: nothing here to open it with — the file is yours to open"),
     }
+}
+
+/// The same page, built from whatever is on disk right now and handed back
+/// rather than written.
+///
+/// This is what the daemon serves at `/dash`, beside the settings page and
+/// behind the same token. `tea dash` writes a file and opens it, which is a
+/// snapshot of the moment it ran; served, the numbers are gathered per request,
+/// which is what makes a link between the two pages worth following.
+///
+/// A config that will not parse is not this page's problem to report: it draws
+/// the defaults and the settings card says so, the same as it does on a machine
+/// that has no config file yet.
+pub fn page(config_path: &Path, boottime: Duration) -> String {
+    let file = match config_path.exists() {
+        true => config::load(config_path).unwrap_or_default(),
+        false => FileConfig::default(),
+    };
+    let mut cfg: tea_core::Config = file.clone().into();
+    let _ = crate::config::reconcile(&mut cfg);
+    render(TEMPLATE, &gather(&file, &cfg, config_path, boottime))
 }
 
 /// `$XDG_STATE_HOME/tea/dash.html`, beside the log it is drawn from.

@@ -475,7 +475,7 @@ fn section(s: &Style, title: &str) {
 /// Pad first, colour second: escape codes count as characters to `format!`, so
 /// styling before padding silently wrecks the alignment.
 fn field(s: &Style, label: &str, value: &str, note: &str) {
-    let head = format!("    {}{}", format!("{label:<LABEL$}"), s.bold(&format!("{value:>VALUE$}")));
+    let head = format!("    {label:<LABEL$}{}", s.bold(&format!("{value:>VALUE$}")));
     if note.is_empty() {
         println!("{head}");
     } else {

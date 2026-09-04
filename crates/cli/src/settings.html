@@ -18,11 +18,15 @@
   header img { width: 32px; height: 32px }
   header h1 { font: 300 1.3rem/1 system-ui, sans-serif; margin: 0 }
   header p { margin: 0; color: #626d86; font-size: .8rem }
-  #hub {
-    margin-left: auto; display: inline-flex; align-items: center; gap: .4rem; color: #9aa5bd; text-decoration: none;
+  #hub, #board {
+    display: inline-flex; align-items: center; gap: .4rem; color: #9aa5bd; text-decoration: none;
     font-size: .85rem; padding: .35rem .7rem; border: 1px solid rgba(255,255,255,.1); border-radius: 2rem; white-space: nowrap;
+    transition: color .15s, border-color .15s;
   }
-  #hub:hover { color: #eef1f7; border-color: rgba(255,255,255,.25) }
+  #board { margin-left: auto }
+  /* With no dashboard to link to, the hub link takes the space back. */
+  #board[hidden] + #hub { margin-left: auto }
+  #hub:hover, #board:hover { color: #eef1f7; border-color: rgba(255,255,255,.25) }
   #hub .ha { margin: 0; opacity: .8 }
   #q { width: min(18rem, 45vw); background: #171d2c; color: #eef1f7; border: 1px solid rgba(255,255,255,.1);
     border-radius: 2rem; padding: .4rem .9rem; font: inherit;
@@ -72,6 +76,29 @@
   .ha { display: inline-block; width: 13px; height: 13px; margin-left: .4rem; vertical-align: -2px; opacity: .55 }
   h2 .ha { vertical-align: -3px }
   [hidden] { display: none !important }
+
+  /* Motion, kept to the two things it can actually say here: the page dealing
+     itself out when it arrives, and a control that has changed state having
+     changed rather than having always been that way. Same easing and the same
+     speeds as the dashboard next door, because they are two halves of one
+     thing and a browser with both open should not be able to tell them apart.
+     Nothing loops: this is a form, and the only thing on it worth watching is
+     whatever you are typing into. */
+  @keyframes rise { from { opacity: 0; transform: translateY(8px) } to { opacity: 1; transform: none } }
+  section, #common { animation: rise .45s cubic-bezier(.16,1,.3,1) backwards }
+  input, select { transition: border-color .15s, background-color .15s }
+  button { transition: background-color .15s, color .15s, border-color .15s, opacity .15s }
+  button:not(:disabled):hover { border-color: rgba(255,255,255,.28) }
+  #save:not(:disabled):hover { background: #93b4ff }
+  #apply:not(:disabled):hover { background: #6ee79b }
+  .warn .sure:hover { background: #dd9714 }
+  /* The page's one channel for saying anything back. See `say`. */
+  #note { animation: rise .3s ease backwards; transition: color .15s }
+  .warn { animation: rise .3s cubic-bezier(.16,1,.3,1) backwards }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important }
+  }
+
   @media (max-width: 40rem) { label { grid-template-columns: 1fr 1fr } label > small { grid-column: 1 / -1 } }
 </style>
 </head>
@@ -80,6 +107,7 @@
   <header>
     <img src="data:image/png;base64,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" alt="">
     <div><h1>tea</h1><p>Save writes the file. Apply restarts tea with it.</p></div>
+    <a id="board" href="#" hidden>Dashboard</a>
     <a id="hub" href="#" target="_blank" rel="noopener" hidden>Home Assistant</a>
     <input id="q" type="search" placeholder="Search settings…" autocomplete="off" spellcheck="false">
   </header>
@@ -100,6 +128,17 @@
   const token = new URLSearchParams(location.search).get('token') || '';
   history.replaceState(null, '', location.pathname);
   const auth = { 'X-Tea-Token': token };
+
+  // The dashboard is served off the same port and behind the same token, so
+  // the link has to carry it: this page has just taken it out of the address
+  // bar, and the only copy left is the one above. An absolute path rather than
+  // a relative one, because this page answers at `/settings` and `/settings/`
+  // alike and a relative link would land in a different place for each.
+  if (token) {
+    const board = document.getElementById('board');
+    board.href = '/dash?token=' + encodeURIComponent(token);
+    board.hidden = false;
+  }
 
   const form = document.getElementById('f');
   const note = document.getElementById('note');
@@ -134,7 +173,19 @@
   // Strict takes the Super key away for every break. Chosen on purpose or
   // not at all: the page will not save it until this has been answered.
   let unsure = false;
-  const say = (text, tone) => { note.textContent = text; note.className = tone || ''; };
+  const say = (text, tone) => {
+    note.textContent = text;
+    note.className = tone || '';
+    // Play the entrance again. A CSS animation runs once per element, so a
+    // second save would otherwise change the words with nothing to say that
+    // anything had happened -- and "saved" twice in a row, which is the case
+    // this is for, does not change the words either. Removing the animation,
+    // reading a layout property to force the change through, and putting it
+    // back is the whole of the trick.
+    note.style.animation = 'none';
+    void note.offsetWidth;
+    note.style.animation = '';
+  };
   const dirty = () => fields.some(f => f.input.value !== f.shown);
   // Two inputs for one line: whichever is typed in, the other follows.
   function twin(a, b, shown) {
@@ -186,6 +237,10 @@
       const h = el('h2', name);
       if (fromHub(name, '')) h.insertAdjacentHTML('beforeend', HA);
       section.el.append(h);
+      // Dealt out one after another rather than all at once, and capped: a
+      // config with thirty sections in it should still have finished arriving
+      // by the time anybody has read the first heading.
+      section.el.style.animationDelay = Math.min(300, sections.length * 22) + 'ms';
       all.append(section.el);
       sections.push(section);
     };

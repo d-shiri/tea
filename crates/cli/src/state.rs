@@ -307,11 +307,14 @@ impl Store {
             worked_today_ms: tally.worked_ms,
         };
 
-        if let Err(e) = self.write(&saved) {
-            if !self.complained {
-                self.complained = true;
-                eprintln!("tea: cannot save state ({e}); a restart will forget your progress");
-            }
+        // Said once and then not again: a state file that cannot be written
+        // usually cannot be written on the next tick either, and a break tool
+        // that prints a line every second is a break tool nobody keeps running.
+        if let Err(e) = self.write(&saved)
+            && !self.complained
+        {
+            self.complained = true;
+            eprintln!("tea: cannot save state ({e}); a restart will forget your progress");
         }
     }
 

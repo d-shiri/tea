@@ -136,11 +136,11 @@ impl Player {
     }
 
     fn spawn(&mut self, cmd: &mut Command) {
-        match cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
-            Ok(child) => self.pending.push(child),
-            // Deliberately quiet: this is decoration, and the break itself has
-            // already happened by the time anyone would read a warning.
-            Err(_) => {}
+        // A failure is deliberately quiet: this is decoration, and the break
+        // itself has already happened by the time anybody would read a warning.
+        let started = cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+        if let Ok(child) = started {
+            self.pending.push(child);
         }
     }
 

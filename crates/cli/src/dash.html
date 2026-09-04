@@ -68,6 +68,11 @@ header { display: flex; align-items: center; gap: .85rem; flex-wrap: wrap; margi
 .pill .dot { width: 7px; height: 7px; border-radius: 999px; background: var(--s3); box-shadow: 0 0 0 3px rgba(25,158,112,.18); }
 .pill.cold .dot { background: var(--ink-3); box-shadow: none; }
 .meta { color: var(--ink-3); font-size: .8125rem; margin-left: auto; }
+/* The way over to the settings page, and only where there is one to go to:
+   a dashboard opened as a file has no port behind it and no token to carry.
+   See `boot`. */
+a.pill { text-decoration: none; transition: color .15s, border-color .15s; }
+a.pill:hover { color: var(--ink); border-color: var(--line-2); }
 
 /* ---- cards ------------------------------------------------------------- */
 .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 14px; }
@@ -203,6 +208,8 @@ footer { color: var(--ink-3); font-size: .75rem; margin-top: 3rem; text-align: c
     <h1 class="mark">tea</h1>
     <span class="pill" id="pill"><i class="dot"></i><span id="pilltext"></span></span>
     <span class="meta" id="meta"></span>
+    <a class="pill" id="again" href="#" hidden>Refresh</a>
+    <a class="pill" id="settings" href="#" hidden>Settings</a>
   </header>
 
   <div class="grid" id="top"></div>
@@ -1075,8 +1082,31 @@ function boot() {
   document.getElementById("meta").textContent =
     SET.hours + " · " + Math.round(SET.work / 60) + "m work, " + Math.round(SET.brk / 60) + "m break" +
     (SET.nfc ? " · tag on" : "");
-  document.getElementById("footer").textContent =
-    "Written by tea dash at " + when.toLocaleString() + ". Run it again for fresher numbers.";
+  // Served by the daemon rather than opened as a file. The token that got this
+  // page here is in the address bar, and it is the only thing that can carry a
+  // link anywhere -- so both links are built from it before it is taken back
+  // out of the bar, the same way the settings page does it. A token left in
+  // the history is a token in every screenshot of the page.
+  //
+  // Taking it out is also what costs this page its reload, which is why one of
+  // the two links is a way back to itself: F5 lands on the door with nothing
+  // to show it, and a dashboard whose numbers cannot be refreshed is half a
+  // dashboard.
+  const token = new URLSearchParams(location.search).get("token");
+  if (token) {
+    const carry = (id, path) => {
+      const link = document.getElementById(id);
+      link.href = path + "?token=" + encodeURIComponent(token);
+      link.hidden = false;
+    };
+    carry("again", "/dash");
+    carry("settings", "/settings");
+    history.replaceState(null, "", location.pathname);
+  }
+
+  document.getElementById("footer").textContent = token
+    ? "Read at " + when.toLocaleString() + " from the running tea."
+    : "Written by tea dash at " + when.toLocaleString() + ". Run it again for fresher numbers.";
 
   renderConfig();
 

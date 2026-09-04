@@ -1121,6 +1121,15 @@ fn answer(raw: &[u8], token: &str, link: &Link, who: &str, site: Option<&crate::
         "/settings" | "/settings/" if site.is_some() => {
             http(200, "text/html; charset=utf-8", crate::web::PAGE)
         }
+        // The dashboard, on the same port and behind the same token, so the
+        // two pages the daemon can show are one link apart. Built per request:
+        // a chart of the last three weeks that was true when the daemon
+        // started is not a chart anybody wants.
+        "/dash" | "/dash/" if site.is_some() => {
+            let site = site.expect("checked above");
+            let page = crate::dash::page(&site.path, crate::boottime());
+            http(200, "text/html; charset=utf-8", &page)
+        }
         "/config" | "/config/" if site.is_some() => {
             let site = site.expect("checked above");
             match method {
@@ -3708,6 +3717,34 @@ mod web_tests {
     fn without_a_site_the_page_is_not_there() {
         let reply = ask("GET /settings?token=s3cret HTTP/1.1\r\n\r\n", None);
         assert!(reply.starts_with("HTTP/1.1 404"), "{reply}");
+    }
+
+    /// The dashboard rides on the settings page's switch, because it rides on
+    /// the settings page's port. Wanting to look at a chart is not a reason to
+    /// have opened one.
+    #[test]
+    fn without_a_site_the_dashboard_is_not_there_either() {
+        let reply = ask("GET /dash?token=s3cret HTTP/1.1\r\n\r\n", None);
+        assert!(reply.starts_with("HTTP/1.1 404"), "{reply}");
+    }
+
+    #[test]
+    fn the_dashboard_is_served_behind_the_same_token() {
+        let dir = std::env::temp_dir().join(format!("tea-dash-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "work = \"30m\"\n").unwrap();
+        let site = crate::web::Site { path: path.clone() };
+
+        let page = ask("GET /dash?token=s3cret HTTP/1.1\r\n\r\n", Some(&site));
+        assert!(page.starts_with("HTTP/1.1 200"), "{page}");
+        assert!(page.contains("<title>tea — the last few weeks"), "the page itself");
+        assert!(!page.contains("/*__TEA_DATA__*/"), "with the numbers actually in it");
+
+        let wrong = ask("GET /dash?token=nope HTTP/1.1\r\n\r\n", Some(&site));
+        assert!(wrong.starts_with("HTTP/1.1 401"), "{wrong}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
