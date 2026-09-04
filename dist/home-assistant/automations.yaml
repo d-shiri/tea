@@ -18,6 +18,7 @@
 #
 #   ./dist/home-assistant/push.py automations tea_held tea_summary \
 #       notify.mobile_app_phone=notify.mobile_app_sm_g990b2
+#   ./dist/home-assistant/push.py automations tea_tasks_done todo.household=todo.<yours>
 
 - id: tea_hall_on
   alias: "tea — light the hall for the walk"
@@ -91,3 +92,31 @@
           {{ states('sensor.tea_breaks_today') }} breaks,
           {{ states('sensor.tea_steps_today') }} steps walked,
           {{ states('sensor.tea_postpones_today') }} postponed.
+
+# The list's own count of everything ever ticked off -- what "Tasks done"
+# under "Since the start" on the dashboard shows. tea's own sensor only counts
+# what was ticked off during breaks, and only since it began reporting; the
+# list remembers everything until its completed items are cleared. Needs a
+# number helper to land in: Settings → Helpers → Number, called
+# `tea_tasks_done`, box mode, 0 to 10000 (push.py makes it when it adds this).
+- id: tea_tasks_done
+  alias: "tea — how many tasks the list has ticked off"
+  triggers:
+    - trigger: state
+      entity_id: todo.household
+    - trigger: time_pattern
+      minutes: "/5"
+    - trigger: homeassistant
+      event: start
+  actions:
+    - action: todo.get_items
+      target:
+        entity_id: todo.household
+      data:
+        status: completed
+      response_variable: done
+    - action: input_number.set_value
+      target:
+        entity_id: input_number.tea_tasks_done
+      data:
+        value: "{{ done['todo.household']['items'] | count }}"

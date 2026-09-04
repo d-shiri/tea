@@ -130,6 +130,29 @@ def automations(url, token, args):
     unknown = set(wanted) - {i["id"] for i in items}
     if unknown:
         sys.exit("tea: no automation called " + ", ".join(sorted(unknown)))
+    if "tea_tasks_done" in wanted:
+        # That one lands its count in a number helper, which has to exist first.
+        (states,) = asyncio.run(talk(url, token, [{"type": "get_states"}]))
+        if not any(s["entity_id"] == "input_number.tea_tasks_done" for s in states):
+            asyncio.run(
+                talk(
+                    url,
+                    token,
+                    [
+                        {
+                            "type": "input_number/create",
+                            "name": "tea tasks done",
+                            "min": 0,
+                            "max": 10000,
+                            "step": 1,
+                            "mode": "box",
+                            "icon": "mdi:clipboard-check-multiple-outline",
+                            "unit_of_measurement": "tasks",
+                        }
+                    ],
+                )
+            )
+            print("tea: made the helper input_number.tea_tasks_done")
     for item in items:
         if item["id"] not in wanted:
             continue

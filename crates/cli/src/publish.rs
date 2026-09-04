@@ -244,7 +244,7 @@ impl Report {
                 format!("sensor.{name}_chores_today"),
                 number(
                     u64::from(self.chores_today),
-                    "jobs",
+                    "tasks",
                     "total_increasing",
                     "tea chores today",
                     "mdi:clipboard-check-outline",
@@ -669,6 +669,8 @@ mod tests {
         assert_eq!(of("sensor.desk_breaks_today")["state"], "4");
         assert_eq!(of("sensor.desk_postpones_today")["state"], "1");
         assert_eq!(of("sensor.desk_cheats_today")["state"], "2");
+        assert_eq!(of("sensor.desk_chores_today")["state"], "3");
+        assert_eq!(of("sensor.desk_chores_today")["attributes"]["unit_of_measurement"], "tasks");
         assert_eq!(of("sensor.desk_worked_today")["state"], "250");
         assert_eq!(of("sensor.desk_worked_today")["attributes"]["state_class"], "total_increasing");
         // Between breaks the binary sensor is off, whatever else is going on.

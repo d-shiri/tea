@@ -16,8 +16,8 @@
 #       sensor.phone_daily_steps=sensor.<yours>_daily_steps \
 #       todo.household=todo.<yours>
 #
-# Six numbers and three pictures, on purpose. Each picture has one axis and one
-# kind of thing on it: steps against steps, breaks against days, jobs against
+# Four numbers and three pictures, on purpose. Each picture has one axis and one
+# kind of thing on it: steps against steps, breaks against days, tasks against
 # days. The list itself is the one card here you can act on.
 title: tea
 views:
@@ -25,7 +25,9 @@ views:
     path: tea
     icon: mdi:tea
     cards:
-      # Today, in numbers.
+      # Today, in numbers. Two to a row: more than that and the names get
+      # cut short. The steps in breaks are not here, they are the green line
+      # in the picture below.
       - type: horizontal-stack
         cards:
           - type: tile
@@ -34,31 +36,18 @@ views:
             icon: mdi:coffee
             color: teal
           - type: tile
-            entity: sensor.tea_steps_today
-            name: Steps in breaks
-            icon: mdi:walk
-            color: green
-          - type: tile
             entity: sensor.phone_daily_steps
-            name: Steps today, all of them
+            name: Steps today
             icon: mdi:shoe-print
             color: grey
-          - type: tile
-            entity: sensor.tea_chores_today
-            name: Jobs done in breaks
-            icon: mdi:clipboard-check-outline
-            color: green
-          - type: tile
-            entity: sensor.tea_worked_today
-            name: Worked today
-            icon: mdi:briefcase-clock
-            color: blue
 
       # Walking today: the steps taken in breaks, against all the steps the
-      # phone counted. Two rising lines, one axis, one unit.
+      # phone counted. Two rising lines, one axis, one unit. Ten hours, not
+      # more: further back is yesterday's count falling off a cliff at
+      # midnight, which is not a thing that happened today.
       - type: history-graph
         title: Walking today
-        hours_to_show: 16
+        hours_to_show: 10
         entities:
           - entity: sensor.phone_daily_steps
             name: All steps
@@ -79,27 +68,27 @@ views:
 
       # The list the break page reads, live and tickable from here. tea only
       # ever reads it: this card is the other end of that, and the tile beside
-      # it is the entity's own state -- how many jobs are still open.
+      # it is the entity's own state -- how many tasks are still open.
       - type: horizontal-stack
         cards:
           - type: tile
             entity: todo.household
-            name: Still on the list
+            name: Tasks left
             icon: mdi:format-list-checks
             color: amber
           - type: tile
             entity: sensor.tea_chores_today
-            name: Done in breaks today
+            name: Tasks done in breaks today
             icon: mdi:clipboard-check-outline
             color: green
       - type: todo-list
         entity: todo.household
 
-      # Jobs ticked off the to-do list during breaks, one bar a day. The same
-      # shape as the breaks above on purpose: a break taken and a job done are
+      # Tasks ticked off the to-do list during breaks, one bar a day. The same
+      # shape as the breaks above on purpose: a break taken and a task done are
       # the two halves of the same question -- whether any of this is working.
       - type: statistics-graph
-        title: Jobs done per day
+        title: Tasks done per day
         chart_type: bar
         period: day
         days_to_show: 30
@@ -107,14 +96,22 @@ views:
           - change
         entities:
           - entity: sensor.tea_chores_today
-            name: Jobs
+            name: Tasks
+        # One series: a legend saying "Tasks (change)" explains nothing.
+        hide_legend: true
 
-      # And the same numbers added up since tea started reporting.
+      # And the same numbers added up since tea started reporting. The
+      # heading says "all time" once, so the cards can have short names
+      # that fit two to a row.
+      - type: heading
+        heading: Since the start
+        heading_style: subtitle
+        icon: mdi:calendar-clock
       - type: horizontal-stack
         cards:
           - type: statistic
             entity: sensor.tea_breaks_today
-            name: Breaks, all time
+            name: Breaks
             stat_type: change
             period:
               rolling_window:
@@ -122,23 +119,28 @@ views:
                   days: 365
           - type: statistic
             entity: sensor.tea_steps_today
-            name: Steps in breaks, all time
+            name: Steps in breaks
             stat_type: change
             period:
               rolling_window:
                 duration:
                   days: 365
-          - type: statistic
-            entity: sensor.tea_chores_today
-            name: Jobs done, all time
-            stat_type: change
-            period:
-              rolling_window:
-                duration:
-                  days: 365
+      - type: horizontal-stack
+        cards:
+          # Not tea's sensor but the list's own count of everything ticked
+          # off, kept by the tea_tasks_done automation: the list remembers
+          # from before tea began reporting. A tile rather than a statistic
+          # because it is a number the hub already holds, not one to add up.
+          - type: tile
+            entity: input_number.tea_tasks_done
+            name: Tasks done
+            icon: mdi:clipboard-check-multiple-outline
+            color: green
+            tap_action:
+              action: none
           - type: statistic
             entity: sensor.tea_worked_today
-            name: Worked, all time
+            name: Worked
             stat_type: change
             period:
               rolling_window:

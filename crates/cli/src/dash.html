@@ -1006,7 +1006,7 @@ function renderTables() {
   box.replaceChildren();
   const rows = byDay(slice(), from()).slice().reverse();
   box.appendChild(table("Every day in this window",
-    ["Day", "Taken", "Credited", "Postponed", "Steps", "Jobs"],
+    ["Day", "Taken", "Credited", "Postponed", "Steps", "Tasks"],
     rows.map(r => [short(r.key), num(r.taken), num(r.credited), num(r.postponed), num(r.steps),
       num(r.chores)])));
 
