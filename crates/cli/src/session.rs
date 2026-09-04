@@ -36,6 +36,10 @@ pub struct Session {
     /// Complain once per failing service, not once per second.
     complained_idle: bool,
     complained_inhibit: bool,
+    /// Inhibitors passed over as if they were not there: `calls.ignore`
+    /// from the config, matched as a case-insensitive substring of the
+    /// app id or the reason.
+    ignore: Vec<String>,
 }
 
 impl Session {
@@ -53,6 +57,7 @@ impl Session {
                     inhibit: None,
                     complained_idle: true,
                     complained_inhibit: true,
+                    ignore: Vec::new(),
                 };
             }
         };
@@ -65,7 +70,22 @@ impl Session {
             inhibit,
             complained_idle: false,
             complained_inhibit: false,
+            ignore: Vec::new(),
         }
+    }
+
+    /// Pass over inhibitors whose app id or reason contains any of these.
+    pub fn ignoring(mut self, names: Vec<String>) -> Self {
+        self.ignore = names.into_iter().map(|n| n.trim().to_lowercase()).collect();
+        self
+    }
+
+    fn ignored(&self, app: &str, reason: &str) -> bool {
+        if self.ignore.is_empty() {
+            return false;
+        }
+        let (app, reason) = (app.to_lowercase(), reason.to_lowercase());
+        self.ignore.iter().any(|n| !n.is_empty() && (app.contains(n) || reason.contains(n)))
     }
 
     /// Time since the last input event, or `None` if the compositor can't say.
@@ -88,6 +108,11 @@ impl Session {
 
     /// Is something asking not to be interrupted right now?
     pub fn inhibited(&mut self) -> bool {
+        // With an ignore list the one-call answer is not enough: the session
+        // may be inhibited only by something we were told to look past.
+        if !self.ignore.is_empty() {
+            return !self.inhibitors().is_empty();
+        }
         let Some(proxy) = self.inhibit.as_ref() else {
             return false;
         };
@@ -110,6 +135,7 @@ impl Session {
 impl Session {
     /// Which apps are currently holding the session awake, named as best the
     /// session manager can. Empty when nothing is, or when we cannot ask.
+    /// Anything on the ignore list is left out, here and everywhere.
     pub fn inhibitors(&mut self) -> Vec<String> {
         let (Some(conn), Some(proxy)) = (&self.conn, &self.inhibit) else {
             return Vec::new();
@@ -129,6 +155,9 @@ impl Session {
                 }
                 let app: String = item.call("GetAppId", &()).unwrap_or_default();
                 let reason: String = item.call("GetReason", &()).unwrap_or_default();
+                if self.ignored(&app, &reason) {
+                    return None;
+                }
                 Some(match (app.trim(), reason.trim()) {
                     ("", "") => "an unnamed app".to_string(),
                     ("", r) => r.to_string(),

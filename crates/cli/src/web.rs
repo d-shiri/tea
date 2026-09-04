@@ -64,9 +64,9 @@ pub fn read(site: &Site) -> Result<String, String> {
 /// half of a new one.
 pub fn write(site: &Site, text: &str) -> Result<(), String> {
     let parsed: FileConfig =
-        toml::from_str(text).map_err(|e| format!("not saved — that would not load:\n{e}"))?;
+        toml::from_str(text).map_err(|e| format!("not saved, that would not load:\n{e}"))?;
     let mut cfg: tea_core::Config = parsed.into();
-    config::reconcile(&mut cfg).map_err(|e| format!("not saved — {e}"))?;
+    config::reconcile(&mut cfg).map_err(|e| format!("not saved: {e}"))?;
     replace(&site.path, text)
 }
 

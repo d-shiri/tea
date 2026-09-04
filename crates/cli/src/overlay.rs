@@ -79,6 +79,27 @@ window.tea-toast button:hover { background-color: rgba(ACCENT,0.18); }
    an eye that is meant to be leaving the screen. */
 .tea-todo-job.next { color: #e6ebf5; }
 .tea-todo-job.done { color: #4ade80; }
+/* A job with a deadline: warm and lit, wherever it sits, because it is the
+   one thing on the list that will not wait. Gone by, and it reddens. */
+.tea-todo-job.due  { color: #ffd479; text-shadow: 0 0 9px rgba(255, 212, 121, 0.6); }
+.tea-todo-job.late { color: #ff9a76; text-shadow: 0 0 9px rgba(255, 154, 118, 0.65); }
+.tea-todo-when { font-size: 9.5pt; color: #b08a3e; letter-spacing: 1px; }
+.tea-todo-when.late { color: #ff9a76; }
+/* Inside the last hour the glow breathes: a slow three-second swell, the one
+   moving thing in the corner, and only while there is something to hurry
+   for. Kept to that window because an animation repaints every frame. */
+@keyframes tea-breathe {
+  from { text-shadow: 0 0 5px rgba(255, 212, 121, 0.3); }
+  50%  { text-shadow: 0 0 16px rgba(255, 212, 121, 1.0); }
+  to   { text-shadow: 0 0 5px rgba(255, 212, 121, 0.3); }
+}
+@keyframes tea-breathe-late {
+  from { text-shadow: 0 0 5px rgba(255, 154, 118, 0.3); }
+  50%  { text-shadow: 0 0 16px rgba(255, 154, 118, 1.0); }
+  to   { text-shadow: 0 0 5px rgba(255, 154, 118, 0.3); }
+}
+.tea-todo-job.soon { animation-name: tea-breathe; animation-duration: 3s; animation-timing-function: ease-in-out; animation-iteration-count: infinite; }
+.tea-todo-job.soon.late { animation-name: tea-breathe-late; }
 /* The jobs that did not fit. Drawn in the branches' own grey, because it is a
    piece of arithmetic and not something you can go and do. */
 .tea-todo-job.more { color: #333c4a; }
@@ -410,6 +431,15 @@ impl Blocker for GtkBlocker {
             return;
         }
 
+        // Strict first, so the shortcuts are gone by the time the page is
+        // in front; a failure here costs a line and leaves an insisting page,
+        // which is the next best thing.
+        if self.hold.strict() {
+            match crate::strict::engage() {
+                Ok(n) => println!("[hold]  strict — {n} shortcuts off until the page comes down"),
+                Err(e) => eprintln!("tea: strict — {e}"),
+            }
+        }
         let soft = !self.hold.insists();
         if soft {
             arm_soft(&built[0]);
@@ -501,6 +531,15 @@ impl Blocker for GtkBlocker {
         // now, not on its next tick.
         self.live.set(false);
         self.waiting.set(false);
+        // And the keyboard comes back before the page goes, whichever way the
+        // break ended. Nothing written down is nothing to do.
+        if self.hold.strict() {
+            match crate::strict::release() {
+                Ok(0) => {}
+                Ok(n) => println!("[hold]  {n} shortcuts back"),
+                Err(e) => eprintln!("tea: strict — {e}"),
+            }
+        }
         if let Some((monitors, watch)) = self.monitors_watch.take() {
             monitors.disconnect(watch);
         }
@@ -833,6 +872,11 @@ pub enum Grip {
     /// still physically possible -- see `insist` -- but you have to keep doing
     /// it, which is the point.
     Insist,
+    /// Insist, and take the desktop's ways out with it: the Super key, the
+    /// overview, Alt-Tab, the workspace switches and the dock's number keys
+    /// are switched off for the length of the break and put back after. See
+    /// `strict`. What is left is the console and the power button.
+    Strict,
 }
 
 /// How hard the break page fights to stay in front.
@@ -854,7 +898,11 @@ impl Default for Hold {
 
 impl Hold {
     fn insists(&self) -> bool {
-        self.mode == Grip::Insist
+        matches!(self.mode, Grip::Insist | Grip::Strict)
+    }
+
+    fn strict(&self) -> bool {
+        self.mode == Grip::Strict
     }
 
     /// Clamped: fast enough to beat a deliberate switch, slow enough that a
@@ -1444,10 +1492,19 @@ const TODO_WIDTH: i32 = 30;
 /// landed before anyone has finished standing up.
 const TODO_HEAD_FADE: f64 = 0.5;
 const TODO_ROW_FADE: f64 = 0.45;
-const TODO_ROW_STAGGER: f64 = 0.08;
 const TODO_ROW_DELAY: f64 = 0.1;
 /// How far a job slides, and from which side.
 const TODO_ROW_SLIDE: i32 = 10;
+/// The branches come first and fast, top to bottom, like a trunk growing;
+/// the names follow each one a beat later, sliding in from the edge.
+const TODO_GLYPH_FADE: f64 = 0.15;
+const TODO_GLYPH_STAGGER: f64 = 0.05;
+const TODO_NAME_LAG: f64 = 0.14;
+/// Crossing a job off: the strike is drawn across the words over this long,
+/// the colour warming to green as it goes, and then the row takes this long
+/// to drop into the finished pile while the rows under it close up.
+const TODO_SWEEP: f64 = 0.35;
+const TODO_REFLOW: f64 = 0.3;
 /// What a finished job fades to by the bottom of the list. Not to nothing: it
 /// is still worth seeing that it was done, just not worth reading twice.
 const TODO_DONE_FADE: f64 = 0.65;
@@ -1570,13 +1627,23 @@ struct Todo {
     /// Zero on a page rebuilt mid-break by `insist`, which must come back with
     /// the list already there rather than dealing it out again.
     arrival: f64,
+    /// A strike being drawn across a job: the list waits for it to finish
+    /// before it is laid out again, and what arrives meanwhile waits here.
+    busy: Cell<bool>,
+    pending: RefCell<Option<Corner>>,
 }
 
 /// One line: the branch, and the words.
 struct Limb {
+    /// Around the row, so the row can grow into its place from nothing when
+    /// it has just been moved there.
+    wrap: gtk::Revealer,
     row: gtk::Box,
     glyph: gtk::Label,
     job: gtk::Label,
+    /// The deadline, after the name, in its own label so the name is what
+    /// gets cut short when the two will not fit and the time never is.
+    when: gtk::Label,
 }
 
 impl Todo {
@@ -1624,6 +1691,8 @@ impl Todo {
             said: RefCell::new(None),
             dealt: Cell::new(false),
             arrival,
+            busy: Cell::new(false),
+            pending: RefCell::new(None),
         }
     }
 
@@ -1636,12 +1705,42 @@ impl Todo {
     /// already moved to the bottom, and the line that catches the eye is the
     /// one that has just gone green -- not every line that shuffled up a row
     /// to make room for it.
-    fn show(&self, corner: &Corner) {
+    fn show(self: &Rc<Self>, corner: &Corner) {
         if corner.nothing_to_show() {
             self.root.set_visible(false);
             return;
         }
+        // A strike is still being drawn: this list is the one to paint once
+        // it is done, and any one that arrives before then is superseded.
+        if self.busy.get() {
+            *self.pending.borrow_mut() = Some(corner.clone());
+            return;
+        }
+        let lines = lines_of(&corner.jobs, corner.hidden);
+        let crossing = self.dealt.get()
+            .then(|| crossing(&self.last.borrow(), &lines))
+            .flatten()
+            .filter(|_| self.limbs.borrow().len() == lines.len());
+        match crossing {
+            Some((from, _)) => {
+                // The moment the list is for. First the pen, then the move.
+                self.busy.set(true);
+                let this = Rc::clone(self);
+                let was = corner.clone();
+                let limbs = self.limbs.borrow();
+                sweep(&limbs[from].job, TODO_SWEEP, move || {
+                    this.busy.set(false);
+                    let corner = this.pending.borrow_mut().take().unwrap_or(was);
+                    this.paint(&corner, Some(from));
+                });
+            }
+            None => self.paint(corner, None),
+        }
+    }
 
+    /// Put the list up, or bring what is up to date. `dropped` is the row a
+    /// job has just been crossed off in, which the repaint then moves.
+    fn paint(&self, corner: &Corner, dropped: Option<usize>) {
         let lines = lines_of(&corner.jobs, corner.hidden);
         let mut limbs = self.limbs.borrow_mut();
         // What was already struck through last time, by name: the one thing
@@ -1661,7 +1760,7 @@ impl Todo {
         // just ticked off, or the marker going away with the last of them.
         if limbs.len() != lines.len() {
             for limb in limbs.drain(..) {
-                self.root.remove(&limb.row);
+                self.root.remove(&limb.wrap);
             }
             self.last.borrow_mut().clear();
             for _ in &lines {
@@ -1675,17 +1774,26 @@ impl Todo {
                 job.set_xalign(0.0);
                 job.set_ellipsize(gtk::pango::EllipsizeMode::End);
                 job.set_max_width_chars(TODO_WIDTH);
+                let when = gtk::Label::new(None);
+                when.add_css_class("tea-todo-when");
+                when.set_visible(false);
                 row.append(&glyph);
                 row.append(&job);
+                row.append(&when);
+                let wrap = gtk::Revealer::new();
+                wrap.set_transition_type(gtk::RevealerTransitionType::SlideDown);
+                wrap.set_transition_duration(0);
+                wrap.set_reveal_child(true);
+                wrap.set_child(Some(&row));
                 // Ahead of the rule and the day, which are the last two
                 // children and have to stay that way -- and behind the header,
                 // which `None` here would put the first job above.
                 let after: &gtk::Widget = match limbs.last() {
-                    Some(limb) => limb.row.upcast_ref(),
+                    Some(limb) => limb.wrap.upcast_ref(),
                     None => self.header.upcast_ref(),
                 };
-                self.root.insert_child_after(&row, Some(after));
-                limbs.push(Limb { row, glyph, job });
+                self.root.insert_child_after(&wrap, Some(after));
+                limbs.push(Limb { wrap, row, glyph, job, when });
             }
         }
 
@@ -1717,8 +1825,26 @@ impl Todo {
             // a page whose whole job is to be restful.
             let just_done =
                 matches!(line, Line::Job(job) if job.done && !was_done.contains(&job.summary));
-            if moved && dealt && just_done {
+            if moved && dealt && just_done && dropped.is_none() {
                 animate_in(&limb.row, 0.25, 0, 0.0);
+            }
+        }
+        // The crossed-off row drops into the finished pile: it grows into its
+        // new place from nothing while the rows that were under it slide up
+        // by exactly one row, so nothing below the pile so much as twitches.
+        if let Some(from) = dropped {
+            let landed = lines.iter().position(|line| {
+                matches!(line, Line::Job(job) if job.done && !was_done.contains(&job.summary))
+            });
+            if let Some(to) = landed.filter(|to| *to > from && *to < limbs.len() && from < limbs.len()) {
+                let rise = limbs[from].wrap.height() + TODO_GAP;
+                settle(&limbs[from].wrap, rise, TODO_REFLOW);
+                let wrap = &limbs[to].wrap;
+                wrap.set_transition_duration(0);
+                wrap.set_reveal_child(false);
+                wrap.set_transition_duration((TODO_REFLOW * 1000.0) as u32);
+                wrap.set_reveal_child(true);
+                animate_in(&limbs[to].row, TODO_REFLOW, 0, 0.0);
             }
         }
         last.clone_from(&lines);
@@ -1749,20 +1875,104 @@ impl Todo {
 
         if !dealt {
             animate_in(&self.header, self.arrival.min(TODO_HEAD_FADE), 0, 0.0);
+            // The tree grows: branch after branch down the trunk, quickly,
+            // and each name slides in from the edge a beat behind its branch.
             for (i, limb) in limbs.iter().enumerate() {
-                slide_in(
-                    &limb.row,
-                    self.arrival.min(TODO_ROW_FADE),
-                    Slide::Left(TODO_ROW_SLIDE),
-                    TODO_ROW_DELAY + TODO_ROW_STAGGER * i as f64,
-                );
+                let at = TODO_ROW_DELAY + TODO_GLYPH_STAGGER * i as f64;
+                animate_in(&limb.glyph, self.arrival.min(TODO_GLYPH_FADE), 0, at);
+                for name in [&limb.job, &limb.when] {
+                    slide_in(
+                        name,
+                        self.arrival.min(TODO_ROW_FADE),
+                        Slide::Left(TODO_ROW_SLIDE),
+                        at + TODO_NAME_LAG,
+                    );
+                }
             }
-            // The day arrives after the last job, as the closing beat.
-            let after = TODO_ROW_DELAY + TODO_ROW_STAGGER * limbs.len() as f64;
+            // The day arrives after the last name, as the closing beat.
+            let after = TODO_ROW_DELAY + TODO_GLYPH_STAGGER * limbs.len() as f64 + TODO_NAME_LAG;
             animate_in(&self.rule, self.arrival.min(TODO_ROW_FADE), 0, after);
             animate_in(&self.foot, self.arrival.min(TODO_ROW_FADE), 0, after);
         }
     }
+}
+
+/// A job that was open at one row last time and is done now: where it was,
+/// and where it has gone. The first such, if there is one at all.
+fn crossing(last: &[Line], lines: &[Line]) -> Option<(usize, usize)> {
+    last.iter().enumerate().find_map(|(from, line)| {
+        let Line::Job(was) = line else { return None };
+        if was.done {
+            return None;
+        }
+        let to = lines
+            .iter()
+            .position(|now| matches!(now, Line::Job(job) if job.done && job.summary == was.summary))?;
+        Some((from, to))
+    })
+}
+
+/// The pen crossing a job off: the strike drawn across the words from left
+/// to right, the colour warming to the finished green as it goes, and then
+/// `done`. The row keeps its place until then -- the move comes after.
+fn sweep(label: &gtk::Label, seconds: f64, done: impl FnOnce() + 'static) {
+    let text = label.text().to_string();
+    let from = label.color();
+    let to = gdk::RGBA::new(0x4a as f32 / 255.0, 0xde as f32 / 255.0, 0x80 as f32 / 255.0, 1.0);
+    let done = Cell::new(Some(done));
+    let started = Cell::new(0i64);
+    label.add_tick_callback(move |label, clock| {
+        let now = clock.frame_time();
+        if started.get() == 0 {
+            started.set(now);
+        }
+        let progress = (((now - started.get()) as f64) / 1_000_000.0 / seconds).clamp(0.0, 1.0);
+        // Character by character, never through the middle of one.
+        let chars = text.chars().count();
+        let upto = ((progress * chars as f64).ceil() as usize).min(chars);
+        let byte = text.char_indices().nth(upto).map_or(text.len(), |(b, _)| b);
+        let attrs = gtk::pango::AttrList::new();
+        if byte > 0 {
+            let mut strike = gtk::pango::AttrInt::new_strikethrough(true);
+            strike.set_end_index(byte as u32);
+            attrs.insert(strike);
+        }
+        let mix = |a: f32, b: f32| ((a + (b - a) * progress as f32) * f32::from(u16::MAX)) as u16;
+        attrs.insert(gtk::pango::AttrColor::new_foreground(
+            mix(from.red(), to.red()),
+            mix(from.green(), to.green()),
+            mix(from.blue(), to.blue()),
+        ));
+        label.set_attributes(Some(&attrs));
+        if progress < 1.0 {
+            return glib::ControlFlow::Continue;
+        }
+        if let Some(done) = done.take() {
+            done();
+        }
+        glib::ControlFlow::Break
+    });
+}
+
+/// A widget that starts `rise` pixels lower than it belongs and eases up
+/// into place. What is under it comes up with it, which is the point.
+fn settle(widget: &impl IsA<gtk::Widget>, rise: i32, seconds: f64) {
+    let widget = widget.as_ref().clone();
+    widget.set_margin_top(rise);
+    let started = Cell::new(0i64);
+    widget.add_tick_callback(move |w, clock| {
+        let now = clock.frame_time();
+        if started.get() == 0 {
+            started.set(now);
+        }
+        let progress = (((now - started.get()) as f64) / 1_000_000.0 / seconds).clamp(0.0, 1.0);
+        let eased = 1.0 - (1.0 - progress).powi(3);
+        w.set_margin_top(((rise as f64) * (1.0 - eased)).round() as i32);
+        match progress < 1.0 {
+            true => glib::ControlFlow::Continue,
+            false => glib::ControlFlow::Break,
+        }
+    });
 }
 
 /// How far the `nth` of `total` finished jobs has faded. The first one done is
@@ -1786,9 +1996,12 @@ fn paint_line(limb: &Limb, line: &Line, first: bool, last: bool, fade: f64) {
         false => "├─",
     });
 
-    limb.job.remove_css_class("next");
-    limb.job.remove_css_class("done");
-    limb.job.remove_css_class("more");
+    for class in ["next", "done", "more", "due", "late", "soon"] {
+        limb.job.remove_css_class(class);
+    }
+    limb.when.remove_css_class("late");
+    limb.when.set_visible(false);
+    limb.job.set_max_width_chars(TODO_WIDTH);
 
     let attrs = gtk::pango::AttrList::new();
     match line {
@@ -1807,6 +2020,21 @@ fn paint_line(limb: &Limb, line: &Line, first: bool, last: bool, fade: f64) {
                 limb.job.add_css_class("done");
             } else if first {
                 limb.job.add_css_class("next");
+            }
+            // A deadline outranks being first: the glow is the eye-catcher
+            // now, and the time sits after the name in its own quieter face.
+            if let Some(due) = &job.due {
+                limb.job.add_css_class(if due.late { "late" } else { "due" });
+                if due.soon {
+                    limb.job.add_css_class("soon");
+                }
+                limb.when.set_text(&due.label);
+                if due.late {
+                    limb.when.add_css_class("late");
+                }
+                limb.when.set_visible(true);
+                let room = TODO_WIDTH - (due.label.chars().count() as i32 + 2).min(TODO_WIDTH / 2);
+                limb.job.set_max_width_chars(room);
             }
 
             // The strike and the fade go on as text attributes rather than as
@@ -3155,11 +3383,38 @@ mod corner_tests {
     use super::*;
 
     fn open(summary: &str) -> Chore {
-        Chore { summary: summary.into(), done: false }
+        Chore { summary: summary.into(), done: false, due: None }
+    }
+
+    #[test]
+    fn a_job_crossed_off_is_found_where_it_was_and_where_it_went() {
+        let before = vec![Line::Job(open("Luft")), Line::Job(open("Tidy")), Line::Job(done("Tea"))];
+        let after = vec![Line::Job(open("Tidy")), Line::Job(done("Luft")), Line::Job(done("Tea"))];
+        assert_eq!(crossing(&before, &after), Some((0, 1)));
+        assert_eq!(crossing(&after, &after), None, "nothing crossed off, nothing to draw");
+        // Un-ticked again: not a crossing either way.
+        assert_eq!(crossing(&after, &before), None);
+    }
+
+    #[test]
+    fn the_page_css_parses() {
+        // Needs a display; where there is none the test has nothing to check.
+        if gtk::init().is_err() {
+            eprintln!("no display — the CSS was not checked");
+            return;
+        }
+        let provider = gtk::CssProvider::new();
+        let bad = Rc::new(RefCell::new(Vec::new()));
+        let seen = Rc::clone(&bad);
+        provider.connect_parsing_error(move |_, section, err| {
+            seen.borrow_mut().push(format!("{section}: {err}"));
+        });
+        provider.load_from_string(&Look::default().css(CSS));
+        assert!(bad.borrow().is_empty(), "{:?}", bad.borrow());
     }
 
     fn done(summary: &str) -> Chore {
-        Chore { summary: summary.into(), done: true }
+        Chore { summary: summary.into(), done: true, due: None }
     }
 
     fn words(lines: &[Line]) -> Vec<String> {
@@ -3613,6 +3868,8 @@ prompt_every = "3h""#));
     fn soft_is_the_default_and_does_not_insist() {
         assert!(!Hold::default().insists());
         assert!(Hold { mode: Grip::Insist, ..Hold::default() }.insists());
+        assert!(Hold { mode: Grip::Strict, ..Hold::default() }.insists(), "strict is insist and more");
+        assert!(!Hold { mode: Grip::Insist, ..Hold::default() }.strict());
     }
 
     /// The layout has one job: the words go outside the ring, on every screen.

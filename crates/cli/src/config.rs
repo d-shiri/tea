@@ -27,6 +27,20 @@ duration = "1m"       # how much time one postpone buys
 budget = 2            # postpones allowed per window (0 disables postponing)
 window = "1h"
 
+# While an app holds the session awake -- a call, a video, a presentation --
+# a break that falls due waits rather than covering the screen, and tea says
+# so after a while.
+#
+#   warn_after  how long a break may be held up before tea mentions it and
+#               names what is holding it. "0s" never mentions it.
+#   ignore      inhibitors that do not count. An app id or reason containing
+#               any of these strings is passed over as if it were not there,
+#               so something of your own that keeps the screen on while a
+#               long job runs does not read as a call. Case does not matter.
+[calls]
+warn_after = "20m"
+ignore = []           # e.g. ["tmux agents"]
+
 # When tea is awake at all. Outside these hours nothing is counted and nothing
 # appears: an evening film is not a work session with the timer paused, it is
 # not a work session. `tea off 1h` is the same idea for one afternoon.
@@ -59,6 +73,12 @@ length = "15m"
 #              sitting behind everything.
 #   "insist" — it puts itself back in front, again, for as long as the break
 #              lasts. You can still get out, but only by keeping at it.
+#   "strict" — insist, and the desktop's ways out go with it: the Super key,
+#              the overview, Alt-Tab, the workspace switches, the dock's
+#              number keys and the hot corner are switched off for the length
+#              of the break and put back after -- at the next start too, if
+#              tea was killed mid-break. The console and the power button
+#              remain; the point is that leaving takes a decision. GNOME only.
 mode = "soft"
 recheck = "400ms"     # how often an insisting page checks it is still in front
 
@@ -233,9 +253,10 @@ states = ["walking", "on_foot", "running"]
 #
 # Not part of the gate. A list that cannot be read costs one line on stderr and
 # an empty corner; it can never hold your desk, and it can never end a break
-# early. What is still to do is always at the top, in the list's own order,
-# and what has been done is always underneath it, freshest first: tick a job
-# off and it drops below the open ones.
+# early. What is still to do is always at the top and what has been done is
+# underneath it, freshest first: tick a job off and it drops below the open
+# ones. Among the open ones, anything with a due date comes first, soonest at
+# the top, lit up with the time after its name.
 #
 # Whatever gets ticked off while a page is up is counted: `tea status` says how
 # many today, and `tea dash` has them per day and in total.
@@ -344,6 +365,12 @@ pub struct Idle {
 #[serde(deny_unknown_fields, default)]
 pub struct Calls {
     pub warn_after: Dur,
+    /// Inhibitors that never hold a break: any whose app id or reason
+    /// contains one of these, matched without regard to case. For the
+    /// things that keep the screen awake for your own reasons -- a
+    /// keep-the-screen-on helper while a long job runs -- which are not a
+    /// call and should not be treated as one.
+    pub ignore: Vec<String>,
 }
 
 /// When tea is awake at all.
@@ -442,7 +469,7 @@ impl Default for FileConfig {
                 budget: d.postpone_budget,
                 window: Dur(d.postpone_window),
             },
-            calls: Calls { warn_after: Dur(d.defer_warn_after) },
+            calls: Calls { warn_after: Dur(d.defer_warn_after), ignore: Vec::new() },
             hours: Hours { from: Clock(None), to: Clock(None), days: Days::all() },
             long: Long { every: d.long_every, length: Dur(d.long_brk) },
             sound: crate::sound::Config::default(),

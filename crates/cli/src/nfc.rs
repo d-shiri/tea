@@ -354,6 +354,9 @@ pub struct Job {
     /// to do. Never shown: it decides *which* finished jobs are worth one of
     /// the few lines the corner has, and nothing else.
     pub completed: String,
+    /// When it is wanted by, as the hub wrote it: a date, or a date and time
+    /// with its zone. Empty for most jobs.
+    pub due: String,
 }
 
 /// The list as the page shows it: which list, and the handful of lines from it
@@ -392,7 +395,14 @@ impl Board {
     pub fn chores(&self) -> Vec<tea_core::Chore> {
         self.jobs
             .iter()
-            .map(|job| tea_core::Chore { summary: job.summary.clone(), done: job.done })
+            .map(|job| tea_core::Chore {
+                summary: job.summary.clone(),
+                done: job.done,
+                due: (!job.done)
+                    .then(|| clock::deadline(&job.due))
+                    .flatten()
+                    .map(|d| tea_core::Due { label: d.label, late: d.late, soon: d.soon }),
+            })
             .collect()
     }
 }
@@ -1135,8 +1145,8 @@ fn answer(raw: &[u8], token: &str, link: &Link, who: &str, site: Option<&crate::
                             println!("[web]   settings saved from {who}");
                             let note = match (applying, applying && crate::web::restart_soon()) {
                                 (false, _) => "saved\n",
-                                (true, true) => "saved — tea is restarting to pick it up\n",
-                                (true, false) => "saved — restart tea to pick it up\n",
+                                (true, true) => "saved. tea is restarting to pick it up\n",
+                                (true, false) => "saved. Restart tea to pick it up\n",
                             };
                             http(200, "text/plain", note)
                         }
@@ -1523,7 +1533,11 @@ impl Jobs {
     /// when there is barely anything left to do, the finished ones take the
     /// slack rather than leaving the page half empty.
     fn lay_out(&self, items: &[Job], today: &str) -> Board {
-        let (open, mut done): (Vec<Job>, Vec<Job>) = items.iter().cloned().partition(|j| !j.done);
+        let (mut open, mut done): (Vec<Job>, Vec<Job>) = items.iter().cloned().partition(|j| !j.done);
+        // Anything with a deadline goes to the top, soonest first; the rest
+        // keep the list's own order behind it. A job that is wanted by half
+        // past four is not the same kind of thing as one that is wanted.
+        open.sort_by_key(|j| clock::deadline(&j.due).map_or(i64::MAX, |d| d.at));
         let today = done.iter().filter(|j| clock::day_of(&j.completed).as_deref() == Some(today)).count();
 
         // Freshest first. The hub writes these as UTC instants, so the string
@@ -2046,6 +2060,8 @@ fn read_jobs(raw: &[u8], entity: &str) -> Result<Vec<Job>, String> {
         status: String,
         #[serde(default)]
         completed: String,
+        #[serde(default)]
+        due: String,
     }
 
     let reply: Reply = serde_json::from_str(body.trim())
@@ -2074,6 +2090,7 @@ fn read_jobs(raw: &[u8], entity: &str) -> Result<Vec<Job>, String> {
             summary: item.summary.trim().to_string(),
             done: item.status.trim() == "completed",
             completed: item.completed,
+            due: item.due,
         })
         .collect())
 }
@@ -3302,7 +3319,7 @@ mod chore_tests {
     }
 
     fn open(uid: &str, summary: &str) -> Job {
-        Job { uid: uid.into(), summary: summary.into(), done: false, completed: String::new() }
+        Job { uid: uid.into(), summary: summary.into(), done: false, completed: String::new(), due: String::new() }
     }
 
     fn done(uid: &str, summary: &str) -> Job {
@@ -3310,7 +3327,7 @@ mod chore_tests {
     }
 
     fn finished(uid: &str, summary: &str, at: &str) -> Job {
-        Job { uid: uid.into(), summary: summary.into(), done: true, completed: at.into() }
+        Job { uid: uid.into(), summary: summary.into(), done: true, completed: at.into(), due: String::new() }
     }
 
     /// The day every test lives on: the one the stamps below are written in.
@@ -3509,9 +3526,27 @@ mod chore_tests {
         assert_eq!(shown(&board), ["Clean Mirros", "Luft", "Tidy up the Kitchen"]);
         assert_eq!(board.today, 3);
         // And one ticked off with no stamp at all is done, but not datably.
-        let unstamped = Job { uid: "a".into(), summary: "Clean Mirros".into(), done: true, completed: String::new() };
+        let unstamped = Job { uid: "a".into(), summary: "Clean Mirros".into(), done: true, completed: String::new(), due: String::new() };
         let board = jobs.lay_out_day(&[unstamped]);
         assert_eq!(board.today, 0);
+    }
+
+    #[test]
+    fn what_has_a_deadline_goes_to_the_top_soonest_first() {
+        let jobs = list(5);
+        let due = |uid: &str, summary: &str, when: &str| Job { due: when.into(), ..open(uid, summary) };
+        let board = jobs.lay_out_day(&[
+            open("a", "Clean toilet"),
+            due("b", "Dentist", "2099-03-02"),
+            open("c", "Luft"),
+            due("d", "Pick Anni up", "2099-03-01T16:30:00+02:00"),
+            finished("e", "Vacuum", "2026-09-02T09:00:00+00:00"),
+        ]);
+        assert_eq!(shown(&board), ["Pick Anni up", "Dentist", "Clean toilet", "Luft", "Vacuum"]);
+        let chores = board.chores();
+        assert_eq!(chores[0].due.as_ref().unwrap().label, "1 Mar");
+        assert!(chores[2].due.is_none());
+        assert!(chores[4].due.is_none(), "a finished job's deadline is nobody's business");
     }
 
     #[test]
@@ -3692,7 +3727,7 @@ mod web_tests {
         let site = crate::web::Site { path: path.clone() };
 
         let page = ask("GET /settings?token=s3cret HTTP/1.1\r\n\r\n", Some(&site));
-        assert!(page.starts_with("HTTP/1.1 200") && page.contains("<title>tea — settings"), "{page}");
+        assert!(page.starts_with("HTTP/1.1 200") && page.contains("<title>tea settings"), "{page}");
 
         let read = ask("GET /config HTTP/1.1\r\nX-Tea-Token: s3cret\r\n\r\n", Some(&site));
         assert!(read.ends_with("\r\n\r\nwork = \"30m\"\n"), "{read}");

@@ -117,6 +117,19 @@ pub struct Snooze {
 pub struct Chore {
     pub summary: String,
     pub done: bool,
+    /// When it is wanted by, if the list says. Already put into words, because
+    /// the page draws it and the page does not own a calendar.
+    pub due: Option<Due>,
+}
+
+/// A deadline as the corner shows it: a few characters -- `16:30`, `Fri`,
+/// `4 Sep` -- and whether it has already gone by.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Due {
+    pub label: String,
+    pub late: bool,
+    /// Within the hour, or gone by: close enough that the row should stir.
+    pub soon: bool,
 }
 
 /// Whatever actually stands between you and the keyboard.

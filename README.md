@@ -165,6 +165,7 @@ state file, so a restart mid-way through a long break resumes a long break.
 
     soft      it covers the screen and leaves it at that (default)
     insist    it puts itself back in front, for the whole break
+    strict    insist, with the desktop's ways out switched off
 
 Wayland is the reason there is a choice at all. There is no keyboard grab and
 Mutter implements no layer-shell, so no client can own the screen; `insist` is
@@ -200,6 +201,22 @@ and the new monitors get pages carrying the time that's left, undock it and the
 survivors keep theirs.
 
 None of it stops someone who keeps switching away, and nothing here should.
+
+`strict` is for the person who has caught themselves doing exactly that. On
+GNOME every shortcut is a dconf setting, and a process in the session can
+change them and see them take effect at once — so while a strict page is up,
+the Super key, the overview and app grid, Alt-Tab and its cousins, the
+workspace switches, the dock's Super+1…9 and the hot corner are all set to
+nothing, and when the page comes down they are put back exactly as they were.
+Ctrl-Alt-F3 and the power button are below the desktop and stay; leaving takes
+a decision rather than a reflex, which is the point. The lock screen shortcut
+is never touched.
+
+What was there is written to `held-keys.json` beside the state file *before*
+anything is changed, and that file is read back and honoured at every start of
+tea — daemon or `tea run` — so a daemon killed mid-break puts the keyboard
+right the moment it is next run. `tea off` mid-break puts it back too, since
+it takes the page down.
 `insist` makes leaving a thing you have to keep choosing.
 
 ## The page
@@ -524,12 +541,21 @@ page has exactly one thing to catch an eye that is supposed to be leaving the
 screen.
 
 It is read *live*, every few seconds, and it is read-only. Tick a job off on
-your phone while you are standing at the window and the line goes green behind
-you; tea will not tick anything off on your behalf, because a job marked done
+your phone while you are standing at the window and a strike is drawn across
+the line, left to right, the words warming to green as it goes; then the row
+drops into the finished pile while the rows that were under it slide up to
+close the gap, and nothing below the pile moves at all. The list itself grows
+in like a tree when the page arrives — branch after branch down the trunk,
+each name sliding in a beat behind its branch — and a deadline inside the
+hour breathes, a slow swell of its glow, the one moving thing in the corner.
+Tick a job off and the line goes green behind you; tea will not tick anything off on your behalf, because a job marked done
 from the laptop you were just sent away from is a claim nothing here can check.
 
-What is still to do is always at the top, in the list's own order, and what
-has been done is always underneath it, freshest first. Tick a job off and it
+What is still to do is always at the top, and what has been done is always
+underneath it, freshest first. Among the open ones, anything with a due date
+comes first, soonest at the top, drawn warm and lit with the time after the
+name — `16:30` today, `Fri 16:30` this week, `4 Sep` beyond — and reddening
+once it has gone by. The rest follow in the list's own order. Tick a job off and it
 drops below the open ones; its row goes to the next job that did not fit, and
 the *N more* marker shrinks to match. A job that never fit on screen still
 counts if you do it.
@@ -804,7 +830,10 @@ five minutes for anything. Everything platform-shaped stays outside it.
   holding it (`tea --probe` names them too) and leaves it at that.
 - **Inhibitors** — a break owed during a screen share is deferred, not lost.
   Read from `org.gnome.SessionManager.IsInhibited(8)`, the same flag video
-  players and presentation mode set.
+  players and presentation mode set. Something of your own that holds the
+  screen awake for a long job is not a call: list a piece of its app id or
+  reason under `calls.ignore` and it is passed over, in the timer, in `tea
+  status` and in `tea --probe` alike.
 - **Degrades, never fails** — no session bus (SSH, gnome-shell restart) costs
   accuracy, not availability: it falls back to suspend-gap detection and says so
   once.

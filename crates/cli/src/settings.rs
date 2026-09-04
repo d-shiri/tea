@@ -275,6 +275,9 @@ pub fn show(cfg: &Config, file: &FileConfig, path: &Path) {
     } else {
         field(&s, "warn after", &human(cfg.defer_warn_after), "if a call holds a break up");
     }
+    if !file.calls.ignore.is_empty() {
+        field(&s, "ignore", &file.calls.ignore.join(", "), "never hold a break");
+    }
 
     section(&s, "sound");
     let sound = &file.sound;
@@ -319,6 +322,10 @@ pub fn show(cfg: &Config, file: &FileConfig, path: &Path) {
         }
         crate::overlay::Grip::Insist => {
             field(&s, "switching away", "insist", "the page puts itself back in front");
+            field(&s, "rechecks every", &literal(file.hold.recheck.0), "how often it looks");
+        }
+        crate::overlay::Grip::Strict => {
+            field(&s, "switching away", "strict", "the page puts itself back, and the Super key is off");
             field(&s, "rechecks every", &literal(file.hold.recheck.0), "how often it looks");
         }
     }

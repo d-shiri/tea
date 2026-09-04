@@ -58,6 +58,56 @@ pub fn day_of(iso: &str) -> Option<String> {
     Some(format!("{:04}-{:02}-{:02}", t.year(), t.month(), t.day_of_month()))
 }
 
+/// A deadline, read the two ways a to-do list writes one and put into the
+/// few characters a list row has room for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Deadline {
+    /// `16:30` today, `Fri` or `Fri 16:30` within the week, `4 Sep` beyond.
+    pub label: String,
+    /// Already gone by: a time that has passed, or a date before today.
+    pub late: bool,
+    /// Unix seconds, for putting the soonest first. A date with no time is
+    /// its local midnight.
+    pub at: i64,
+    /// Less than an hour away, or already late.
+    pub soon: bool,
+}
+
+/// `2026-09-04` or `2026-09-03T16:30:00+02:00`, as Home Assistant writes a
+/// to-do item's `due`. Anything else is no deadline.
+pub fn deadline(raw: &str) -> Option<Deadline> {
+    let raw = raw.trim();
+    let now = glib::DateTime::now_local().ok()?;
+    let dated = raw.len() == 10;
+    let due = if dated {
+        let mut parts = raw.split('-').map(|p| p.parse::<i32>().ok());
+        let (y, m, d) = (parts.next()??, parts.next()??, parts.next()??);
+        glib::DateTime::from_local(y, m, d, 0, 0, 0.0).ok()?
+    } else {
+        glib::DateTime::from_iso8601(raw, None).ok()?.to_local().ok()?
+    };
+    // Whole days between the two, by their midnights, so 23:59 tonight is
+    // still today and 00:10 tomorrow is tomorrow.
+    let midnight = |t: &glib::DateTime| {
+        glib::DateTime::from_local(t.year(), t.month(), t.day_of_month(), 0, 0, 0.0).ok()
+    };
+    let days = midnight(&due)?.difference(&midnight(&now)?).as_seconds() / 86_400;
+    let time = || format!("{:02}:{:02}", due.hour(), due.minute());
+    let label = match (days, dated) {
+        (0, true) => "today".to_string(),
+        (0, false) => time(),
+        (1..=6, true) => due.format("%a").map(|s| s.to_string()).ok()?,
+        (1..=6, false) => format!("{} {}", due.format("%a").ok()?, time()),
+        _ => format!("{} {}", due.day_of_month(), due.format("%b").ok()?),
+    };
+    let late = match dated {
+        true => days < 0,
+        false => due < now,
+    };
+    let at = due.to_unix();
+    Some(Deadline { label, late, at, soon: late || at - now.to_unix() < 3600 })
+}
+
 /// `17:30` for a moment given as minutes since midnight.
 pub fn oclock(minute: u32) -> String {
     format!("{:02}:{:02}", (minute / 60) % 24, minute % 60)
@@ -239,6 +289,25 @@ impl<'de> Deserialize<'de> for Days {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_deadline_is_a_few_characters_and_a_verdict() {
+        // Far enough either way that the label is a date, whatever today is.
+        let past = deadline("2020-01-05").unwrap();
+        assert_eq!(past.label, "5 Jan");
+        assert!(past.late);
+        let ahead = deadline("2099-12-24T09:15:00+00:00").unwrap();
+        assert_eq!(ahead.label, "24 Dec");
+        assert!(!ahead.late);
+        assert!(past.soon && !ahead.soon, "late is soon; next century is not");
+        assert!(past.at < ahead.at);
+        // Today, by the local calendar.
+        let today = deadline(&today()).unwrap();
+        assert_eq!(today.label, "today");
+        assert!(!today.late, "a date with no time is not late until tomorrow");
+        assert_eq!(deadline(""), None);
+        assert_eq!(deadline("soon"), None);
+    }
 
     #[test]
     fn a_stamp_from_the_hub_has_a_day() {

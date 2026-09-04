@@ -19,7 +19,13 @@ const FRESH: Duration = Duration::from_secs(15);
 pub const WIDTH: usize = 68;
 const BAR: usize = 24;
 
-pub fn show(cfg: Config, hours: &Hours, config_path: &std::path::Path, boottime: Duration) {
+pub fn show(
+    cfg: Config,
+    hours: &Hours,
+    ignore: &[String],
+    config_path: &std::path::Path,
+    boottime: Duration,
+) {
     let s = Style::new();
     let store = state::Store::new();
     let saved = store.as_ref().and_then(|st| st.load(boottime));
@@ -53,7 +59,7 @@ pub fn show(cfg: Config, hours: &Hours, config_path: &std::path::Path, boottime:
     // so it is only done while fresh.
     let elapsed = if running { saved.gap } else { Duration::ZERO };
 
-    let mut session = Session::connect();
+    let mut session = Session::connect().ignoring(ignore.to_vec());
     let held_by = session.inhibitors();
 
     // ---- headline ----------------------------------------------------------

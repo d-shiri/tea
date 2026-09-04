@@ -13,6 +13,7 @@ mod settings;
 mod sound;
 mod state;
 mod status;
+mod strict;
 mod web;
 
 use config::human;
@@ -325,9 +326,10 @@ fn main() {
             config::FileConfig::default()
         };
         let hours = file.hours.clone();
+        let ignore = file.calls.ignore.clone();
         let mut cfg: tea_core::Config = file.into();
         let _ = config::reconcile(&mut cfg);
-        return status::show(cfg, &hours, &path, boottime());
+        return status::show(cfg, &hours, &ignore, &path, boottime());
     }
 
     // An explicit --config that isn't there is a typo, not an invitation to
@@ -358,6 +360,7 @@ fn main() {
     let look_cfg = file.page.clone();
     let mut nfc_cfg = file.nfc.clone();
     let hours_cfg = file.hours.clone();
+    let calls_cfg = file.calls.clone();
     let site = file.settings.on().then(|| web::Site { path: path.clone() });
     // A page switched on by hand, in a file that has never had a token: mint
     // one now rather than refuse the port and send somebody to read about
@@ -428,7 +431,7 @@ fn main() {
     }
 
     if probe {
-        return run_probe(&nfc_cfg);
+        return run_probe(&nfc_cfg, &calls_cfg.ignore);
     }
 
     if run_page {
@@ -453,6 +456,7 @@ fn main() {
                 );
             }
         }
+        strict::restore_leftovers();
         return preview(total, sound_cfg, anim_cfg, hold_cfg, look_cfg, nfc_cfg);
     }
 
@@ -501,10 +505,15 @@ fn main() {
         );
     }
 
+    // Whatever mode this run is in: a strict break that was cut short by a
+    // crash or a restart left the keyboard short of its Super key, and that
+    // is put right before anything else happens.
+    strict::restore_leftovers();
+
     if headless {
-        run_headless(cfg, sound_cfg, nfc_cfg, hours_cfg, site);
+        run_headless(cfg, sound_cfg, nfc_cfg, hours_cfg, calls_cfg, site);
     } else {
-        run_gtk(cfg, sound_cfg, anim_cfg, hold_cfg, look_cfg, nfc_cfg, hours_cfg, site);
+        run_gtk(cfg, sound_cfg, anim_cfg, hold_cfg, look_cfg, nfc_cfg, hours_cfg, calls_cfg, site);
     }
 }
 
@@ -594,9 +603,10 @@ fn run_headless(
     sound: sound::Config,
     nfc: nfc::Config,
     hours: config::Hours,
+    calls: config::Calls,
     site: Option<web::Site>,
 ) {
-    let mut engine = Engine::start(cfg, sound, nfc, hours, site);
+    let mut engine = Engine::start(cfg, sound, nfc, hours, calls, site);
     let mut ui = TerminalBlocker;
     // There is no GTK main loop out here, but the socket that listens for the
     // tag still dispatches on glib's. Pumping whatever is pending each second
@@ -622,6 +632,7 @@ fn run_gtk(
     look: overlay::Look,
     nfc: nfc::Config,
     hours: config::Hours,
+    calls: config::Calls,
     site: Option<web::Site>,
 ) {
     let app = gtk::Application::builder().application_id(APP_ID).build();
@@ -641,7 +652,14 @@ fn run_gtk(
         // its last window closes -- so keep it open explicitly.
         let keep_open = app.hold();
         let engine =
-            RefCell::new(Engine::start(cfg.clone(), sound.clone(), nfc.clone(), hours.clone(), site.clone()));
+            RefCell::new(Engine::start(
+                cfg.clone(),
+                sound.clone(),
+                nfc.clone(),
+                hours.clone(),
+                calls.clone(),
+                site.clone(),
+            ));
         let ui = RefCell::new(GtkBlocker::new(
             app,
             engine.borrow().postpone_flag(),
@@ -1023,6 +1041,7 @@ impl Engine {
         sound: sound::Config,
         nfc_cfg: nfc::Config,
         hours: config::Hours,
+        calls: config::Calls,
         site: Option<web::Site>,
     ) -> Self {
         let now = boottime();
@@ -1126,7 +1145,7 @@ impl Engine {
 
         Self {
             sched,
-            session: Session::connect(),
+            session: Session::connect().ignoring(calls.ignore),
             store,
             last: now,
             catchup,
@@ -1679,7 +1698,7 @@ impl Engine {
 
 /// Print what the session reports, once a second, so idle detection can be
 /// eyeballed without waiting out a work interval.
-fn run_probe(nfc_cfg: &nfc::Config) {
+fn run_probe(nfc_cfg: &nfc::Config, ignore: &[String]) {
     if nfc_cfg.asks() {
         let ha = &nfc_cfg.home_assistant;
         // Which slot the name came from, not what it says: a steps sensor that
@@ -1721,7 +1740,7 @@ fn run_probe(nfc_cfg: &nfc::Config) {
         println!("tea: not telling Home Assistant anything — {why}\n");
     }
 
-    let mut session = Session::connect();
+    let mut session = Session::connect().ignoring(ignore.to_vec());
     println!("tea: probing the session bus (5s). Stop touching the keyboard.");
     for _ in 0..5 {
         std::thread::sleep(TICK);
