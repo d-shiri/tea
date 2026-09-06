@@ -42,15 +42,35 @@ pub struct Site {
 /// The page, built into the binary so there is nothing to install beside it.
 pub const PAGE: &str = include_str!("settings.html");
 
-/// Where a browser finds the page: the listening address with the token in
-/// the query, because a browser bar has nowhere else to put one. `0.0.0.0`
-/// is an address to listen on, not one to open.
-pub fn url(nfc: &crate::nfc::Config) -> String {
+/// Where a browser finds a page the daemon serves: the listening address with
+/// the token in the query, because a browser bar has nowhere else to put one.
+/// `0.0.0.0` is an address to listen on, not one to open.
+fn at(nfc: &crate::nfc::Config, path: &str) -> String {
     let host = match nfc.listen.split_once(':') {
         Some(("0.0.0.0" | "", port)) | Some(("[::]", port)) => format!("127.0.0.1:{port}"),
         _ => nfc.listen.clone(),
     };
-    format!("http://{host}/settings?token={}", nfc.token)
+    format!("http://{host}{path}?token={}", nfc.token)
+}
+
+pub fn url(nfc: &crate::nfc::Config) -> String {
+    at(nfc, "/settings")
+}
+
+/// The dashboard's live copy, on the same port and behind the same token.
+///
+/// `tea dash` prefers this to the file it writes wherever the daemon is up to
+/// answer it: the numbers are gathered per request, and -- the thing a file can
+/// never do -- it carries the token, so it has somewhere to go. See
+/// [`crate::dash::show`].
+pub fn dash(nfc: &crate::nfc::Config) -> String {
+    at(nfc, "/dash")
+}
+
+/// Whether there is a served copy to prefer at all: the page switched on, and
+/// a token to reach it with.
+pub fn serving(file: &FileConfig) -> bool {
+    file.settings.on() && !file.nfc.token.trim().is_empty()
 }
 
 /// The file as it is on disk.
@@ -171,8 +191,10 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(url(&nfc), "http://127.0.0.1:9797/settings?token=abc");
+        assert_eq!(dash(&nfc), "http://127.0.0.1:9797/dash?token=abc");
         nfc.listen = "192.168.2.7:9797".into();
         assert_eq!(url(&nfc), "http://192.168.2.7:9797/settings?token=abc");
+        assert_eq!(dash(&nfc), "http://192.168.2.7:9797/dash?token=abc");
     }
 
     /// A directory that goes away with the test. Small enough not to be worth

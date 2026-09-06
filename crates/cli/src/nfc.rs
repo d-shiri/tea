@@ -1130,6 +1130,13 @@ fn answer(raw: &[u8], token: &str, link: &Link, who: &str, site: Option<&crate::
             let page = crate::dash::page(&site.path, crate::boottime());
             http(200, "text/html; charset=utf-8", &page)
         }
+        // The file as it ships, so the page can offer a setting that is not in
+        // your file yet: what it would be if you never said, what the file
+        // itself has to say about it, and somewhere to put it. Static text,
+        // behind the same token as the file it describes.
+        "/defaults" | "/defaults/" if site.is_some() => {
+            http(200, "text/plain; charset=utf-8", crate::config::DEFAULT_FILE)
+        }
         "/config" | "/config/" if site.is_some() => {
             let site = site.expect("checked above");
             match method {
@@ -3743,6 +3750,39 @@ mod web_tests {
 
         let wrong = ask("GET /dash?token=nope HTTP/1.1\r\n\r\n", Some(&site));
         assert!(wrong.starts_with("HTTP/1.1 401"), "{wrong}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What lets the settings page offer a setting your own file has never
+    /// mentioned: the file as it ships, handed over beside the file you have.
+    ///
+    /// Renaming this door on one side only is the quiet kind of breakage --
+    /// nothing errors, the page simply goes back to showing you the lines you
+    /// already had -- so the page is asked here whether it still knocks on it.
+    #[test]
+    fn the_shipped_file_is_served_where_the_page_asks_for_it() {
+        let dir = std::env::temp_dir().join(format!("tea-defaults-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "work = \"30m\"\n").unwrap();
+        let site = crate::web::Site { path };
+
+        let reply = ask("GET /defaults?token=s3cret HTTP/1.1\r\n\r\n", Some(&site));
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        assert!(reply.contains("[nfc.steps]"), "the shipped file itself comes back: {reply}");
+        assert!(
+            crate::web::PAGE.contains("'/defaults'"),
+            "the settings page no longer asks for /defaults, so this door opens onto nobody"
+        );
+
+        let wrong = ask("GET /defaults?token=nope HTTP/1.1\r\n\r\n", Some(&site));
+        assert!(wrong.starts_with("HTTP/1.1 401"), "{wrong}");
+
+        // Off wherever the settings page is off. A catalogue of settings is not
+        // a reason to answer anything on a port that was opened for a tag.
+        let shut = ask("GET /defaults?token=s3cret HTTP/1.1\r\n\r\n", None);
+        assert!(shut.starts_with("HTTP/1.1 404"), "{shut}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

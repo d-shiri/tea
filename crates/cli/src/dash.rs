@@ -14,6 +14,11 @@
 //! wherever the settings page is off; a dashboard is not a reason to open a
 //! port that was not open.
 //!
+//! `tea dash` writes the file either way, and opens that served copy in
+//! preference to it wherever the daemon is up to answer -- the file has no
+//! token, so it is the one copy of this page with no way back to your settings
+//! and no way to refresh itself. See [`show`].
+//!
 //! The numbers come from two places. Today's are read from the state file, the
 //! same way `tea status` reads them; everything older comes from the history
 //! log, which only exists from the moment a service new enough to write it
@@ -56,11 +61,26 @@ pub fn show(file: &FileConfig, cfg: &tea_core::Config, config_path: &Path, boott
     if !open {
         return;
     }
+
+    // Two copies of the same page exist, and only one of them can go anywhere.
+    // A file cannot carry the token -- deliberately, because this file gets
+    // mailed and screenshotted, and see `redact` -- so the file copy has no
+    // link to the settings page and no way to refresh itself. Where the daemon
+    // is up and already serving, that copy is the better one to hand over: the
+    // same numbers gathered per request, with both links live. The file is
+    // still written and still printed above; it is the copy you keep.
+    let live = served_copy(file, data["running"].as_bool().unwrap_or(false));
+    if let Some(url) = &live {
+        println!("tea: {url}");
+        println!("tea: opening the served copy — it refreshes, and it links to your settings");
+    }
+    let target = live.unwrap_or_else(|| out.display().to_string());
+
     // Detached on purpose, and its failure is not this command's failure: over
     // SSH, or on a machine with no desktop, there is nothing to open it with
     // and the path printed above is the whole of the answer.
     match std::process::Command::new("xdg-open")
-        .arg(&out)
+        .arg(&target)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -68,6 +88,16 @@ pub fn show(file: &FileConfig, cfg: &tea_core::Config, config_path: &Path, boott
         Ok(_) => println!("tea: opened in your browser"),
         Err(_) => println!("tea: nothing here to open it with — the file is yours to open"),
     }
+}
+
+/// The live copy to hand over instead of the file, where there is one.
+///
+/// Two things have to be true: the daemon is up (a URL for a service that is
+/// not answering is worse than a file that opens), and it is serving the page
+/// at all -- which is the settings page's switch, and a token to get past the
+/// door. Anything else and the file is the answer.
+fn served_copy(file: &FileConfig, running: bool) -> Option<String> {
+    (running && crate::web::serving(file)).then(|| crate::web::dash(&file.nfc))
 }
 
 /// The same page, built from whatever is on disk right now and handed back
@@ -145,6 +175,20 @@ fn gather(
             // for, and the chart draws no line rather than a line at nothing.
             "steps_wanted": if file.nfc.counts_steps() { file.nfc.steps.count } else { 0 },
             "hours": if file.hours.set() { file.hours.describe() } else { "always".to_string() },
+            // The hub's own address, so the header can link to it the way the
+            // settings page does — a service of its own, on its own address,
+            // needing nothing of tea's to reach, which is why that one link
+            // works from the file copy too.
+            //
+            // The address and nothing else. The token is not here and must
+            // never be: this page is written to be mailed and screenshotted,
+            // which is the whole reason `redact` exists below.
+            "hub": file.nfc.home_assistant.url.trim(),
+            // Whether there is a settings page to point at. The file copy of
+            // this page cannot link to it -- no token -- but it can say what
+            // opens it, and saying that on a machine with the page switched
+            // off would be pointing at a door that is not there.
+            "settings_page": crate::web::serving(file),
         },
         "config": {
             "path": status::tilde(config_path),
@@ -204,6 +248,44 @@ fn write(path: &Path, page: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// A file has no token in it, so the file copy of this page is the one copy
+    /// with no link to the settings page and no way to refresh itself. Where
+    /// the daemon is up and already serving, `tea dash` hands over that copy
+    /// instead -- but only where both of those hold.
+    #[test]
+    fn the_served_copy_is_preferred_only_where_there_is_one() {
+        let mut file = FileConfig::default();
+        assert_eq!(served_copy(&file, true), None, "no settings page, no served copy");
+
+        file.settings.page = crate::nfc::Mode::On;
+        assert_eq!(served_copy(&file, true), None, "a page with no token is a door nobody opens");
+
+        file.nfc.token = "abc".into();
+        file.nfc.listen = "127.0.0.1:9797".into();
+        assert_eq!(
+            served_copy(&file, true).as_deref(),
+            Some("http://127.0.0.1:9797/dash?token=abc"),
+            "switched on, with a token, and answering"
+        );
+        assert_eq!(
+            served_copy(&file, false),
+            None,
+            "a URL for a daemon that is not answering is worse than a file that opens"
+        );
+    }
+
+    #[test]
+    fn the_page_says_where_the_settings_are_even_when_it_cannot_link_there() {
+        assert!(
+            TEMPLATE.contains("SET.settings_page"),
+            "the file copy no longer reads whether there is a settings page to name"
+        );
+        assert!(
+            TEMPLATE.contains("tea settings"),
+            "and no longer names the command that opens it"
+        );
+    }
+
     #[test]
     fn the_page_has_somewhere_to_put_the_numbers() {
         assert!(
@@ -219,6 +301,42 @@ mod tests {
         let page = render("const DATA = /*__TEA_DATA__*/ null;", &data);
         assert!(!page.contains("</script>"), "the tag survived: {page}");
         assert!(page.contains("\\u003c/script>"), "and it should still be readable: {page}");
+    }
+
+    /// The hub's address belongs on the page — it is what the link in the
+    /// header is made of, and it is already in the config quoted at the foot.
+    /// Its token does not, ever: this page is written to be mailed,
+    /// screenshotted and opened on a phone.
+    #[test]
+    fn the_hubs_address_reaches_the_page_and_its_token_does_not() {
+        let dir = std::env::temp_dir().join(format!("tea-hub-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "[nfc]\nmode = \"on\"\n\n\
+             [nfc.home_assistant]\n\
+             url = \"http://hub.local:8123\"\n\
+             token = \"s3cret-hub-token\"\n\
+             entity = \"tag.front_door\"\n",
+        )
+        .unwrap();
+
+        let file = config::load(&path).unwrap();
+        let mut cfg: tea_core::Config = file.clone().into();
+        let _ = config::reconcile(&mut cfg);
+        let data = gather(&file, &cfg, &path, Duration::ZERO);
+
+        assert_eq!(
+            data["settings"]["hub"], "http://hub.local:8123",
+            "the address is there, so the link in the header works"
+        );
+        assert!(
+            !data.to_string().contains("s3cret-hub-token"),
+            "the token reached the page: {data}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -138,11 +138,15 @@ views:
             color: green
             tap_action:
               action: none
-          - type: statistic
-            entity: sensor.tea_worked_today
+          # Minutes and hours both, `1,020 min (17.0 h)`: a statistic card can
+          # only show a bare number, so this reads a template sensor over a
+          # utility meter that adds the daily counter up across its midnight
+          # resets. `push.py dashboard` makes both helpers and seeds the meter
+          # from the recorder, so the total starts where the old card was.
+          - type: tile
+            entity: sensor.tea_worked_since_start
             name: Worked
-            stat_type: change
-            period:
-              rolling_window:
-                duration:
-                  days: 365
+            icon: mdi:briefcase-clock
+            color: purple
+            tap_action:
+              action: none

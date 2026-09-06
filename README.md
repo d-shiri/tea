@@ -632,8 +632,10 @@ for them: `sensor.tea_worked` (minutes towards the next break),
 to five numbers and two pictures: breaks, steps in breaks, all steps, and
 work today; the day's walking as two rising lines, steps in breaks against
 the phone's own count; breaks as a bar a day for a month; and the same three
-numbers added up since tea started reporting. The phone's step sensor is the
-one entity in it that is yours to fill in. For Settings → Dashboards → Add
+numbers added up since tea started reporting, work as minutes and hours both
+(`1,020 min (17.0 h)`, off two helpers `push.py dashboard` makes: a utility
+meter over `sensor.tea_worked_today` and a template sensor that spells it out).
+The phone's step sensor is the one entity in it that is yours to fill in. For Settings → Dashboards → Add
 dashboard → raw configuration editor, or `push.py` below. `dist/home-assistant/automations.yaml`
 is the hall light, the speaker, and the phone, on the events above. Neither
 needs the clipboard: `dist/home-assistant/push.py dashboard` creates or
@@ -723,17 +725,33 @@ tea settings
 does whatever is still needed — switches the page on in the file, writes a
 token under `[port]` if there is none, restarts the service so it hears about
 both — and opens `http://127.0.0.1:9797/settings` with the token in the
-address. No tag is involved and none is needed. The page shows the file one
-setting to a row, two columns of sections on a wide screen — the comment
-beside each one as its help, `"on"`/`"off"` as a switch, everything else as
-text — with a search box at the top that narrows it to the rows whose name,
-section or help mention what you typed. *Save* sends the whole file back; tea
-parses it the way it parses it at start-up, refuses it with the line and
-column if it would not load, and writes it in one move if it would. *Apply
-changes* does the same and then restarts tea on it, the way `tea reload`
-does; it appears whenever there is something to apply. Comments, blank lines
-and column alignment survive a save, because the page only ever swaps the
-value on the lines you touched.
+address. No tag is involved and none is needed.
+
+The page shows the file one setting to a row, two columns of cards on a wide
+screen — the comment beside each one as its help, `"on"`/`"off"` as a switch,
+everything else as text — with a search box at the top that narrows it to the
+rows whose name, section, help or current value mention what you typed, and a
+pill beside the mark saying what tea is doing while you edit it.
+
+It shows the settings your file has *never* mentioned as well, which is the
+only way some of them can be reached at all: a file with no `[hours]` in it
+has no working hours to edit, and a page that can only draw the lines you
+already have has nowhere to put them. So every setting tea has is drawn from
+the file as it ships — dashed and dim, with what it would be if you never
+said sitting in the box as a placeholder and the shipped file's own words
+about it alongside. Type in one and it turns solid: a line about to be
+written. A section you have never touched is a card of its own, marked *not
+set*, and gains a `[section]` heading in your file the moment you fill in a
+row of it.
+
+*Save* sends the whole file back; tea parses it the way it parses it at
+start-up, refuses it with the line and column if it would not load, and writes
+it in one move if it would. *Apply changes* does the same and then restarts tea
+on it, the way `tea reload` does; it appears whenever there is something to
+apply. Comments, blank lines and column alignment survive a save: the page only
+ever swaps the value on the lines you touched, and a line it adds goes at the
+end of its own section with the shipped file's note in the same column the rest
+of the file keeps its comments in.
 
 Nothing new is listening. The page is served on `[port]`, the same socket
 that hears the tag when tea does its own listening, behind the same token —
@@ -800,6 +818,11 @@ was walked, and whether the tag was the thing that ended it. Postpones and
 credited absences get a line each too. `tea dash` reads that log, builds a page
 out of it and opens it:
 
+- **five tiles across the top** — today, breaks, steps a break, tasks done and
+  the streak — each with where that number stood one window ago beside it, up or
+  down, with both raw counts under the pointer. A window the log does not reach
+  all the way back through gets no comparison rather than an invented one, so
+  the chips appear when there is a like for like and not before.
 - **steps per break**, one dot each, against the line the gate asks for. The
   chart that says whether the walks are walks or a tag within reach of the chair.
 - **breaks a day**, split into the ones the page ran and the ones you had
@@ -810,8 +833,9 @@ out of it and opens it:
 
 It is a file first. Nothing listens on its account, no port opens for it, and
 nothing is fetched from the network to draw it: the page is written to
-`$XDG_STATE_HOME/tea/dash.html` and handed to your browser. `--no-open` prints
-the path and stops there, which is what you want over SSH.
+`$XDG_STATE_HOME/tea/dash.html`, and that is the copy you keep — mail it to
+yourself, open it on a plane. `--no-open` prints the path and stops there,
+which is what you want over SSH.
 
 Where the settings page above is switched on there is a port already, and the
 same page is served on it at `/dash` behind the same token — one link from the
@@ -819,6 +843,21 @@ settings page, and one link back. That copy reads its numbers when you ask for
 them rather than when a file was written, and it carries a *Refresh* of its
 own, because the token is taken back out of the address bar the moment the
 page has read it.
+
+Its header carries a *Home Assistant* link too, the same one the settings page
+has, wherever `[nfc.home_assistant] url` is set. The hub is a service of its
+own on its own address and needs nothing of tea's to reach, so that link works
+from the written file as well as from the served copy — the address goes on the
+page, the token never does.
+
+`tea dash` writes the file either way and opens **that** copy in preference to
+it, wherever the daemon is up to answer — the file is the one copy of this page
+with nowhere much of its own to go. It cannot carry the token, deliberately: the token is kept
+out of a file that gets mailed and screenshotted, which is the same reason
+anything called `token` is blanked out of the config quoted at the foot of it.
+So opened on its own the file names `tea settings` in its header rather than
+pretending to link there, and where no page is switched on it says nothing at
+all.
 
 The file carries your config at the foot of it, read-only, with anything called
 `token` blanked out on the way in — and it is written `chmod 600` regardless,

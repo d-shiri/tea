@@ -6,113 +6,238 @@
 <title>tea settings</title>
 <link rel="icon" href="data:image/png;base64,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">
 <style>
-  html { color-scheme: dark }
-  body {
-    margin: 0; padding: 0 1rem 5rem; background: #0d1017; color: #e6e9f0;
-    font: 400 13.5px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
-  }
-  header {
-    position: sticky; top: 0; z-index: 2; background: #0d1017; border-bottom: 1px solid rgba(255,255,255,.08);
-    display: flex; align-items: center; gap: .8rem; padding: .7rem 0; margin-bottom: .6rem;
-  }
-  header img { width: 32px; height: 32px }
-  header h1 { font: 300 1.3rem/1 system-ui, sans-serif; margin: 0 }
-  header p { margin: 0; color: #626d86; font-size: .8rem }
-  #hub, #board {
-    display: inline-flex; align-items: center; gap: .4rem; color: #9aa5bd; text-decoration: none;
-    font-size: .85rem; padding: .35rem .7rem; border: 1px solid rgba(255,255,255,.1); border-radius: 2rem; white-space: nowrap;
-    transition: color .15s, border-color .15s;
-  }
-  #board { margin-left: auto }
-  /* With no dashboard to link to, the hub link takes the space back. */
-  #board[hidden] + #hub { margin-left: auto }
-  #hub:hover, #board:hover { color: #eef1f7; border-color: rgba(255,255,255,.25) }
-  #hub .ha { margin: 0; opacity: .8 }
-  #q { width: min(18rem, 45vw); background: #171d2c; color: #eef1f7; border: 1px solid rgba(255,255,255,.1);
-    border-radius: 2rem; padding: .4rem .9rem; font: inherit;
-  }
-  #q:focus { outline: none; border-color: #7aa2ff }
-  main { max-width: 84rem; margin: 0 auto }
-  .cols { columns: 1; column-gap: 2.5rem }
-  @media (min-width: 60rem) { .cols { columns: 2 } }
-  hr { border: 0; border-top: 1px solid rgba(255,255,255,.14); margin: 1.4rem 0 1rem }
-  h2.big { font-size: .9rem; letter-spacing: .1em; color: #b8c0d2; border: 0; margin-bottom: .6rem }
-  section { break-inside: avoid; margin-bottom: 1rem }
-  h2 {
-    font: 500 .72rem/1 system-ui, sans-serif; letter-spacing: .12em; text-transform: uppercase;
-    color: #79839c; margin: 0 0 .3rem; padding-bottom: .3rem; border-bottom: 1px solid rgba(255,255,255,.08);
-  }
-  label { display: grid; grid-template-columns: 7.5rem 11rem 1fr; gap: .6rem; align-items: center; padding: .15rem 0 }
-  label > span { color: #b8c0d2; font: .85rem ui-monospace, "DejaVu Sans Mono", monospace; overflow: hidden; text-overflow: ellipsis }
-  label > small { color: #626d86; font-size: .76rem; line-height: 1.25 }
-  label > div:empty { display: none }
-  #common label { grid-template-columns: 9.5rem 11rem 1fr }
-  input, select {
-    box-sizing: border-box; width: 100%; background: #171d2c; color: #eef1f7; border: 1px solid rgba(255,255,255,.1);
-    border-radius: .35rem; padding: .25rem .5rem; font: .85rem ui-monospace, "DejaVu Sans Mono", monospace;
-  }
-  input:focus, select:focus { outline: none; border-color: #7aa2ff }
-  .changed { border-color: #c98500 }
-  footer {
-    position: fixed; left: 0; right: 0; bottom: 0; background: #0d1017; border-top: 1px solid rgba(255,255,255,.08);
-    padding: .6rem 1rem; display: flex; gap: .6rem; align-items: center; flex-wrap: wrap;
-  }
-  button {
-    background: #171d2c; color: #b8c0d2; border: 1px solid rgba(255,255,255,.1); border-radius: .45rem;
-    padding: .45rem 1rem; font: 500 .9rem system-ui, sans-serif; cursor: pointer;
-  }
-  #save { background: #7aa2ff; color: #0d1017; border-color: transparent }
-  #apply { background: #4ade80; color: #0d1017; border-color: transparent }
-  button:disabled { opacity: .4; cursor: default }
-  #note { color: #79839c; white-space: pre-wrap; font: .8rem ui-monospace, monospace; flex: 1 1 12rem }
-  #note.bad { color: #ff8a80 }
-  #note.good { color: #4ade80 }
-  .warn {
-    grid-column: 1 / -1; margin: .2rem 0 .4rem; padding: .5rem .7rem; border: 1px solid #c98500; border-radius: .4rem;
-    background: rgba(201,133,0,.08); color: #e6c98a; font-size: .8rem; line-height: 1.35;
-  }
-  .warn button { margin: .4rem .4rem 0 0; padding: .25rem .7rem; font-size: .8rem }
-  .warn .sure { background: #c98500; color: #0d1017; border-color: transparent }
-  .ha { display: inline-block; width: 13px; height: 13px; margin-left: .4rem; vertical-align: -2px; opacity: .55 }
-  h2 .ha { vertical-align: -3px }
-  [hidden] { display: none !important }
+/* The dashboard's palette, tokens and easing, to the value: these are two
+   halves of one thing, and a browser with both open should not be able to tell
+   which page it is looking at without reading the words. Anything changed here
+   is changed in dash.html too. */
+:root {
+  color-scheme: dark;
+  --bg:       #080a10;
+  --card-hi:  #171d2c;
+  --card-lo:  #10151f;
+  --field:    #10141f;
+  --line:     rgba(255,255,255,.07);
+  --line-2:   rgba(255,255,255,.13);
+  --ink:      #eef1f7;
+  --ink-2:    #9aa5bd;
+  --ink-3:    #626d86;
+  --s1: #3987e5;   /* the primary action                    */
+  --s2: #d95926;
+  --s3: #199e70;   /* a line about to be added to the file  */
+  --s4: #c98500;   /* a line about to be changed            */
+  --sans:    "Noto Sans", Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --display: Cantarell, "SF Pro Display", "Segoe UI Variable Display", Inter, system-ui, sans-serif;
+  --mono:    ui-monospace, "Noto Sans Mono", "DejaVu Sans Mono", monospace;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
 
-  /* Motion, kept to the two things it can actually say here: the page dealing
-     itself out when it arrives, and a control that has changed state having
-     changed rather than having always been that way. Same easing and the same
-     speeds as the dashboard next door, because they are two halves of one
-     thing and a browser with both open should not be able to tell them apart.
-     Nothing loops: this is a form, and the only thing on it worth watching is
-     whatever you are typing into. */
-  @keyframes rise { from { opacity: 0; transform: translateY(8px) } to { opacity: 1; transform: none } }
-  section, #common { animation: rise .45s cubic-bezier(.16,1,.3,1) backwards }
-  input, select { transition: border-color .15s, background-color .15s }
-  button { transition: background-color .15s, color .15s, border-color .15s, opacity .15s }
-  button:not(:disabled):hover { border-color: rgba(255,255,255,.28) }
-  #save:not(:disabled):hover { background: #93b4ff }
-  #apply:not(:disabled):hover { background: #6ee79b }
-  .warn .sure:hover { background: #dd9714 }
-  /* The page's one channel for saying anything back. See `say`. */
-  #note { animation: rise .3s ease backwards; transition: color .15s }
-  .warn { animation: rise .3s cubic-bezier(.16,1,.3,1) backwards }
-  @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after { animation: none !important; transition: none !important }
-  }
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--ink);
+  background:
+    radial-gradient(1100px 520px at 22% -240px, rgba(57,135,229,.16), transparent 70%),
+    radial-gradient(900px 460px at 88% -160px, rgba(25,158,112,.10), transparent 70%),
+    var(--bg);
+  background-attachment: fixed;
+  font: 400 15px/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1160px; margin: 0 auto; padding: 0 1.5rem 6.5rem; }
 
-  @media (max-width: 40rem) { label { grid-template-columns: 1fr 1fr } label > small { grid-column: 1 / -1 } }
+/* ---- header ------------------------------------------------------------ */
+header {
+  position: sticky; top: 0; z-index: 5;
+  display: flex; align-items: center; gap: .8rem; flex-wrap: wrap;
+  padding: 1.05rem 0 .85rem; margin-bottom: 1.4rem;
+  background: rgba(8,10,16,.86);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--line);
+}
+.mark {
+  font: 300 2.1rem/1 var(--display); letter-spacing: -.03em; margin: 0;
+  background: linear-gradient(100deg, #fff 20%, #86b6ef 130%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.pill {
+  display: inline-flex; align-items: center; gap: .45rem;
+  border: 1px solid var(--line); border-radius: 999px; padding: .28rem .7rem .28rem .55rem;
+  font-size: .78rem; color: var(--ink-2); background: rgba(255,255,255,.025); white-space: nowrap;
+}
+.pill .dot { width: 7px; height: 7px; border-radius: 999px; background: var(--s3); box-shadow: 0 0 0 3px rgba(25,158,112,.18); }
+.pill.cold .dot { background: var(--ink-3); box-shadow: none; }
+.pill.busy .dot { background: var(--s4); box-shadow: 0 0 0 3px rgba(201,133,0,.18); }
+a.pill { text-decoration: none; transition: color .15s, border-color .15s; }
+a.pill:hover { color: var(--ink); border-color: var(--line-2); }
+.meta { color: var(--ink-3); font-size: .8125rem; }
+#q {
+  margin-left: auto; width: min(19rem, 44vw);
+  background: rgba(255,255,255,.03); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 999px;
+  padding: .42rem .95rem; font: 400 .85rem var(--sans);
+  transition: border-color .15s, background .15s;
+}
+#q::placeholder { color: var(--ink-3); }
+#q:focus { outline: none; border-color: rgba(122,162,255,.55); background: rgba(255,255,255,.05); }
+
+/* One weight, one size, `currentColor`: an icon here sits beside a word and
+   must not out-shout it. The same set the dashboard draws, at the same size. */
+.i { width: 15px; height: 15px; flex: none; fill: none; stroke: currentColor;
+     stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.pill .i, button .i { width: 13px; height: 13px; }
+.key .i { width: 12px; height: 12px; opacity: .55; }
+
+/* ---- the two blocks ---------------------------------------------------- */
+h2.big {
+  display: flex; align-items: center; gap: .45rem;
+  font: 600 .6875rem/1 var(--sans); letter-spacing: .09em; text-transform: uppercase;
+  color: var(--ink-3); margin: 0 0 .7rem;
+}
+h2.big + .cols { margin-bottom: 2.1rem; }
+.cols { columns: 1; column-gap: 14px; }
+@media (min-width: 62rem) { .cols { columns: 2; } }
+
+/* ---- cards ------------------------------------------------------------- */
+section {
+  break-inside: avoid; margin: 0 0 14px;
+  padding: 1.05rem 1.2rem 1.15rem;
+  border: 1px solid var(--line); border-radius: 16px;
+  background: linear-gradient(168deg, var(--card-hi), var(--card-lo) 62%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.045), 0 10px 26px -18px #000c;
+  animation: rise .5s cubic-bezier(.16,1,.3,1) backwards;
+  transition: border-color .18s;
+}
+section:hover { border-color: var(--line-2); }
+section > h2 {
+  display: flex; align-items: center; gap: .45rem;
+  font: 600 .82rem/1.2 var(--mono); color: var(--ink-2); margin: 0;
+}
+section > h2 .i { color: var(--ink-3); }
+/* A card with nothing of yours in it has no divider to explain its dashes,
+   because there is nothing above them to divide from. This says it instead. */
+section > h2 .tag {
+  margin-left: auto; padding: .18rem .45rem; border-radius: 999px;
+  border: 1px dashed var(--line-2); color: var(--ink-3);
+  font: 600 .6rem/1 var(--sans); letter-spacing: .08em; text-transform: uppercase;
+}
+section > .blurb {
+  color: var(--ink-3); font-size: .78rem; line-height: 1.45; margin: .35rem 0 .75rem;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+section > h2 + label { margin-top: .7rem; }
+
+/* ---- rows -------------------------------------------------------------- */
+label {
+  display: grid; grid-template-columns: 8.4rem minmax(0, 10.5rem) 1fr;
+  gap: .45rem .8rem; align-items: center; padding: .2rem 0;
+}
+label > .key {
+  display: flex; align-items: center; gap: .3rem; min-width: 0;
+  color: var(--ink-2); font: 400 .8rem/1.3 var(--mono);
+}
+label > .key > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+label > small {
+  color: var(--ink-3); font-size: .74rem; line-height: 1.35;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+label > small:empty, label > div:empty { display: none; }
+
+input, select {
+  width: 100%; background: var(--field); color: var(--ink);
+  border: 1px solid var(--line-2); border-radius: .5rem;
+  padding: .32rem .55rem; font: 400 .82rem var(--mono);
+  transition: border-color .15s, background-color .15s, color .15s;
+}
+input::placeholder { color: #4a5468; }
+input:focus, select:focus { outline: none; border-color: rgba(122,162,255,.65); background: #131a28; }
+/* Amber: this line is in your file and about to read differently. */
+.changed { border-color: var(--s4); }
+
+/* Dashed and dim: the shipped file has this setting, yours has never said.
+   Solid and green once you say something: a line about to be written. */
+label.unset > .key { color: var(--ink-3); }
+label.unset input, label.unset select { border-style: dashed; color: var(--ink-3); background: rgba(255,255,255,.014); }
+label.added > .key { color: var(--ink); }
+label.added input, label.added select { border-style: solid; border-color: var(--s3); color: var(--ink); background: var(--field); }
+
+.rule {
+  display: flex; align-items: center; gap: .55rem; margin: .95rem 0 .35rem;
+  color: var(--ink-3); font: 600 .64rem/1 var(--sans); letter-spacing: .09em; text-transform: uppercase;
+}
+.rule::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
+/* ---- the strict warning ------------------------------------------------ */
+.warn {
+  grid-column: 1 / -1; margin: .45rem 0 .3rem; padding: .6rem .75rem;
+  border: 1px solid rgba(201,133,0,.55); border-radius: 12px;
+  background: rgba(201,133,0,.09); color: #e6c98a; font-size: .78rem; line-height: 1.45;
+  animation: rise .3s cubic-bezier(.16,1,.3,1) backwards;
+}
+.warn button { margin: .5rem .4rem 0 0; padding: .28rem .8rem; font-size: .78rem; }
+.warn .sure { background: var(--s4); color: #140d00; border-color: transparent; }
+.warn .sure:not(:disabled):hover { background: #dd9714; color: #140d00; }
+
+/* ---- footer ------------------------------------------------------------ */
+footer {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 6;
+  display: flex; gap: .6rem; align-items: center; flex-wrap: wrap;
+  padding: .7rem 1.5rem;
+  background: rgba(8,10,16,.92);
+  backdrop-filter: blur(10px);
+  border-top: 1px solid var(--line);
+}
+button {
+  display: inline-flex; align-items: center; gap: .4rem;
+  background: rgba(255,255,255,.04); color: var(--ink-2);
+  border: 1px solid var(--line-2); border-radius: 999px;
+  padding: .45rem 1rem; font: 600 .84rem var(--sans); cursor: pointer;
+  transition: background-color .15s, color .15s, border-color .15s, opacity .15s;
+}
+button:not(:disabled):hover { color: var(--ink); border-color: rgba(255,255,255,.28); background: rgba(255,255,255,.07); }
+button:disabled { opacity: .35; cursor: default; }
+#save { background: var(--s1); color: #06101d; border-color: transparent; }
+#save:not(:disabled):hover { background: #57a0f0; color: #06101d; }
+#apply { background: var(--s3); color: #03130d; border-color: transparent; }
+#apply:not(:disabled):hover { background: #22b883; color: #03130d; }
+#note {
+  flex: 1 1 12rem; margin-left: .3rem; color: var(--ink-3);
+  white-space: pre-wrap; font: 400 .78rem/1.4 var(--mono);
+  animation: rise .3s ease backwards; transition: color .15s;
+}
+#note.bad { color: #ff9b90; }
+#note.good { color: #74d3ab; }
+
+/* Motion, kept to the two things it can say here: the page dealing itself out
+   when it arrives, and a control that has changed state having changed rather
+   than having always been that way. Same easing and the same speeds as the
+   dashboard. Nothing loops: this is a form, and the only thing on it worth
+   watching is whatever you are typing into. */
+@keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+@media (max-width: 44rem) {
+  label { grid-template-columns: 1fr 1fr; }
+  label > small { grid-column: 1 / -1; }
+  #q { width: 100%; margin-left: 0; }
+  .mark { font-size: 1.8rem; }
+}
 </style>
 </head>
 <body>
-<main>
+<div class="wrap">
   <header>
-    <img src="data:image/png;base64,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" alt="">
-    <div><h1>tea</h1><p>Save writes the file. Apply restarts tea with it.</p></div>
-    <a id="board" href="#" hidden>Dashboard</a>
-    <a id="hub" href="#" target="_blank" rel="noopener" hidden>Home Assistant</a>
+    <h1 class="mark">tea</h1>
+    <span class="pill cold" id="pill"><i class="dot"></i><span id="pilltext">…</span></span>
+    <span class="meta" id="meta"></span>
     <input id="q" type="search" placeholder="Search settings…" autocomplete="off" spellcheck="false">
+    <a class="pill" id="board" href="#" hidden>Dashboard</a>
+    <a class="pill" id="hub" href="#" target="_blank" rel="noopener" hidden>Home Assistant</a>
   </header>
   <form id="f"></form>
-</main>
+</div>
 <footer>
   <button id="save" form="f" disabled>Save</button>
   <button id="apply" type="button" hidden>Apply changes</button>
@@ -129,6 +254,73 @@
   history.replaceState(null, '', location.pathname);
   const auth = { 'X-Tea-Token': token };
 
+  const form = document.getElementById('f');
+  const note = document.getElementById('note');
+  const save = document.getElementById('save');
+  const apply = document.getElementById('apply');
+  const meta = document.getElementById('meta');
+  const pill = document.getElementById('pill');
+  const pilltext = document.getElementById('pilltext');
+  const q = document.getElementById('q');
+
+  let lines = [];                        // the file, one entry per line, as read
+  let fields = [];                       // every setting on the page, set or not
+  let cards = [];                        // {el, name, rows}
+  let top = [];                          // the common block and its two headings
+  let where = new Map();                 // section name -> where a new line goes
+  let cat = { map: new Map(), blurb: new Map() };  // the shipped file, catalogued
+  let unsure = false;                    // strict picked but not yet confirmed
+  let pending = false;                   // saved, but tea runs the old file still
+
+  const el = (tag, text) => { const e = document.createElement(tag); if (text != null) e.textContent = text; return e; };
+
+  // ---- icons -------------------------------------------------------------
+  // The dashboard's set, drawn the same way: stroked, one weight, in
+  // `currentColor`. Every string here is a constant in this file -- nothing
+  // read from the config ever reaches innerHTML.
+  const ICONS = {
+    cup:       '<path d="M5 8.5h10.5v4.8a5.25 5.25 0 0 1-10.5 0Z"/><path d="M15.5 10h1.6a2.5 2.5 0 0 1 0 5h-1.6"/><path d="M8 2.8c-.7.9-.7 1.8 0 2.7M11.5 2.8c-.7.9-.7 1.8 0 2.7"/><path d="M3.8 20.6h13"/>',
+    moon:      '<path d="M20.5 14.2A8.5 8.5 0 1 1 9.8 3.5a6.6 6.6 0 0 0 10.7 10.7Z"/>',
+    skip:      '<path d="M4 5.6 12 12l-8 6.4Z"/><path d="M13 5.6 21 12l-8 6.4Z"/>',
+    phone:     '<path d="M21.4 16.9v2.7a1.9 1.9 0 0 1-2.1 1.9 18.7 18.7 0 0 1-8.1-2.9 18.4 18.4 0 0 1-5.7-5.7A18.7 18.7 0 0 1 2.6 4.7 1.9 1.9 0 0 1 4.5 2.6h2.7a1.9 1.9 0 0 1 1.9 1.6c.1 1 .3 1.9.7 2.7a1.9 1.9 0 0 1-.4 2L8.3 10.1a15 15 0 0 0 5.6 5.6l1.2-1.1a1.9 1.9 0 0 1 2-.4c.8.3 1.7.6 2.7.7a1.9 1.9 0 0 1 1.6 1.9Z"/>',
+    clock:     '<circle cx="12" cy="12" r="8.6"/><path d="M12 6.9V12l3.5 2.1"/>',
+    hourglass: '<path d="M6.8 3h10.4M6.8 21h10.4"/><path d="M7.8 3v3.1c0 1.9 1.5 3 2.9 4.1l1.3 1v1.6l-1.3 1c-1.4 1.1-2.9 2.2-2.9 4.1V21"/><path d="M16.2 3v3.1c0 1.9-1.5 3-2.9 4.1l-1.3 1v1.6l1.3 1c1.4 1.1 2.9 2.2 2.9 4.1V21"/>',
+    lock:      '<rect x="4" y="10.4" width="16" height="10.4" rx="2.4"/><path d="M8 10.4V7a4 4 0 0 1 8 0v3.4"/>',
+    volume:    '<path d="M11 4.8 6.4 8.9H3v6.2h3.4L11 19.2Z"/><path d="M15.4 8.8a4.4 4.4 0 0 1 0 6.4M18.4 5.8a8.6 8.6 0 0 1 0 12.4"/>',
+    sparkle:   '<path d="M12 3.2 13.9 8.4 19.2 10.3 13.9 12.2 12 17.4 10.1 12.2 4.8 10.3 10.1 8.4Z"/><path d="M18.4 15.4l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7Z"/>',
+    monitor:   '<rect x="2.6" y="4" width="18.8" height="13" rx="2.4"/><path d="M8.6 21h6.8M12 17v4"/>',
+    server:    '<rect x="3" y="4" width="18" height="7" rx="2.2"/><rect x="3" y="13" width="18" height="7" rx="2.2"/><circle cx="6.9" cy="7.5" r=".55" fill="currentColor" stroke="none"/><circle cx="6.9" cy="16.5" r=".55" fill="currentColor" stroke="none"/>',
+    nfc:       '<path d="M6.4 8.6a7.4 7.4 0 0 1 0 6.8M10.2 5.4a12.6 12.6 0 0 1 0 13.2M14 2.6a17.6 17.6 0 0 1 0 18.8"/><circle cx="3.4" cy="12" r="1.1" fill="currentColor" stroke="none"/>',
+    hub:       '<path d="M3.2 11.6 12 3.2l8.8 8.4V20.8H3.2Z"/><path d="M12 20.8v-8.4M12 14.9 8.7 11.7M12 17.2l3.3-3.3"/>',
+    walk:      '<circle cx="13.3" cy="4.3" r="2"/><path d="M10.8 21.2l1.6-6-2.5-2.3.9-4.7 3.4 2.2 2.7.8"/><path d="M9 10.4 6.7 13.6l1.5 7.6"/>',
+    pulse:     '<path d="M2.5 12h4.2l2.4-6.8 4.1 13.6 2.4-6.8h4.9"/>',
+    check:     '<path d="M3.5 6.6 5.2 8.3 8.4 5M3.5 13.1 5.2 14.8 8.4 11.5M3.5 19.6 5.2 21.3 8.4 18"/><path d="M11.8 6.7h8.7M11.8 13.2h8.7M11.8 19.7h8.7"/>',
+    sliders:   '<path d="M4 6.5h8.3M17.6 6.5h2.4M4 12h3.4M12.6 12h7.4M4 17.5h8.3M17.6 17.5h2.4"/><circle cx="15" cy="6.5" r="2.2"/><circle cx="10" cy="12" r="2.2"/><circle cx="15" cy="17.5" r="2.2"/>',
+    star:      '<path d="M12 3.4 14.5 9l6.1.6-4.6 4.1 1.3 6L12 16.6 6.7 19.7l1.3-6L3.4 9.6 9.5 9Z"/>',
+    bars:      '<path d="M3.5 20.6h17"/><path d="M6.8 17.2V10.6M12 17.2V4.9M17.2 17.2v-3.9"/>',
+    dot:       '<circle cx="12" cy="12" r="3.2"/>',
+  };
+  const icon = name => {
+    const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    s.setAttribute('class', 'i');
+    s.setAttribute('viewBox', '0 0 24 24');
+    s.setAttribute('aria-hidden', 'true');
+    s.innerHTML = ICONS[name] || ICONS.dot;
+    return s;
+  };
+  // One picture per section, so the cards can be told apart down the page
+  // without reading every heading.
+  const SECTION_ICON = {
+    general: 'cup', idle: 'moon', postpone: 'skip', calls: 'phone', hours: 'clock',
+    long: 'hourglass', hold: 'lock', sound: 'volume', animation: 'sparkle',
+    page: 'monitor', port: 'server', nfc: 'nfc', 'nfc.home_assistant': 'hub',
+    'nfc.steps': 'walk', 'nfc.moving': 'pulse', 'nfc.chores': 'check', settings: 'sliders',
+  };
+  const iconFor = name => SECTION_ICON[name] || 'dot';
+  // Put beside anything read from the hub, so the rows that need it to be
+  // reachable can be told from the rows that do not.
+  const fromHub = (section, key) => section === 'nfc.home_assistant' || key === 'entity';
+
   // The dashboard is served off the same port and behind the same token, so
   // the link has to carry it: this page has just taken it out of the address
   // bar, and the only copy left is the one above. An absolute path rather than
@@ -137,66 +329,47 @@
   if (token) {
     const board = document.getElementById('board');
     board.href = '/dash?token=' + encodeURIComponent(token);
+    board.prepend(icon('bars'));
     board.hidden = false;
   }
 
-  const form = document.getElementById('f');
-  const note = document.getElementById('note');
-  const save = document.getElementById('save');
-  const apply = document.getElementById('apply');
-  const q = document.getElementById('q');
-  let lines = [];    // the file, one entry per line, exactly as read
-  let fields = [];   // the lines that are `key = value`, with their inputs
-  let sections = []; // {el, rows}
-  let top = [];      // the common block, the rule and the heading under it
-  // What goes in the common block, in this order: the things that get
-  // changed week to week rather than once.
-  const COMMON = ['work', 'break', 'warn_before', 'idle.credit', 'idle.pause', 'postpone.budget', 'hold.mode',
+  // What goes in the common block, in this order: the things that get changed
+  // week to week rather than once.
+  const COMMON = ['work', 'break', 'warn_before', 'hours.from', 'hours.to', 'hours.days',
+    'long.every', 'long.length', 'idle.credit', 'idle.pause', 'postpone.budget', 'hold.mode',
     'nfc.mode', 'nfc.steps.mode', 'nfc.steps.count', 'nfc.chores.mode', 'nfc.chores.show'];
-  let pending = false; // saved, but the daemon is still running the old file
-
-  const el = (tag, text) => { const e = document.createElement(tag); if (text != null) e.textContent = text; return e; };
-  // The Home Assistant mark, drawn small and grey: a house with the node
-  // tree cut out of it. Put beside anything read from the hub, so the rows
-  // that need it to be reachable can be told from the rows that do not.
-  const HA = '<svg class="ha" viewBox="0 0 24 24" aria-label="Home Assistant"><path fill="#6b7590" d="M12 2.5 21.5 11.7V21.5H2.5V11.7Z"/>'
-    + '<g stroke="#0d1017" stroke-width="1.5" fill="none"><path d="M12 21.5V9.5M12 14.2 7.6 10M12 16.5l4.4-4.2"/></g>'
-    + '<g fill="#0d1017"><circle cx="12" cy="8.6" r="1.7"/><circle cx="7" cy="9.4" r="1.5"/><circle cx="17" cy="11.6" r="1.5"/></g></svg>';
-  const fromHub = (section, key) => section === 'nfc.home_assistant' || key === 'entity';
-  // Settings with a fixed handful of answers get a box to pick from.
+  // Settings with a fixed handful of answers get a box to pick from. Anything
+  // that can also be a list of your own -- page.prompts -- is left as text.
   const CHOICES = {
     'hold.mode': ['soft', 'insist', 'strict'],
     'sound.mode': ['chime', 'voice', 'both', 'off'],
     'page.background': ['dark', 'dim'],
     'nfc.steps.sync': ['live', 'batched'],
   };
-  // Strict takes the Super key away for every break. Chosen on purpose or
-  // not at all: the page will not save it until this has been answered.
-  let unsure = false;
+  // Settings that read like a switch and are not one: "off" is one of the
+  // answers, and a time, a duration or a list of your own lines are the
+  // others. A box to pick from would take those away, so these get a box to
+  // type in with the answers offered beside it.
+  const SUGGEST = {
+    'hours.from': ['off', '09:00'],
+    'hours.to': ['off', '17:30'],
+    'page.prompts': ['off', 'on'],
+    'nfc.grace': ['10m', 'off'],
+  };
+
+  const full = (section, key) => (section === 'general' ? '' : section + '.') + key;
   const say = (text, tone) => {
     note.textContent = text;
     note.className = tone || '';
     // Play the entrance again. A CSS animation runs once per element, so a
     // second save would otherwise change the words with nothing to say that
     // anything had happened -- and "saved" twice in a row, which is the case
-    // this is for, does not change the words either. Removing the animation,
-    // reading a layout property to force the change through, and putting it
-    // back is the whole of the trick.
+    // this is for, does not change the words either.
     note.style.animation = 'none';
     void note.offsetWidth;
     note.style.animation = '';
   };
-  const dirty = () => fields.some(f => f.input.value !== f.shown);
-  // Two inputs for one line: whichever is typed in, the other follows.
-  function twin(a, b, shown) {
-    const follow = (from, to) => from.addEventListener('input', () => {
-      to.value = from.value;
-      for (const i of [from, to]) i.classList.toggle('changed', i.value !== shown);
-      buttons();
-    });
-    follow(a, b);
-    follow(b, a);
-  }
+  const dirty = () => fields.some(f => f.inputs.length && f.inputs[0].value !== f.shown);
   function buttons() {
     save.disabled = !dirty() || unsure;
     apply.hidden = !(dirty() || pending);
@@ -218,88 +391,274 @@
   const unquote = s => s.replace(/\\(["\\])/g, '$1');
   const quote = s => '"' + s.replace(/["\\]/g, '\\$&') + '"';
 
-  function render(text) {
-    lines = text.split('\n');
-    fields = [];
-    sections = [];
-    form.textContent = '';
-    const common = el('div'); common.className = 'cols'; common.id = 'common';
-    const all = el('div'); all.className = 'cols';
-    const rule = el('hr');
-    const heading = el('h2', 'All settings'); heading.className = 'big';
-    const commonHead = el('h2', 'Common'); commonHead.className = 'big';
-    top = [commonHead, common, rule, heading];
-    form.append(commonHead, common, rule, heading, all);
-    const picks = new Map();
-    let section = null;
-    const open = name => {
-      section = { el: el('section'), name, rows: [] };
-      const h = el('h2', name);
-      if (fromHub(name, '')) h.insertAdjacentHTML('beforeend', HA);
-      section.el.append(h);
-      // Dealt out one after another rather than all at once, and capped: a
-      // config with thirty sections in it should still have finished arriving
-      // by the time anybody has read the first heading.
-      section.el.style.animationDelay = Math.min(300, sections.length * 22) + 'ms';
-      all.append(section.el);
-      sections.push(section);
-    };
-    const make = (key, shown, str, name) => {
-      const choices = str && (CHOICES[name + '.' + key] || (/^(on|off)$/.test(shown) ? ['on', 'off'] : null));
-      let input;
-      if (choices) {
-        input = el('select');
-        if (!choices.includes(shown)) choices.unshift(shown);
-        for (const o of choices) { const op = el('option', o); op.value = o; input.append(op); }
-      } else {
-        input = el('input');
-        input.spellcheck = false;
+  // ---- the shipped file, read as a catalogue -----------------------------
+
+  /** `key  what it does`, as the file lays it out under a heading:
+   *
+   *      #   grace   give up on the tag after this long and hand the desk
+   *      #           back anyway, so a flat phone does not cost an afternoon.
+   *
+   *  Two spaces of indent open an entry, six or more continue the last one,
+   *  and `from/to` names two settings at once. Anything else is prose. */
+  function keyDocs(block) {
+    const out = new Map();
+    let last = null;
+    for (const raw of block) {
+      const m = raw.match(/^ {2,5}([a-z_][a-z0-9_]*(?:\/[a-z_][a-z0-9_]*)*) {2,}(\S.*)$/);
+      if (m) {
+        last = m[1].split('/');
+        for (const k of last) out.set(k, m[2].trim());
+        continue;
       }
-      input.value = shown;
-      return input;
-    };
-    const row = (key, input, help, name) => {
-      const r = el('label');
-      const n = el('span', key);
-      if (fromHub(name, key) && name !== 'nfc.home_assistant') n.insertAdjacentHTML('beforeend', HA);
-      r.append(n, input, el('small', help));
-      return r;
-    };
-    lines.forEach((line, i) => {
-      let m = line.match(/^\s*\[([^\]]+)\]\s*(#.*)?$/);
-      if (m) { open(m[1]); return; }
+      const more = raw.match(/^ {6,}(\S.*)$/);
+      if (more && last) { for (const k of last) out.set(k, out.get(k) + ' ' + more[1].trim()); continue; }
+      last = null;
+    }
+    return out;
+  }
+
+  /** The file as it ships, read as a list of every setting tea has rather than
+   *  as a config: what each one would be if you never said, and what the file
+   *  itself has to say about it.
+   *
+   *  This is what lets the page offer a setting your own file has never
+   *  mentioned. Without it the page can only show the lines you already have,
+   *  which means a machine whose file has no `[hours]` in it has no way to
+   *  reach working hours at all. */
+  function catalogue(text) {
+    const map = new Map();
+    const blurb = new Map();
+    let section = 'general';
+    let block = [];      // the comment lines directly above whatever comes next
+    let docs = new Map();
+
+    for (const line of text.split('\n')) {
+      const c = line.match(/^\s*#\s?(.*)$/);
+      if (c) { block.push(c[1]); continue; }
+      if (!line.trim()) { block = []; continue; }
+
+      let m = line.match(/^\s*\[([^\]]+)\]\s*$/);
+      if (m) {
+        section = m[1];
+        docs = keyDocs(block);
+        // The prose above the entries, first sentence only: a card wants a
+        // line about itself, not the section's whole preamble.
+        const prose = block.filter(b => !/^ {2,}\S/.test(b)).join(' ').trim();
+        const first = prose.match(/^(.{8,}?[.!?])(\s|$)/);
+        if (prose) blurb.set(section, (first ? first[1] : prose).replace(/ --? /g, ' — '));
+        block = [];
+        continue;
+      }
+
       m = line.match(/^(\s*[A-Za-z0-9_.-]+\s*=\s*)(.*)$/);
-      if (!m) return;
-      if (!section) open('general');
+      if (!m) { block = []; continue; }
+      const key = m[1].replace(/\s*=\s*$/, '').trim();
       const [value, comment] = split(m[2]);
       const raw = value.trim();
       const str = /^"(.*)"$/.exec(raw);
-      const shown = str ? unquote(str[1]) : raw;
-      const key = m[1].replace(/\s*=\s*$/, '').trim();
-      const help = comment.replace(/^#\s?/, '');
-      const input = make(key, shown, str, section.name);
-      input.title = help;
-      input.addEventListener('input', () => { input.classList.toggle('changed', input.value !== shown); buttons(); });
-      const r = row(key, input, help, section.name);
-      section.el.append(r);
-      if (section.name === 'hold' && key === 'mode') strictGuard(input, section.el, shown);
-      section.rows.push({ row: r, text: (section.name + ' ' + key + ' ' + help).toLowerCase() });
-      // The common block gets a second copy of the row, kept in step with
-      // this one, so a change in either place is the same change.
-      const full = (section.name === 'general' ? '' : section.name + '.') + key;
-      if (COMMON.includes(full)) {
-        const other = make(key, shown, str, section.name);
-        other.title = help;
-        twin(input, other, shown);
-        const r2 = row(full, other, help, section.name);
-        if (full === 'hold.mode') { const box = el('div'); r2.append(box); strictGuard(other, r2, shown, box); }
-        picks.set(full, r2);
-      }
-      // Everything needed to put the line back together with only the value
-      // swapped: the comment stays in its column when the new value fits.
-      fields.push({ i, key: full, lead: m[1], raw, string: !!str, shown, column: m[1].length + value.length, comment, input });
+      // A block sitting inside the section, directly above its first key, is
+      // as good a place for the per-key notes as one above the heading.
+      const inner = keyDocs(block);
+      for (const [k, v] of inner) docs.set(k, v);
+      const help = comment.replace(/^#\s?/, '').trim()
+        || docs.get(key)
+        || (inner.size ? '' : block.join(' ').trim());
+      map.set(full(section, key), {
+        section, key, string: !!str,
+        shown: str ? unquote(str[1]) : raw,
+        comment: comment.trim(),
+        help: help.replace(/ --? /g, ' — '),
+      });
+      block = [];
+    }
+    return { map, blurb };
+  }
+
+  // ---- drawing the page --------------------------------------------------
+
+  /** What to show in an empty box: what the setting would be if you never
+   *  said, or -- where that is nothing at all -- the example the shipped file
+   *  gives beside it. */
+  function hint(d) {
+    if (!d) return 'not set';
+    if (d.shown) return d.shown;
+    const eg = d.comment.match(/e\.g\.\s*"?([^"\n]+)"?/);
+    return eg ? 'e.g. ' + eg[1].replace(/"/g, '').trim() : 'not set';
+  }
+
+  function make(f) {
+    const start = f.unset ? (f.def ? f.def.shown : '') : f.shown;
+    const hints = SUGGEST[f.full];
+    const choices = hints ? null
+      : CHOICES[f.full] || (f.string && /^(on|off)$/.test(start) ? ['on', 'off'] : null);
+    let input;
+    if (choices) {
+      input = el('select');
+      const list = choices.slice();
+      if (f.unset) { const o = el('option', 'default · ' + (start || 'unset')); o.value = ''; input.append(o); }
+      else if (!list.includes(f.shown)) list.unshift(f.shown);
+      for (const c of list) { const o = el('option', c); o.value = c; input.append(o); }
+    } else {
+      input = el('input');
+      input.spellcheck = false;
+      if (hints) input.setAttribute('list', suggestions(f.full, hints));
+      if (f.unset) input.placeholder = hint(f.def);
+    }
+    input.value = f.unset ? '' : f.shown;
+    return input;
+  }
+
+  /** One list per setting, made once and shared by both boxes that setting can
+   *  have. Offered, never enforced: whatever else you type stands. */
+  function suggestions(name, hints) {
+    const id = 'd-' + name.replace(/\./g, '-');
+    if (!document.getElementById(id)) {
+      const dl = el('datalist');
+      dl.id = id;
+      for (const h of hints) { const o = el('option'); o.value = h; dl.append(o); }
+      form.append(dl);
+    }
+    return id;
+  }
+
+  /** Whichever box is typed in, the others follow: a setting can appear twice
+   *  on this page -- once in its section, once in the common block -- and both
+   *  are the same one line of the file. */
+  function sync(f, from) {
+    for (const i of f.inputs) if (i !== from) i.value = from.value;
+    const on = from.value !== f.shown;
+    for (const i of f.inputs) {
+      i.classList.toggle('changed', on && !f.unset);
+      const lab = i.closest('label');
+      if (lab) lab.classList.toggle('added', on && f.unset);
+    }
+    buttons();
+  }
+
+  function row(f, label) {
+    const r = el('label');
+    if (f.unset) r.className = 'unset';
+    const k = el('span');
+    k.className = 'key';
+    k.append(el('span', label));
+    if (fromHub(f.section, f.key) && f.section !== 'nfc.home_assistant') k.append(icon('hub'));
+    const input = make(f);
+    input.title = f.help;
+    f.inputs.push(input);
+    input.addEventListener('input', () => sync(f, input));
+    const small = el('small', f.help);
+    small.title = f.help;
+    r.append(k, input, small);
+    return r;
+  }
+
+  const heading = (ico, text) => {
+    const h = el('h2');
+    h.className = 'big';
+    h.append(icon(ico), el('span', text));
+    return h;
+  };
+
+  function render(text) {
+    lines = text.split('\n');
+    fields = [];
+    cards = [];
+    where = new Map();
+    form.textContent = '';
+
+    const sec = name => {
+      if (!where.has(name)) where.set(name, { name, anchor: null, set: [], unset: [] });
+      return where.get(name);
+    };
+
+    // The file, line by line: the sections it has, the settings in them, and
+    // the line a new setting would go after.
+    let cur = null;
+    lines.forEach((line, i) => {
+      let m = line.match(/^\s*\[([^\]]+)\]\s*(#.*)?$/);
+      if (m) { cur = sec(m[1]); cur.anchor = i; return; }
+      m = line.match(/^(\s*[A-Za-z0-9_.-]+\s*=\s*)(.*)$/);
+      if (!m) return;
+      if (!cur) cur = sec('general');
+      cur.anchor = i;
+      const [value, comment] = split(m[2]);
+      const raw = value.trim();
+      const str = /^"(.*)"$/.exec(raw);
+      cur.set.push({
+        key: m[1].replace(/\s*=\s*$/, '').trim(), i, lead: m[1], string: !!str,
+        shown: str ? unquote(str[1]) : raw,
+        column: m[1].length + value.length,
+        comment, help: comment.replace(/^#\s?/, '').trim(),
+      });
     });
+
+    // Everything the shipped file has that yours has not said a word about.
+    // In the shipped file's own order, after the sections you do have.
+    const has = new Set();
+    for (const s of where.values()) for (const r of s.set) has.add(full(s.name, r.key));
+    for (const [key, d] of cat.map) if (!has.has(key)) sec(d.section).unset.push(d);
+
+    const common = el('div'); common.className = 'cols'; common.id = 'common';
+    const all = el('div'); all.className = 'cols';
+    const commonHead = heading('star', 'Common');
+    const allHead = heading('sliders', 'All settings');
+    top = [commonHead, common, allHead];
+    form.append(commonHead, common, allHead, all);
+
+    const picks = new Map();
+    const add = (card, name, existing, def) => {
+      const key = existing ? existing.key : def.key;
+      const f = {
+        key, full: full(name, key), section: name, def,
+        unset: !existing,
+        shown: existing ? existing.shown : '',
+        string: existing ? existing.string : !!(def && def.string),
+        help: (existing && existing.help) || (def && def.help) || '',
+        i: existing ? existing.i : -1,
+        lead: existing ? existing.lead : null,
+        column: existing ? existing.column : 0,
+        comment: existing ? existing.comment : (def ? def.comment : ''),
+        inputs: [],
+      };
+      const r = row(f, key);
+      card.el.append(r);
+      card.rows.push({ row: r, f, text: (name + ' ' + key + ' ' + f.help).toLowerCase() });
+      // The common block gets a second box for the same line, kept in step
+      // with this one, so a change in either place is the same change.
+      if (COMMON.includes(f.full)) picks.set(f.full, row(f, f.full));
+      fields.push(f);
+    };
+
+    let n = 0;
+    for (const s of where.values()) {
+      if (!s.set.length && !s.unset.length) continue;
+      const box = el('section');
+      // Dealt out one after another rather than all at once, and capped: a
+      // config with thirty sections in it should still have finished arriving
+      // by the time anybody has read the first heading.
+      box.style.animationDelay = Math.min(300, n++ * 22) + 'ms';
+      const h = el('h2');
+      h.append(icon(iconFor(s.name)), el('span', s.name));
+      if (!s.set.length) { const t = el('span', 'not set'); t.className = 'tag'; h.append(t); }
+      box.append(h);
+      const said = cat.blurb.get(s.name);
+      if (said) { const p = el('p', said); p.className = 'blurb'; box.append(p); }
+
+      const card = { el: box, name: s.name, rows: [] };
+      for (const r of s.set) add(card, s.name, r, cat.map.get(full(s.name, r.key)) || null);
+      if (s.unset.length) {
+        // Only worth a divider where there is something above it to divide
+        // from: a section you have never touched is all defaults, and saying
+        // so twice is noise.
+        if (s.set.length) { const d = el('div', 'not set · using defaults'); d.className = 'rule'; box.append(d); }
+        for (const d of s.unset) add(card, s.name, null, d);
+      }
+      all.append(box);
+      cards.push(card);
+    }
+
     for (const name of COMMON) if (picks.has(name)) common.append(picks.get(name));
+    for (const f of fields) if (f.full === 'hold.mode') strictGuard(f);
     hubLink();
     if (!picks.size) for (const e of top) e.hidden = true;
     if (!fields.length) say('nothing here looks like a setting', 'bad');
@@ -310,71 +669,159 @@
   // The warning under hold.mode, shown the moment "strict" is picked, and
   // gone again when it is confirmed or undone. Inline, not a dialog: it sits
   // beside the thing it is about, and nothing else on the page is blocked.
-  function strictGuard(input, holder, was, slot) {
+  function strictGuard(f) {
     let box = null;
-    let previous = was;
+    let previous = f.shown;
     const clear = () => { if (box) { box.remove(); box = null; } unsure = false; buttons(); };
-    input.addEventListener('change', () => {
-      if (input.value !== 'strict' || was === 'strict') { previous = input.value; clear(); return; }
-      if (box) return;
-      unsure = true;
-      box = el('div');
-      box.className = 'warn';
-      box.append(el('span', 'Strict switches your Super key, the overview, Alt-Tab, the workspace keys and the dock keys off '
-        + 'for the whole of every break, and puts them back when the page comes down. Only the console and the power button are left. '
-        + 'GNOME only: on any other desktop this is the same as insist. Are you sure?'));
-      box.append(el('br'));
-      const sure = el('button', 'Yes, strict'); sure.type = 'button'; sure.className = 'sure';
-      const undo = el('button', 'No, undo'); undo.type = 'button';
-      sure.addEventListener('click', () => { previous = 'strict'; clear(); });
-      undo.addEventListener('click', () => { input.value = previous; input.dispatchEvent(new Event('input')); clear(); });
-      box.append(sure, undo);
-      if (slot) slot.append(box); else holder.insertBefore(box, input.parentNode.nextSibling);
-      buttons();
-    });
+    for (const input of f.inputs) {
+      input.addEventListener('change', () => {
+        if (input.value !== 'strict' || f.shown === 'strict') { previous = input.value; clear(); return; }
+        if (box) return;
+        unsure = true;
+        box = el('div');
+        box.className = 'warn';
+        box.append(el('span', 'Strict switches your Super key, the overview, Alt-Tab, the workspace keys and the dock keys off '
+          + 'for the whole of every break, and puts them back when the page comes down. Only the console and the power button are left. '
+          + 'GNOME only: on any other desktop this is the same as insist. Are you sure?'));
+        box.append(el('br'));
+        const sure = el('button', 'Yes, strict'); sure.type = 'button'; sure.className = 'sure';
+        const undo = el('button', 'No, undo'); undo.type = 'button';
+        sure.addEventListener('click', () => { previous = 'strict'; clear(); });
+        undo.addEventListener('click', () => {
+          for (const i of f.inputs) i.value = previous;
+          sync(f, f.inputs[0]);
+          clear();
+        });
+        box.append(sure, undo);
+        input.closest('label').append(box);
+        buttons();
+      });
+    }
   }
 
   // The hub, one click away, from the same line the daemon reads. Follows
   // the field as it is typed, so a changed address is a changed link.
   function hubLink() {
     const hub = document.getElementById('hub');
-    const field = fields.find(f => f.key === 'nfc.home_assistant.url');
+    const f = fields.find(x => x.full === 'nfc.home_assistant.url');
     const set = () => {
-      const url = field ? field.input.value.trim() : '';
+      const url = f && f.inputs.length ? f.inputs[0].value.trim() : '';
       hub.hidden = !/^https?:\/\//.test(url);
       hub.href = url;
     };
-    if (field) field.input.addEventListener('input', set);
-    if (!hub.children.length) hub.insertAdjacentHTML('afterbegin', HA);
+    if (f) for (const i of f.inputs) i.addEventListener('input', set);
+    if (!hub.querySelector('svg')) hub.prepend(icon('hub'));
     set();
   }
+
+  // ---- search ------------------------------------------------------------
+
+  const counts = () => {
+    const set = fields.filter(f => !f.unset).length;
+    const off = fields.length - set;
+    return set + ' set' + (off ? ' · ' + off + ' on defaults' : '');
+  };
 
   function search() {
     const words = q.value.toLowerCase().split(/\s+/).filter(Boolean);
     // Searching shows each row once, in its own section.
     for (const e of top) e.hidden = words.length > 0;
-    for (const s of sections) {
+    let hits = 0;
+    for (const c of cards) {
       let shown = 0;
-      for (const r of s.rows) {
-        const hit = words.every(w => r.text.includes(w));
+      for (const r of c.rows) {
+        // The value counts as much as the name: somebody looking for "strict"
+        // is looking for the setting that is currently strict.
+        const text = r.text + ' ' + (r.f.inputs.length ? r.f.inputs[0].value.toLowerCase() : '');
+        const hit = words.every(w => text.includes(w));
         r.row.hidden = !hit;
         if (hit) shown++;
       }
-      s.el.hidden = shown === 0;
+      c.el.hidden = shown === 0;
+      hits += shown;
     }
+    meta.textContent = words.length
+      ? hits + (hits === 1 ? ' setting matches' : ' settings match')
+      : counts();
   }
   q.addEventListener('input', search);
 
+  // ---- putting the file back together ------------------------------------
+
   function compose() {
     const out = lines.slice();
+    const inserts = new Map();  // line index -> what goes after it
+    const first = [];           // top-level keys, where the file has none yet
+    const fresh = new Map();    // whole sections the file has not got
+    const put = (i, line) => { if (!inserts.has(i)) inserts.set(i, []); inserts.get(i).push(line); };
+
     for (const f of fields) {
-      const v = f.input.value;
+      if (!f.inputs.length) continue;
+      const v = f.inputs[0].value;
       if (v === f.shown) continue;
       const value = f.string ? quote(v) : v.trim();
-      const pad = f.comment ? ' '.repeat(Math.max(1, f.column - f.lead.length - value.length)) : '';
-      out[f.i] = f.lead + value + pad + f.comment;
+
+      // A line that is already there: only the value is swapped, and the
+      // comment stays in its column when the new value fits.
+      if (!f.unset) {
+        const pad = f.comment ? ' '.repeat(Math.max(1, f.column - f.lead.length - value.length)) : '';
+        out[f.i] = f.lead + value + pad + f.comment;
+        continue;
+      }
+
+      // A line the file has never had. It goes at the end of its own section,
+      // carrying whatever the shipped file says about it in the column the
+      // rest of the file keeps its comments in.
+      let line = f.key + ' = ' + value;
+      const said = (f.comment || '').trim();
+      if (said && said.length < 80) line += ' '.repeat(Math.max(1, 22 - line.length)) + said;
+      const s = where.get(f.section);
+      if (s && s.anchor !== null) put(s.anchor, line);
+      else if (f.section === 'general') first.push(line);
+      else { if (!fresh.has(f.section)) fresh.set(f.section, []); fresh.get(f.section).push(line); }
     }
-    return out.join('\n');
+
+    const res = first.slice();
+    out.forEach((l, i) => { res.push(l); for (const x of (inserts.get(i) || [])) res.push(x); });
+
+    // A file that ends in a newline ends in an empty entry here. New sections
+    // go before it, so the file still ends the way it did.
+    let end = res.length;
+    while (end > 0 && res[end - 1].trim() === '') end--;
+    const tail = res.slice(end);
+    res.length = end;
+    for (const [name, rows] of fresh) res.push('', '[' + name + ']', ...rows);
+    res.push(...(tail.length ? tail : ['']));
+    return res.join('\n');
+  }
+
+  // ---- talking to the daemon ---------------------------------------------
+
+  /** Read once and kept: the shipped file does not change under a running
+   *  daemon. An older tea has no such door, and the page falls back to being
+   *  what it has always been -- the lines your file already has. */
+  async function defaults() {
+    if (cat.map.size) return;
+    try {
+      const r = await fetch('/defaults', { headers: auth });
+      if (r.ok) cat = catalogue(await r.text());
+    } catch (e) { /* nothing to add; carry on with the file */ }
+  }
+
+  /** The same pill the dashboard wears, saying the same thing. Nothing here
+   *  is written or read from the file: it is the daemon answering for itself,
+   *  which is the only way this page can know it is talking to anything. */
+  async function heartbeat() {
+    try {
+      const r = await fetch('/status', { headers: auth });
+      if (!r.ok) throw new Error();
+      const state = (await r.text()).trim();
+      pill.className = 'pill' + (/break|waiting/.test(state) ? ' busy' : '');
+      pilltext.textContent = state;
+    } catch (e) {
+      pill.className = 'pill cold';
+      pilltext.textContent = 'not running';
+    }
   }
 
   async function load(quiet) {
@@ -382,6 +829,7 @@
     try { r = await fetch('/config', { headers: auth }); } catch (e) { return false; }
     const text = await r.text();
     if (!r.ok) { say(text.trim(), 'bad'); return false; }
+    await defaults();
     render(text);
     if (!quiet) say('');
     return true;
@@ -392,7 +840,13 @@
   async function wait() {
     for (let n = 0; n < 40; n++) {
       await new Promise(r => setTimeout(r, 750));
-      if (await load(true)) { pending = false; buttons(); say('applied. tea is running your settings', 'good'); return; }
+      if (await load(true)) {
+        pending = false;
+        buttons();
+        heartbeat();
+        say('applied. tea is running your settings', 'good');
+        return;
+      }
     }
     say('saved, but tea has not come back yet. `systemctl --user status tea` will say why', 'bad');
   }
@@ -421,6 +875,8 @@
   apply.addEventListener('click', () => send(true));
   document.getElementById('undo').addEventListener('click', () => load());
   load();
+  heartbeat();
+  setInterval(heartbeat, 15000);
 })();
 </script>
 </body>

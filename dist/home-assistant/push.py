@@ -19,7 +19,9 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -112,8 +114,107 @@ def dashboard(url, token, args=()):
         print(f"tea: created the dashboard at {url}/{URL_PATH}")
     else:
         print(f"tea: replacing the dashboard at {url}/{URL_PATH}")
+    worked_helpers(url, token)
     asyncio.run(talk(url, token, [{"type": "lovelace/config/save", "url_path": URL_PATH, "config": config}]))
     print("tea: done — it is in the sidebar")
+
+
+def rest(url, token, path, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(
+        url + path,
+        data=data,
+        method="POST" if data else "GET",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req) as reply:
+        return json.load(reply)
+
+
+def worked_helpers(url, token):
+    """The two helpers behind the "Worked" card under "Since the start".
+
+    A utility meter adds `sensor.tea_worked_today` up across its midnight
+    resets, and a template sensor spells the total out as `1,020 min (17.0 h)`,
+    which a statistic card cannot. Made once; the meter is seeded from what the
+    recorder has already added up, so the total does not start again at zero.
+    """
+    import time
+
+    def state(entity):
+        try:
+            return rest(url, token, "/api/states/" + entity)["state"]
+        except urllib.error.HTTPError:
+            return None
+
+    def flow(handler, *steps):
+        f = rest(url, token, "/api/config/config_entries/flow", {"handler": handler})
+        for step in steps:
+            f = rest(url, token, "/api/config/config_entries/flow/" + f["flow_id"], step)
+        if f.get("type") != "create_entry":
+            sys.exit(f"tea: the hub refused the {handler} helper — {f.get('errors') or f}")
+
+    def wait_for(entity):
+        for _ in range(40):
+            if state(entity) is not None:
+                return
+            time.sleep(0.5)
+        sys.exit(f"tea: {entity} never showed up")
+
+    if state("sensor.tea_worked_total") is None:
+        flow(
+            "utility_meter",
+            {
+                "name": "tea worked total",
+                "source": "sensor.tea_worked_today",
+                "cycle": "none",
+                "offset": 0,
+                "tariffs": [],
+                "net_consumption": False,
+                "delta_values": False,
+                "periodically_resetting": True,
+                "always_available": False,
+            },
+        )
+        wait_for("sensor.tea_worked_total")
+        # Seed: every past day's change per the recorder, plus today's counter.
+        start = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+        (stats,) = asyncio.run(
+            talk(
+                url,
+                token,
+                [
+                    {
+                        "type": "recorder/statistics_during_period",
+                        "start_time": start,
+                        "statistic_ids": ["sensor.tea_worked_today"],
+                        "period": "day",
+                        "types": ["change"],
+                    }
+                ],
+            )
+        )
+        today = datetime.now().date()
+        past = sum(
+            (row["change"] or 0)
+            for row in stats.get("sensor.tea_worked_today", [])
+            if datetime.fromtimestamp(row["start"] / 1000).date() != today
+        )
+        total = int(past + float(state("sensor.tea_worked_today") or 0))
+        rest(url, token, "/api/services/utility_meter/calibrate", {"entity_id": "sensor.tea_worked_total", "value": str(total)})
+        print(f"tea: made sensor.tea_worked_total, seeded to {total} min")
+    if state("sensor.tea_worked_since_start") is None:
+        flow(
+            "template",
+            {"next_step_id": "sensor"},
+            {
+                "name": "tea worked since start",
+                "state": "{% set m = states('sensor.tea_worked_total') | float(0) %}"
+                "{{ '{:,}'.format(m | int) }} min ({{ (m / 60) | round(1) }} h)",
+            },
+        )
+        wait_for("sensor.tea_worked_since_start")
+        print("tea: made sensor.tea_worked_since_start")
 
 
 def automations(url, token, args):

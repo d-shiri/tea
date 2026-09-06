@@ -25,7 +25,7 @@ pause = "1m"
 [postpone]
 duration = "1m"       # how much time one postpone buys
 budget = 2            # postpones allowed per window (0 disables postponing)
-window = "1h"
+window = "1h"         # the window that budget is counted over
 
 # While an app holds the session awake -- a call, a video, a presentation --
 # a break that falls due waits rather than covering the screen, and tea says
@@ -81,6 +81,44 @@ length = "15m"
 #              remain; the point is that leaving takes a decision. GNOME only.
 mode = "soft"
 recheck = "400ms"     # how often an insisting page checks it is still in front
+
+# Noise, when a break starts and ends. Silent until you ask for it: a sound you
+# did not choose, played at you several times an hour, is worse than no sound
+# at all.
+#
+#   mode         "off" (default), "chime" for a short sound from the desktop's
+#                own sound theme, "voice" to have it spoken through the
+#                screen-reader voice, or "both".
+#   start_file   a sound file played when the break starts. Empty takes the
+#                desktop's theme rather than a file of your own.
+#   end_file     the same, for the moment the break ends.
+#   scan_file    what a successful scan sounds like. Empty plays the chime tea
+#                ships, so the celebration works without anybody hunting the
+#                internet for a sound file.
+#   start_words  what "voice" says at the start.
+#   end_words    and at the end.
+#   scan_words   and on a scan. Empty says nothing.
+[sound]
+mode = "off"
+start_file = ""
+end_file = ""
+scan_file = ""
+start_words = "Time for a break"
+end_words = "Break over"
+scan_words = ""
+
+# How the break page arrives. It does not simply appear -- it lands, because a
+# page that fades in is a page you argue with.
+#
+#   entrance  how long the arrival takes. "0s" for none, and the page is
+#             simply there.
+#   burst     the share of that time the blast stays visible, 0 to 1. 0 is a
+#             plain fade with nothing thrown outward.
+#   shards    how many pieces of debris fly out of it.
+[animation]
+entrance = "3s"
+burst = 0.62
+shards = 26
 
 # How the page looks, and what it says while the clock runs. The defaults are
 # the page as it ships; nothing here has to be set.
@@ -795,6 +833,27 @@ mod tests {
         let mut got: tea_core::Config = parsed.into();
         assert_eq!(got, tea_core::Config::default());
         assert!(reconcile(&mut got).unwrap().is_empty(), "defaults must need no clamping");
+    }
+
+    /// Every word of it, not just the parts that reach `tea_core::Config`.
+    ///
+    /// The settings page reads this file to say what a setting *would* be
+    /// where yours has never said a word about it -- that is the whole of how
+    /// it can offer a setting your file has not got. A block in here that has
+    /// drifted from the code is the page stating a default that is not one.
+    /// Compared through `Debug`, because these structs are read from a file
+    /// and never compared to each other anywhere else.
+    #[test]
+    fn the_shipped_file_states_the_code_defaults_in_full() {
+        let shipped: FileConfig = toml::from_str(DEFAULT_FILE).expect("default file must parse");
+        // Settled on both sides: `[port] listen` has an older home under
+        // `[nfc]`, and which of the two a file happens to fill in is not a
+        // difference of default. See [`FileConfig::settled`].
+        assert_eq!(
+            format!("{:#?}", shipped.settled()),
+            format!("{:#?}", FileConfig::default().settled()),
+            "the shipped config file and the code no longer agree on the defaults"
+        );
     }
 
     #[test]
