@@ -42,12 +42,17 @@ views:
             color: grey
 
       # Walking today: the steps taken in breaks, against all the steps the
-      # phone counted. Two rising lines, one axis, one unit. Ten hours, not
-      # more: further back is yesterday's count falling off a cliff at
-      # midnight, which is not a thing that happened today.
-      - type: history-graph
+      # phone counted, one pair of bars an hour. Ten hours (days_to_show is
+      # a fraction of a day), not more: further back is yesterday's count
+      # falling off a cliff at midnight, which is not a thing that happened
+      # today.
+      - type: statistics-graph
         title: Walking today
-        hours_to_show: 10
+        chart_type: bar
+        period: hour
+        days_to_show: 0.42
+        stat_types:
+          - change
         entities:
           - entity: sensor.phone_daily_steps
             name: All steps
