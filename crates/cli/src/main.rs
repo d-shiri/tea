@@ -413,6 +413,9 @@ fn main() {
     if let Some(why) = nfc_cfg.chores_misconfigured() {
         eprintln!("tea: note: {why}");
     }
+    if let Some(why) = nfc_cfg.nudge_misconfigured() {
+        eprintln!("tea: note: {why}");
+    }
     if let Some(why) = nfc_cfg.home_assistant.publish_misconfigured() {
         eprintln!("tea: note: {why}");
     }

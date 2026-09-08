@@ -402,6 +402,19 @@ pub fn show(cfg: &Config, file: &FileConfig, path: &Path) {
         } else if let Some(why) = nfc.moving_misconfigured() {
             field(&s, "moving", "off", &why);
         }
+        // Only worth a line when there is a phone named to poke: with nothing
+        // in `nudge` the gate simply waits on whatever the phone sends anyway.
+        if let Some((domain, service)) = nfc.home_assistant.nudge_call() {
+            match nfc.nudge_misconfigured() {
+                Some(why) => field(&s, "nudges", "off", &why),
+                None => field(
+                    &s,
+                    "nudges",
+                    &literal(nfc.home_assistant.nudge_every()),
+                    &format!("{domain}.{service} — asked to report its sensors, while a break is up"),
+                ),
+            }
+        }
         if nfc.asks() {
             field(&s, "answers on", "", &format!("{} — for `tea unlock` only", nfc.listen));
         } else {

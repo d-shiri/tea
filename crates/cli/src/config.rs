@@ -189,6 +189,22 @@ prompt = "Scan the tag to get your desk back"
 #           entity whose state changes will do, which is why a Zigbee button by
 #           the kettle works just as well as a sticker.
 #
+# A phone reports its sensors on the companion app's own schedule -- a minute,
+# at best -- so a gate waiting on a step count spends its first minute waiting
+# to hear about a walk that is already over. `nudge` is the way out of that: the
+# Android companion app answers a notification of `command_update_sensors` by
+# reporting everything it has, at once. Tea sends one ten seconds into a break
+# and every ten seconds after that, and the steps turn up on the next poll
+# rather than on the phone's next minute. Nothing waits on it -- a poke the hub
+# will not take is one line on stderr and a break that ends exactly as it would
+# have without any of this.
+#
+#   nudge   the phone's notify service: "notify.mobile_app_<phone>", or the
+#           bare "mobile_app_<phone>". Only sent while a break is on screen and
+#           only when the steps or the moving are being read -- a phone nobody
+#           is listening to is a phone with no reason to be woken. Empty pokes
+#           nobody, which is the default.
+#
 # And the other way round. With `publish` on, tea keeps a sensor on the hub
 # saying what it is doing -- "working", "warning", "break", "waiting", "held",
 # "off" -- with the next break, the walk so far and today's tally hanging off
@@ -210,6 +226,7 @@ url = ""              # e.g. "http://homeassistant.local:8123"
 token = ""            # a long-lived access token, from your profile page
 entity = ""           # e.g. "tag.living_room"
 poll = "2s"           # how often to ask, while a break is up
+nudge = ""            # e.g. "notify.mobile_app_pixel" -- tell it to report now
 publish = "off"
 publish_entity = "sensor.tea"
 
@@ -239,6 +256,9 @@ publish_entity = "sensor.tea"
 #           is "live": that same rise is the walk itself and counts. Say
 #           "live" only for a sensor that keeps up; said of a lagging one it
 #           opens the gate from the chair.
+#
+# Either way, `nudge` above is what keeps a break from waiting a whole minute
+# on a phone that has not got round to mentioning the walk yet.
 [nfc.steps]
 mode = "off"
 count = 20

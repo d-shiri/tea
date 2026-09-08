@@ -40,6 +40,21 @@ const JOBS_TIMEOUT: u32 = 2;
 /// Household jobs do not change between one second and the next, and this is a
 /// service call rather than a state lookup.
 const JOBS_EVERY: Duration = Duration::from_secs(10);
+/// How often the phone is asked for a fresh reading, and how long a break waits
+/// before the first one.
+///
+/// Ten seconds either way. Sooner than that is asking a phone about a walk that
+/// has not started -- the first ten seconds of a break are spent standing up --
+/// and the poll interval is far too often: this is a push notification to a
+/// phone, not a state lookup, and one every couple of seconds is a phone that
+/// spends the break talking instead of counting.
+const NUDGE_EVERY: Duration = Duration::from_secs(10);
+/// What the phone gets, and the only message tea ever sends one. The Android
+/// companion app reads it as an order to report every sensor it has, now.
+const NUDGE_BODY: &str = "{\"message\":\"command_update_sensors\"}";
+/// Like the list's: nothing waits on the poke, so a slow hub must not be what
+/// the gate's own questions queue behind.
+const NUDGE_TIMEOUT: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -243,6 +258,33 @@ impl Config {
         }
         if self.steps.count == 0 {
             return Some("nfc.steps.count is 0, so no walk is being asked for".into());
+        }
+        None
+    }
+
+    /// Why the phone is not being poked, when the file names one to poke.
+    pub fn nudge_misconfigured(&self) -> Option<String> {
+        let ha = &self.home_assistant;
+        let (domain, service) = ha.nudge_call()?;
+        if ha.url.trim().is_empty() {
+            return Some(
+                "nfc.home_assistant.nudge names a phone, but url is empty — the poke goes \
+                 through the hub"
+                    .into(),
+            );
+        }
+        if !well_formed(domain, service) {
+            return Some(format!(
+                "nfc.home_assistant.nudge {:?} is not a service like \"notify.mobile_app_pixel\"",
+                ha.nudge.trim()
+            ));
+        }
+        if !self.counts_steps() && !self.counts_moving() {
+            return Some(
+                "nfc.home_assistant.nudge names a phone, but nothing is waiting on one — \
+                 nfc.steps and nfc.moving are both off"
+                    .into(),
+            );
         }
         None
     }
@@ -690,6 +732,19 @@ pub struct HomeAssistant {
     /// How often to ask, and only while a break is on screen. Nothing is asked
     /// of Home Assistant for the other twenty-five minutes.
     pub poll: crate::config::Dur,
+    /// Whose phone to poke for a fresh reading, when the gate is waiting on one.
+    ///
+    /// A phone reports its sensors on the companion app's own schedule -- a
+    /// minute, at best -- so a break can spend its first minute waiting to hear
+    /// about a walk that is already over. The way out is to ask: the Android
+    /// companion app answers a notification of `command_update_sensors` by
+    /// reporting everything it has, at once. Set this and tea sends one every
+    /// ten seconds while a break is on screen, so the steps turn up on the next
+    /// poll rather than on the phone's next minute.
+    ///
+    /// The phone's notify service -- `notify.mobile_app_<phone>`, or just
+    /// `mobile_app_<phone>`. Empty pokes nobody, which is the default.
+    pub nudge: String,
     /// The other direction: tea telling the hub what it is doing, so the hub
     /// can light the hall, ring the speaker, or show the next break on a
     /// dashboard. Needs only `url` and a token -- not the tag.
@@ -707,10 +762,21 @@ impl Default for HomeAssistant {
             token_file: PathBuf::new(),
             entity: String::new(),
             poll: crate::config::Dur(Duration::from_secs(2)),
+            nudge: String::new(),
             publish: Mode::Off,
             publish_entity: "sensor.tea".into(),
         }
     }
+}
+
+/// Whether a name is shaped the way Home Assistant shapes them: a lowercase
+/// domain, a dot, a lowercase name. Entity ids and service names are the same
+/// shape, and both halves of both end up in a URL, which is the reason to look.
+fn well_formed(domain: &str, name: &str) -> bool {
+    !domain.is_empty()
+        && !name.is_empty()
+        && domain.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
 /// What the token is called, in a file and in the environment.
@@ -728,6 +794,19 @@ impl HomeAssistant {
         self.publish == Mode::On && !self.url.trim().is_empty()
     }
 
+    /// Whether there is a phone to poke, and a hub to poke it through.
+    pub fn nudges(&self) -> bool {
+        !self.url.trim().is_empty() && !self.nudge.trim().is_empty()
+    }
+
+    /// The nudge in the two halves a service call is made of. A bare
+    /// `mobile_app_pixel` is a notify service: a phone is the only thing worth
+    /// poking here, and `notify.` in front of it is nobody's idea of a setting.
+    pub fn nudge_call(&self) -> Option<(&str, &str)> {
+        let raw = self.nudge.trim();
+        (!raw.is_empty()).then(|| raw.split_once('.').unwrap_or(("notify", raw)))
+    }
+
     /// Why publishing is on in the file and off in the process, if it is.
     pub fn publish_misconfigured(&self) -> Option<String> {
         if self.publish != Mode::On {
@@ -739,15 +818,7 @@ impl HomeAssistant {
             );
         }
         let entity = self.publish_entity.trim();
-        let well_formed = entity
-            .split_once('.')
-            .is_some_and(|(domain, name)| {
-                !domain.is_empty()
-                    && !name.is_empty()
-                    && domain.chars().all(|c| c.is_ascii_lowercase() || c == '_')
-                    && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-            });
-        if !well_formed {
+        if !entity.split_once('.').is_some_and(|(domain, name)| well_formed(domain, name)) {
             return Some(format!(
                 "nfc.home_assistant.publish_entity {entity:?} is not an entity id like \"sensor.tea\""
             ));
@@ -795,6 +866,19 @@ impl HomeAssistant {
         } else {
             format!("${TOKEN_VAR}")
         }
+    }
+
+    /// How many polls apart the pokes are. The poll is the only beat there is,
+    /// so ten seconds is however many of them land nearest to ten seconds --
+    /// five at the default two, and every single one of a poll slower than the
+    /// nudge itself.
+    fn nudge_beats(&self) -> u32 {
+        ((NUDGE_EVERY.as_secs_f64() / self.every().as_secs_f64()).round() as u32).max(1)
+    }
+
+    /// And how long that comes to, for saying so out loud.
+    pub fn nudge_every(&self) -> Duration {
+        self.every() * self.nudge_beats()
     }
 
     /// Fast enough that the walk back is not spent waiting, slow enough that a
@@ -1418,6 +1502,9 @@ struct Ask {
     /// change between one second and the next, and it is the one question here
     /// that costs the hub a service call rather than a state lookup.
     jobs: Option<Jobs>,
+    /// The phone, when the gate is waiting on one and the config says whose.
+    /// Not a question at all -- the one thing here that tells rather than asks.
+    nudge: Option<Nudge>,
     link: Rc<Link>,
     /// The entity's value when this break started. A *change* is the scan;
     /// comparing against a remembered value rather than a clock means the two
@@ -1509,6 +1596,54 @@ struct Jobs {
     credited: RefCell<HashSet<String>>,
     /// Complain once per outage, like everything else that talks to the hub.
     complained: Cell<bool>,
+}
+
+/// The phone, and how often it is asked to speak up.
+///
+/// Kept out of the gate's way on purpose. A poke that fails costs a line on
+/// stderr and nothing else: the worst a phone that will not be told can do is
+/// leave the break exactly where it would have been without any of this --
+/// waiting on the companion app's own minute, and ending on `grace` if that
+/// never comes.
+struct Nudge {
+    /// What the hub calls it, for saying which service went wrong.
+    service: String,
+    path: String,
+    /// Beats between pokes, and how many are left before the next one. Set one
+    /// short of a full round, so the first poke of a break lands on the tenth
+    /// second rather than the twelfth.
+    every: u32,
+    due: Cell<u32>,
+    /// One poke in flight at a time: a hub that has gone slow must not end up
+    /// with a queue of orders for the phone.
+    busy: Cell<bool>,
+    /// Whether this break has said out loud that it is poking. Once is plenty.
+    said: Cell<bool>,
+    /// Complain once per outage, like everything else that talks to the hub.
+    complained: Cell<bool>,
+}
+
+impl Nudge {
+    /// Whether this beat is one that pokes.
+    fn pokes_now(&self) -> bool {
+        match self.due.get() {
+            0 => {
+                self.due.set(self.every.saturating_sub(1));
+                true
+            }
+            left => {
+                self.due.set(left - 1);
+                false
+            }
+        }
+    }
+
+    /// Back to how a break starts: the next one waits its ten seconds too.
+    fn forget(&self) {
+        self.due.set(self.every.saturating_sub(1));
+        self.said.set(false);
+        self.complained.set(false);
+    }
 }
 
 impl Jobs {
@@ -1789,6 +1924,24 @@ pub fn watch(cfg: &Config, link: Rc<Link>) -> Result<Watch, String> {
         }
     });
 
+    // Only when something is actually waiting on the phone. Poking one whose
+    // sensors nobody reads is a notification every ten seconds for nothing.
+    let nudge = (ha.nudges() && (cfg.counts_steps() || cfg.counts_moving()))
+        .then(|| ha.nudge_call())
+        .flatten()
+        .map(|(domain, service)| {
+            let every = ha.nudge_beats();
+            Nudge {
+                path: format!("{base}/api/services/{domain}/{service}"),
+                service: format!("{domain}.{service}"),
+                every,
+                due: Cell::new(every.saturating_sub(1)),
+                busy: Cell::new(false),
+                said: Cell::new(false),
+                complained: Cell::new(false),
+            }
+        });
+
     // Posted before the first poll so that a page built in the same tick knows
     // there is a walk in this break, rather than showing no badge for a second
     // and then growing one.
@@ -1813,6 +1966,7 @@ pub fn watch(cfg: &Config, link: Rc<Link>) -> Result<Watch, String> {
         legs,
         gait,
         jobs,
+        nudge,
         link,
         baseline: RefCell::new(None),
         busy: Cell::new(false),
@@ -1849,9 +2003,15 @@ pub fn watch(cfg: &Config, link: Rc<Link>) -> Result<Watch, String> {
                 ask.link.post_board(None);
                 ask.link.post_chores_done(0);
             }
+            if let Some(nudge) = &ask.nudge {
+                nudge.forget();
+            }
             return glib::ControlFlow::Continue;
         }
         poll(Rc::clone(&ask));
+        // Its own errand rather than one more question on the poll's string of
+        // them: the gate's answers must not wait behind a notification.
+        poke(Rc::clone(&ask));
         glib::ControlFlow::Continue
     });
 
@@ -1875,6 +2035,7 @@ pub fn probe(cfg: &HomeAssistant, entity: &str) -> Result<String, String> {
         legs: None,
         gait: None,
         jobs: None,
+        nudge: None,
         link: Link::new(),
         baseline: RefCell::new(None),
         busy: Cell::new(false),
@@ -1918,6 +2079,36 @@ fn poll(ask: Rc<Ask>) {
         };
         ask.busy.set(false);
         settle(&ask, tag, steps, moving, jobs);
+    });
+}
+
+/// Tell the phone to report itself, now.
+///
+/// The one thing in this module that talks rather than listens to the gate, and
+/// the only one whose failure changes nothing: a phone that will not be told
+/// leaves the break where it already was, waiting on the companion app's own
+/// minute. So this never touches `reachable`, never counts a miss, and never
+/// ends or holds a break -- it costs a line on stderr, once, and the poll gets
+/// on with asking.
+///
+/// Off the poll's string of questions rather than on the end of it, because
+/// those are what the break actually turns on: a notification to a phone must
+/// never be the thing a step count is queued behind.
+fn poke(ask: Rc<Ask>) {
+    match &ask.nudge {
+        // Still telling it about the last beat: let this one go by rather than
+        // stack up a second order behind the first.
+        Some(nudge) if !nudge.busy.get() && nudge.pokes_now() => nudge.busy.set(true),
+        _ => return,
+    }
+    glib::MainContext::default().spawn_local(async move {
+        let Some(nudge) = &ask.nudge else { return };
+        if !nudge.said.replace(true) {
+            println!("[ha]    asking {} for a fresh reading", nudge.service);
+        }
+        let answer = send(&ask, &nudge.path, Some(NUDGE_BODY), NUDGE_TIMEOUT).await;
+        nudge.busy.set(false);
+        settle_poke(nudge, answer.and_then(|raw| read_poke(&raw, &nudge.service)));
     });
 }
 
@@ -2019,6 +2210,34 @@ fn read_state(raw: &[u8], entity: &str) -> Result<String, String> {
     serde_json::from_str::<Reply>(body.trim())
         .map(|reply| reply.state)
         .map_err(|e| format!("cannot read the answer about {entity}: {e}"))
+}
+
+/// Whether the hub took the order to poke the phone.
+///
+/// There is nothing to read in the reply: a notify service answers with an
+/// empty list whatever the phone does about it, and what it does about it turns
+/// up as a step count or does not turn up at all. Only the status line matters,
+/// and only so that a name nobody can call is said out loud once rather than
+/// failing quietly every ten seconds for the rest of the day.
+fn read_poke(raw: &[u8], service: &str) -> Result<(), String> {
+    let text = String::from_utf8_lossy(raw);
+    let (head, _) = text
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| "Home Assistant answered with something that is not HTTP".to_string())?;
+    let status = head.lines().next().unwrap_or("").split_whitespace().nth(1).unwrap_or("");
+
+    match status {
+        "200" | "201" => Ok(()),
+        "401" | "403" => Err("Home Assistant refused the token (nfc.home_assistant.token)".into()),
+        // What a hub says about a phone it has never met. The service is the
+        // companion app's registration by another name, so it is missing for
+        // the same reasons the app is: never set up, renamed, or logged out.
+        "400" | "404" => Err(format!(
+            "Home Assistant has no {service} service — that is the phone's name in the \
+             companion app (nfc.home_assistant.nudge)"
+        )),
+        other => Err(format!("Home Assistant answered {other}")),
+    }
 }
 
 /// Pull the lines out of a `todo.get_items` reply.
@@ -2167,6 +2386,23 @@ fn settle_jobs(ask: &Ask, jobs: &Jobs, answer: Result<Vec<Job>, String>) {
 
     ask.link.post_chores_done(jobs.tally(&items));
     ask.link.post_board((!board.jobs.is_empty()).then_some(board));
+}
+
+/// What came back from poking the phone. Nothing but a line on stderr either
+/// way: see `poke` for why this is the one answer here that changes nothing.
+fn settle_poke(nudge: &Nudge, answer: Result<(), String>) {
+    match answer {
+        Ok(()) => {
+            if nudge.complained.replace(false) {
+                println!("[ha]    {} is taking the hint again", nudge.service);
+            }
+        }
+        Err(why) => {
+            if !nudge.complained.replace(true) {
+                eprintln!("tea: cannot ask {} for a fresh reading — {why}", nudge.service);
+            }
+        }
+    }
 }
 
 /// The service call's body. Hand-built rather than pulled through `serde_json`
@@ -2713,6 +2949,7 @@ mod tests {
             jobs: None,
             legs: None,
             gait: None,
+            nudge: None,
             link: Rc::clone(link),
             baseline: RefCell::new(None),
             busy: Cell::new(false),
@@ -2832,6 +3069,130 @@ mod tests {
         assert!(!cfg.moving.counts("in_vehicle"));
         cfg.moving.states = vec![" ".into()];
         assert!(cfg.moving_misconfigured().unwrap().contains("states"));
+    }
+
+    /// A phone with nothing else in it, set up the way `watch` sets one up.
+    fn poking(ha: &HomeAssistant) -> Nudge {
+        let every = ha.nudge_beats();
+        Nudge {
+            service: "notify.mobile_app_pixel".into(),
+            path: "/api/services/notify/mobile_app_pixel".into(),
+            every,
+            due: Cell::new(every.saturating_sub(1)),
+            busy: Cell::new(false),
+            said: Cell::new(false),
+            complained: Cell::new(false),
+        }
+    }
+
+    #[test]
+    fn the_phone_is_poked_ten_seconds_into_a_break_and_every_ten_after_that() {
+        let ha = HomeAssistant {
+            url: "http://h:8123".into(),
+            nudge: "notify.mobile_app_pixel".into(),
+            ..Default::default()
+        };
+        // Five of the default two-second beats to the round, and the poke on
+        // the fifth of them rather than the first: the first ten seconds of a
+        // break are spent standing up, and a phone asked about a walk that has
+        // not started yet has nothing to say.
+        assert_eq!(ha.nudge_every(), Duration::from_secs(10));
+        let nudge = poking(&ha);
+        let beats = |n: u32| (0..n).map(|_| nudge.pokes_now()).collect::<Vec<_>>();
+        let round = vec![false, false, false, false, true];
+        assert_eq!(beats(10), [round.clone(), round.clone()].concat());
+        // A break that ends mid-round lends none of its beats to the next one:
+        // that break waits its own ten seconds.
+        nudge.pokes_now();
+        nudge.forget();
+        assert_eq!(beats(5), round);
+        // And a beat that arrives while the last poke is still in flight is
+        // skipped rather than queued -- which is the poll's own bargain, and
+        // the reason `busy` is looked at before the beat is spent.
+        nudge.busy.set(true);
+        assert_eq!(nudge.due.get(), nudge.every.saturating_sub(1));
+    }
+
+    #[test]
+    fn a_poll_slower_than_the_nudge_pokes_on_every_beat_of_it() {
+        // The poll is the only beat there is, so the ten seconds is however
+        // many polls land nearest to it -- and never fewer than one.
+        let polling = |secs| HomeAssistant {
+            poll: crate::config::Dur(Duration::from_secs(secs)),
+            ..Default::default()
+        };
+        assert_eq!(polling(30).nudge_beats(), 1);
+        assert_eq!(polling(30).nudge_every(), Duration::from_secs(30));
+        assert_eq!(polling(3).nudge_beats(), 3);
+        assert_eq!(polling(3).nudge_every(), Duration::from_secs(9));
+    }
+
+    #[test]
+    fn the_nudge_names_a_phone_and_says_when_there_is_no_point_sending_one() {
+        let mut cfg = Config { mode: Mode::On, ..Default::default() };
+        cfg.home_assistant.url = "http://h:8123".into();
+        cfg.home_assistant.entity = "tag.hall".into();
+        assert!(!cfg.home_assistant.nudges());
+        assert!(cfg.nudge_misconfigured().is_none(), "nobody named, nothing to say");
+        // The bare name is the one people have in front of them; `notify.` is
+        // not a thing anybody would think to type.
+        cfg.home_assistant.nudge = "mobile_app_pixel".into();
+        assert!(cfg.home_assistant.nudges());
+        assert_eq!(cfg.home_assistant.nudge_call(), Some(("notify", "mobile_app_pixel")));
+        // On, with no sensor of the phone's being read: a notification every
+        // ten seconds for nobody.
+        assert!(cfg.nudge_misconfigured().unwrap().contains("both off"));
+        cfg.steps.mode = Mode::On;
+        cfg.steps.entity = "sensor.steps".into();
+        assert!(cfg.nudge_misconfigured().is_none());
+        // Written out in full it is taken as written.
+        cfg.home_assistant.nudge = "notify.mobile_app_pixel".into();
+        assert_eq!(cfg.home_assistant.nudge_call(), Some(("notify", "mobile_app_pixel")));
+        assert!(cfg.nudge_misconfigured().is_none());
+        // Anything that is not a service id would be a 404 every ten seconds
+        // with nothing to say why, so it is said now instead.
+        for wrong in ["notify.Mobile App", "notify/mobile_app_pixel", "notify.a.b"] {
+            cfg.home_assistant.nudge = wrong.into();
+            assert!(cfg.nudge_misconfigured().unwrap().contains("notify.mobile_app_pixel"), "{wrong}");
+        }
+        // And a hub to send it through is not optional: the poke goes to the
+        // phone the long way round, through Home Assistant.
+        cfg.home_assistant.nudge = "notify.mobile_app_pixel".into();
+        cfg.home_assistant.url = String::new();
+        assert!(cfg.nudge_misconfigured().unwrap().contains("url"));
+    }
+
+    #[test]
+    fn a_poke_that_lands_says_nothing_and_one_that_does_not_says_which_phone() {
+        let reply = |status: &str| format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\r\n[]");
+        let poke = |status: &str| read_poke(reply(status).as_bytes(), "notify.mobile_app_pixel");
+        // There is nothing in the reply to read: the phone's answer arrives as
+        // a step count on a later poll, or does not arrive at all.
+        assert!(poke("200 OK").is_ok());
+        assert!(poke("201 Created").is_ok());
+        // A phone the hub has never met -- never set up, renamed, logged out --
+        // which is the mistake this setting invites.
+        assert!(poke("404 Not Found").unwrap_err().contains("notify.mobile_app_pixel"));
+        assert!(poke("400 Bad Request").unwrap_err().contains("companion app"));
+        assert!(poke("401 Unauthorized").unwrap_err().contains("token"));
+        assert!(poke("503 Service Unavailable").unwrap_err().contains("503"));
+        assert!(read_poke(b"not http at all", "notify.mobile_app_pixel").is_err());
+    }
+
+    #[test]
+    fn a_phone_that_will_not_be_told_costs_one_line_and_never_the_break() {
+        let nudge = poking(&HomeAssistant::default());
+        settle_poke(&nudge, Err("no route to host".into()));
+        assert!(nudge.complained.get());
+        settle_poke(&nudge, Err("no route to host".into()));
+        assert!(nudge.complained.get(), "once an outage, not once a beat");
+        settle_poke(&nudge, Ok(()));
+        assert!(!nudge.complained.get(), "and the recovery is worth a word");
+        // A break that ends during an outage starts the next one quiet, the
+        // way every other complaint here is reset.
+        settle_poke(&nudge, Err("no route to host".into()));
+        nudge.forget();
+        assert!(!nudge.complained.get());
     }
 
     #[test]

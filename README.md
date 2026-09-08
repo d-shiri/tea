@@ -88,6 +88,7 @@ matching flag that overrides the file (`tea --help`).
     token_file = ""
     entity = ""
     poll = "2s"
+    nudge = ""
     publish = "off"
     publish_entity = "sensor.tea"
 
@@ -518,6 +519,40 @@ No hardware: switch on the *Detected activity* sensor in the companion app.
 Android reports it lazily, a minute behind at times, so `for` is a floor and
 not a stopwatch, and a sensor that cannot be read turns the badge amber and
 ends the break on the clock, the way the tag does. `tea --probe` reads it.
+
+### Asking the phone to hurry up
+
+Both of those halves wait on a phone, and a phone reports its sensors when it
+feels like it. A minute is the good case — the companion app's update frequency
+set to *fast always* — and a minute is a long time to stand in the hall after
+the walk is over, in front of a page that has not heard about it yet. The gate
+is right; the news is late.
+
+The Android companion app has a way round that, and it is a notification. A
+message of `command_update_sensors` makes the app report every sensor it has,
+at once. Name the phone and tea sends one:
+
+    [nfc.home_assistant]
+    url = "http://homeassistant.local:8123"
+    entity = "tag.living_room"
+    nudge = "notify.mobile_app_pixel"
+
+Ten seconds into the break, and every ten seconds after that for as long as the
+page is up. The first ten are yours — a phone asked about a walk that has not
+started has nothing to say — and after them the count arrives on the next poll,
+a second or two, rather than on the phone's next minute. The page lifts when you
+get back instead of a minute after. `mobile_app_pixel` without the `notify.` in
+front does the same thing: the service is the name your phone registered with,
+and `notify.` is the only domain it could be in.
+
+Nothing waits on it. The poke goes out on its own errand rather than joining the
+poll's queue of questions, so a hub that has gone slow costs the gate nothing,
+and a phone that cannot be told — never set up, renamed, logged out — costs one
+line on stderr and a break that ends exactly as it would have without any of
+this. It is sent only while a break is on screen, and only when something is
+actually reading that phone: with `[nfc.steps]` and `[nfc.moving]` both off
+there is nothing to wake it for, and tea says so at startup rather than
+notifying your pocket every ten seconds for nobody.
 
 ### And something to do with it
 
