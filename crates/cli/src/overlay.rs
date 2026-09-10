@@ -19,7 +19,7 @@ use std::collections::HashSet;
 use std::cell::{Cell, RefCell};
 use std::f64::consts::{FRAC_PI_2, TAU};
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// One typeface for the whole thing, and a monospaced one: this page is a
 /// clock, a count and two labels that change under you, and proportional type
@@ -66,6 +66,15 @@ window.tea-toast button:hover { background-color: rgba(ACCENT,0.18); }
 .tea-tag       { font-size: 11pt; color: #9aa9c4; letter-spacing: 1px; }
 .tea-tag.done  { color: #79dca8; }
 .tea-tag.unseen { color: #d8b06a; }
+/* The emergency hatch, which is only ever on screen while it is being held
+   down. Amber rather than the accent: everything else on this page is the
+   break, and this is the one thing here that is not. */
+.tea-help      { background-color: rgba(216,176,106,0.06);
+                 border: 1px solid rgba(216,176,106,0.20);
+                 border-radius: 999px; padding: 7px 20px; }
+.tea-help-word { font-size: 10pt; letter-spacing: 3px; color: #d8b06a; }
+.tea-help-spent { font-size: 10pt; letter-spacing: 2px; color: #8a7a5e; }
+
 .tea-warn-text { font-size: 15pt; color: #e6e9f0; }
 .tea-warn-sub  { font-size: 11pt; color: #78849c; letter-spacing: 1px; }
 
@@ -107,7 +116,45 @@ window.tea-toast button:hover { background-color: rgba(ACCENT,0.18); }
    now; everything below it is you today. */
 .tea-todo-rule { background-color: #2a323e; }
 .tea-todo-day  { font-size: 10pt; color: #4d5666; letter-spacing: 1px; }
+/* The orb in the other corner: what to do with this break, in one word. The
+   word is white like every other word on the page; the colour is in the halo
+   behind it, which the orb's own drawing paints and this only echoes. Its own
+   warm orange rather than the accent, so it reads as a different thing from
+   the clock and its ring -- one is the time, the other is what to do with it.
+   The same orange as `ORB_COLOUR`, and changed together with it. */
+.tea-orb-cap  { font-size: 8pt; color: rgba(255, 166, 77, 0.85); letter-spacing: 3px; }
+.tea-orb-name { font-size: 19pt; font-weight: 700; color: #fbf6ee; letter-spacing: 1px;
+                text-shadow: 0 0 14px rgba(255, 166, 77, 0.65), 0 0 28px rgba(255, 166, 77, 0.3); }
 ";
+
+/// The day's one emergency cancel, as the page and the engine share it.
+///
+/// Two cells and no more: what the page raises when the key has been held long
+/// enough, and what the host keeps up to date about whether there is one left
+/// to spend. Both are shared for the reason everything else on this page is --
+/// `insist` throws pages away and builds new ones, and a page rebuilt mid-break
+/// has to come back knowing the same two answers.
+///
+/// Deliberately not a count. How many are left today is the host's business,
+/// and a page that did its own arithmetic would be a second opinion about a
+/// number that already exists.
+#[derive(Clone)]
+pub struct Rescue {
+    /// Raised by the page and consumed by the engine on its next tick, the way
+    /// the postpone button works and for the same reason: a GTK callback fires
+    /// from inside the main loop that is mid-tick, and must not reach into the
+    /// scheduler.
+    asked: Rc<Cell<bool>>,
+    /// Whether today's one is still there. False and the page says so instead
+    /// of offering a hold that could not end in anything.
+    left: Rc<Cell<bool>>,
+}
+
+impl Rescue {
+    pub fn new(asked: Rc<Cell<bool>>, left: Rc<Cell<bool>>) -> Self {
+        Self { asked, left }
+    }
+}
 
 pub struct GtkBlocker {
     app: gtk::Application,
@@ -115,6 +162,11 @@ pub struct GtkBlocker {
     /// tick. A GTK callback must never reach into the scheduler directly: it
     /// fires from inside the same main loop that is mid-tick.
     postpone: Rc<Cell<bool>>,
+    /// The hatch: see [`Rescue`]. Held rather than passed at engage time,
+    /// because every path that builds a page needs it -- including the two
+    /// that build pages nobody asked for, when a monitor appears and when
+    /// `insist` replaces one.
+    rescue: Rescue,
     /// One fullscreen window per monitor. Index 0 is the one that fights for
     /// focus; see `engage`.
     anim: Anim,
@@ -125,6 +177,10 @@ pub struct GtkBlocker {
     /// Shared with the face closure, so a page rebuilt by `insist` comes back
     /// saying the same line as the one it replaced.
     prompter: Rc<RefCell<Prompter>>,
+    /// Which exercise this break is for. Shared for the same reason: the orb
+    /// on a page rebuilt by `insist` has to name the same one, or leaving and
+    /// coming back would be a way to reroll a stretch you did not fancy.
+    mover: Rc<RefCell<Mover>>,
     /// One page per monitor. Shared, because insisting replaces them: see
     /// `insist`, which builds a fresh window rather than re-showing a hidden
     /// one, and has to put the new one somewhere `update` will find it.
@@ -182,6 +238,7 @@ impl GtkBlocker {
     pub fn new(
         app: &gtk::Application,
         postpone: Rc<Cell<bool>>,
+        rescue: Rescue,
         anim: Anim,
         hold: Hold,
         look: &Look,
@@ -199,10 +256,12 @@ impl GtkBlocker {
         Self {
             app: app.clone(),
             postpone,
+            rescue,
             anim,
             hold,
             palette: look.palette(),
             prompter: Rc::new(RefCell::new(Prompter::new(look))),
+            mover: Rc::new(RefCell::new(Mover::new(look))),
             pages: Rc::new(RefCell::new(Vec::new())),
             warning: None,
             ask,
@@ -243,6 +302,9 @@ struct Face {
     /// The line under the title while the clock runs, when `[page].prompts`
     /// has given the page something to say. `None` keeps the line it ships with.
     sub: Option<String>,
+    /// The exercise in the orb, when `[page].orb` has given the break
+    /// one. `None` and there is no orb.
+    exercise: Option<String>,
     /// The list, the jobs on it, and the day. Empty when there is no list, or
     /// when the hub has not answered about it yet -- the page shows nothing
     /// for both, because "the list could not be read" is not news to anybody
@@ -276,6 +338,7 @@ impl GtkBlocker {
         let open = Rc::clone(&self.open);
         let ask = self.ask.clone();
         let prompter = Rc::clone(&self.prompter);
+        let mover = Rc::clone(&self.mover);
         let board = Rc::clone(&self.board);
         move || {
             let mut face = face_of(
@@ -289,6 +352,7 @@ impl GtkBlocker {
                 busted.get(),
             );
             face.sub = prompter.borrow().current();
+            face.exercise = mover.borrow().current();
             face.corner.clone_from(&board.borrow());
             face
         }
@@ -439,6 +503,7 @@ fn face_of(
         motion: ask.and(motion),
         busted: busted && ask.and(walk).is_some(),
         sub: None,
+        exercise: None,
         corner: Corner::default(),
     }
 }
@@ -466,6 +531,9 @@ impl Blocker for GtkBlocker {
         // A fresh break starts the prompts somewhere new, so five breaks in a
         // row do not all open with the same line.
         self.prompter.borrow_mut().begin();
+        // And deals the next exercise: a different one each break, and every
+        // one of them before any comes round again.
+        self.mover.borrow_mut().begin();
 
         let Some(display) = gdk::Display::default() else {
             eprintln!("tea: no display — overlay not shown");
@@ -487,6 +555,7 @@ impl Blocker for GtkBlocker {
                     &self.palette,
                     Entrance::Full,
                     &face,
+                    &self.rescue,
                 )
             })
             .collect();
@@ -519,6 +588,7 @@ impl Blocker for GtkBlocker {
                 Rc::clone(&self.live),
                 Rc::clone(&self.session),
                 self.face(),
+                self.rescue.clone(),
             );
         }
 
@@ -534,6 +604,7 @@ impl Blocker for GtkBlocker {
         let anim = self.anim.clone();
         let palette = self.palette;
         let facing = self.face();
+        let rescue = self.rescue.clone();
         let watch = monitors.connect_items_changed(move |list, _, _, _| {
             if !live.get() {
                 return;
@@ -546,7 +617,19 @@ impl Blocker for GtkBlocker {
             let face = facing();
             let fresh: Vec<Page> = monitors_in(list)
                 .iter()
-                .map(|m| build_page(&app, m, total, left, &anim, &palette, Entrance::None, &face))
+                .map(|m| {
+                    build_page(
+                        &app,
+                        m,
+                        total,
+                        left,
+                        &anim,
+                        &palette,
+                        Entrance::None,
+                        &face,
+                        &rescue,
+                    )
+                })
                 .collect();
             // Every monitor gone at once (a lid closing, a dock resetting):
             // keep the old pages. They will be rebuilt onto whatever comes
@@ -902,6 +985,28 @@ pub enum Grip {
     Strict,
 }
 
+impl Grip {
+    /// The mode by the name the config file uses, for `--hold soft` on the
+    /// command line. Nothing else than those three names, and no guessing.
+    pub fn named(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "soft" => Some(Self::Soft),
+            "insist" => Some(Self::Insist),
+            "strict" => Some(Self::Strict),
+            _ => None,
+        }
+    }
+
+    /// And back again, spelled the way the file spells it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Soft => "soft",
+            Self::Insist => "insist",
+            Self::Strict => "strict",
+        }
+    }
+}
+
 /// How hard the break page fights to stay in front.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -963,6 +1068,13 @@ const PROMPTS: &[&str] = &[
     "Straighten your back. Ears over shoulders.",
 ];
 
+/// What the orb in the corner can name, when `orb = "on"`: the parts of
+/// a body that sit at a desk all day, one per break, so a break is a break
+/// for something in particular. Words rather than instructions -- the orb is
+/// a badge, and what to do for your back is yours to know.
+const EXERCISES: &[&str] =
+    &["Back", "Neck", "Shoulders", "Arms", "Wrists", "Eyes", "Hips", "Legs", "Breathe"];
+
 /// How the page looks, and what it says while the clock runs: `[page]`.
 ///
 /// The defaults are the page as it ships, pixel for pixel. Everything here is
@@ -978,6 +1090,10 @@ pub struct Look {
     pub prompts: Prompts,
     /// How long each prompt stays up.
     pub prompt_every: Dur,
+    /// What the orb in the corner names, one per break. `exercises` is the
+    /// name it had for an afternoon, and a file that says so still reads.
+    #[serde(alias = "exercises")]
+    pub orb: Exercises,
 }
 
 impl Default for Look {
@@ -988,6 +1104,7 @@ impl Default for Look {
             font: String::new(),
             prompts: Prompts::Off,
             prompt_every: Dur(Duration::from_secs(20)),
+            orb: Exercises::Off,
         }
     }
 }
@@ -1022,17 +1139,21 @@ enum RawPrompts {
     List(Vec<String>),
 }
 
-impl TryFrom<RawPrompts> for Prompts {
-    type Error = String;
+/// What a switch-or-list key said, before it is given its own type.
+enum Switch {
+    Off,
+    On,
+    List(Vec<String>),
+}
 
-    fn try_from(raw: RawPrompts) -> Result<Self, String> {
-        match raw {
+impl RawPrompts {
+    /// Read the key as a switch or a list, naming the key in the complaint.
+    fn read(self, key: &str) -> Result<Switch, String> {
+        match self {
             RawPrompts::Word(word) => match word.trim().to_ascii_lowercase().as_str() {
-                "off" | "disabled" | "false" => Ok(Prompts::Off),
-                "on" | "enabled" | "true" => Ok(Prompts::On),
-                other => Err(format!(
-                    "page.prompts: {other:?} is not \"off\", \"on\", or a list of lines"
-                )),
+                "off" | "disabled" | "false" => Ok(Switch::Off),
+                "on" | "enabled" | "true" => Ok(Switch::On),
+                other => Err(format!("{key}: {other:?} is not \"off\", \"on\", or a list of lines")),
             },
             RawPrompts::List(lines) => {
                 let lines: Vec<String> = lines
@@ -1041,8 +1162,67 @@ impl TryFrom<RawPrompts> for Prompts {
                     .filter(|line| !line.is_empty())
                     .collect();
                 // An empty list is "off", written the long way.
-                Ok(if lines.is_empty() { Prompts::Off } else { Prompts::Custom(lines) })
+                Ok(if lines.is_empty() { Switch::Off } else { Switch::List(lines) })
             }
+        }
+    }
+}
+
+impl TryFrom<RawPrompts> for Prompts {
+    type Error = String;
+
+    fn try_from(raw: RawPrompts) -> Result<Self, String> {
+        Ok(match raw.read("page.prompts")? {
+            Switch::Off => Prompts::Off,
+            Switch::On => Prompts::On,
+            Switch::List(lines) => Prompts::Custom(lines),
+        })
+    }
+}
+
+/// `"off"`, `"on"` for the built-in list, or names of your own: what the orb
+/// in the corner says this break is for.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(try_from = "RawPrompts")]
+pub enum Exercises {
+    #[default]
+    Off,
+    On,
+    Custom(Vec<String>),
+}
+
+impl TryFrom<RawPrompts> for Exercises {
+    type Error = String;
+
+    fn try_from(raw: RawPrompts) -> Result<Self, String> {
+        Ok(match raw.read("page.orb")? {
+            Switch::Off => Exercises::Off,
+            Switch::On => Exercises::On,
+            Switch::List(names) => Exercises::Custom(names),
+        })
+    }
+}
+
+impl Exercises {
+    pub fn on(&self) -> bool {
+        !matches!(self, Exercises::Off)
+    }
+
+    /// The names the breaks are dealt from. Empty when off.
+    pub fn names(&self) -> Vec<String> {
+        match self {
+            Exercises::Off => Vec::new(),
+            Exercises::On => EXERCISES.iter().map(|s| s.to_string()).collect(),
+            Exercises::Custom(names) => names.clone(),
+        }
+    }
+
+    /// How it reads in `tea config`.
+    pub fn describe(&self) -> String {
+        match self {
+            Exercises::Off => "off".into(),
+            Exercises::On => format!("on — {}", EXERCISES.join(", ").to_lowercase()),
+            Exercises::Custom(names) => names.join(", "),
         }
     }
 }
@@ -1255,6 +1435,60 @@ impl Prompter {
         }
         self.at = (self.at + 1) % self.lines.len();
         self.current()
+    }
+}
+
+/// Which exercise each break is for.
+///
+/// A deck rather than a die: the names are shuffled, dealt one per break, and
+/// shuffled again only when they have all been dealt -- so nine breaks see
+/// all nine, and no two in a row are the same. A die would hand you "Eyes"
+/// three times before lunch, and the third time you would stop reading it.
+struct Mover {
+    names: Vec<String>,
+    /// What is left to deal, dealt from the back.
+    deck: Vec<usize>,
+    /// What this break got.
+    at: Option<usize>,
+}
+
+impl Mover {
+    fn new(look: &Look) -> Self {
+        Self { names: look.orb.names(), deck: Vec::new(), at: None }
+    }
+
+    /// A break is starting: deal the next one.
+    fn begin(&mut self) {
+        self.deal(&mut |n| glib::random_int_range(0, n) as usize);
+    }
+
+    /// The deal, with the dice handed in so a test can load them.
+    /// `random(n)` answers with something in `0..n`.
+    fn deal(&mut self, random: &mut dyn FnMut(i32) -> usize) {
+        if self.names.is_empty() {
+            return;
+        }
+        if self.deck.is_empty() {
+            self.deck = (0..self.names.len()).collect();
+            // Fisher-Yates, from the back, so the last card is as random as
+            // the first.
+            for i in (1..self.deck.len()).rev() {
+                let j = random((i + 1) as i32).min(i);
+                self.deck.swap(i, j);
+            }
+            // A fresh deck whose top card is the one just dealt would show
+            // the same word twice running. Put it anywhere else.
+            if self.deck.len() > 1 && self.deck.last() == self.at.as_ref() {
+                let last = self.deck.len() - 1;
+                self.deck.swap(last, 0);
+            }
+        }
+        self.at = self.deck.pop();
+    }
+
+    /// What the orb should name, or nothing when there is no orb.
+    fn current(&self) -> Option<String> {
+        self.at.and_then(|i| self.names.get(i).cloned())
     }
 }
 
@@ -1654,6 +1888,160 @@ impl Meter {
             }
             glib::ControlFlow::Continue
         });
+    }
+}
+
+/// The orb: a lit circle in the bottom-right corner naming what this break is
+/// for. The one thing on the page that moves the whole time, so it is kept
+/// small, slow and in a box of its own.
+///
+/// The radius of the circle proper; the rim wanders a few pixels either side
+/// of it, and the light reaches a good way past.
+const ORB_RADIUS: f64 = 74.0;
+/// How far the glow is allowed to reach past the rim. The drawing area is
+/// grown by this on every side: GTK clips a draw func to its widget, and a
+/// halo with a straight edge is a halo somebody will notice.
+const ORB_REACH: f64 = 34.0;
+/// The rim's wander, as a share of the radius: enough to be seen moving from
+/// across the room, not enough to stop reading as a circle.
+const ORB_WAVE: f64 = 0.045;
+/// One full breath of the glow, in seconds. Slower than a resting pulse.
+const ORB_BREATH: f64 = 4.2;
+/// How long the orb takes to arrive, after the page's own furniture has.
+const ORB_ARRIVE: f64 = 1.1;
+/// Frames of the orb. Fifteen a second is smooth for a wave this slow, and
+/// every frame is a composite of the whole window however small the box: on
+/// a machine without a GPU this one number is most of what the orb costs.
+const ORB_FRAME: Duration = Duration::from_millis(66);
+/// Points around the rim. Enough that the wander reads as a curve.
+const ORB_POINTS: usize = 144;
+/// The orb's own colour, whatever the accent is: a warm orange against the
+/// page's cool blue, so the corner is a different thing from the ring and not
+/// a smaller copy of it. Also written out in the stylesheet, for the word.
+const ORB_COLOUR: (f64, f64, f64) = (1.0, 166.0 / 255.0, 77.0 / 255.0);
+
+fn orb(name: &str, arrival: f64) -> gtk::Overlay {
+    let side = ((ORB_RADIUS + ORB_REACH) * 2.0).ceil() as i32;
+    let area = gtk::DrawingArea::new();
+    area.set_content_width(side);
+    area.set_content_height(side);
+    area.set_can_target(false);
+
+    let born = glib::monotonic_time();
+    // The orb arrives once the words have, which are the page's business:
+    // it is a decoration, and a decoration that lands first is the page.
+    let delay = arrival * 0.55;
+    area.set_draw_func(move |_, cr, width, height| {
+        let t = (glib::monotonic_time() - born) as f64 / 1_000_000.0;
+        let here = ease_out_cubic(((t - delay) / ORB_ARRIVE).clamp(0.0, 1.0));
+        if here <= 0.0 {
+            return;
+        }
+        draw_orb(cr, width as f64 / 2.0, height as f64 / 2.0, t, here);
+    });
+
+    // Its own clock rather than the page's heartbeat: that is eight a second
+    // and looked at for the countdown, and this wants twice that. Weak, so
+    // the timer dies with the page and not a frame later.
+    let weak = area.downgrade();
+    glib::timeout_add_local(ORB_FRAME, move || {
+        let Some(area) = weak.upgrade() else { return glib::ControlFlow::Break };
+        if area.is_mapped() {
+            area.queue_draw();
+        }
+        glib::ControlFlow::Continue
+    });
+
+    let words = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    words.set_halign(gtk::Align::Center);
+    words.set_valign(gtk::Align::Center);
+    words.set_can_target(false);
+    let cap = gtk::Label::new(Some("THIS BREAK"));
+    cap.add_css_class("tea-orb-cap");
+    let label = gtk::Label::new(Some(name));
+    label.add_css_class("tea-orb-name");
+    label.set_wrap(true);
+    label.set_justify(gtk::Justification::Center);
+    // Inside the circle, with room either side: a name of your own that is a
+    // sentence wraps rather than pokes out of the rim.
+    label.set_max_width_chars(9);
+    words.append(&cap);
+    words.append(&label);
+    // The words fade in a beat behind the light, so the orb reads as lit and
+    // then labelled rather than as a label with a circle drawn round it.
+    animate_in(&words, ORB_ARRIVE * 0.8, 6, delay + ORB_ARRIVE * 0.45);
+
+    let root = gtk::Overlay::new();
+    root.set_child(Some(&area));
+    root.add_overlay(&words);
+    root.set_halign(gtk::Align::End);
+    root.set_valign(gtk::Align::End);
+    // The list's inset, less the reach: the circle itself sits where the list
+    // does, and the light is what spills past that.
+    let inset = (TODO_INSET as f64 - ORB_REACH).max(8.0) as i32;
+    root.set_margin_end(inset);
+    root.set_margin_bottom(inset);
+    root.set_can_target(false);
+    root
+}
+
+/// The orb itself, at `t` seconds old and `here` of the way to fully there.
+/// Split out so it can be painted into a surface without a display.
+fn draw_orb(cr: &gtk::cairo::Context, cx: f64, cy: f64, t: f64, here: f64) {
+    let (r, g, b) = ORB_COLOUR;
+    // The breath: a slow swell of the light, never all the way out.
+    let breath = 0.5 - 0.5 * (TAU * t / ORB_BREATH).cos();
+    let lit = here * (0.55 + 0.45 * breath);
+
+    // The rim: a circle with two slow waves running round it in opposite
+    // directions, so the wander never repeats exactly and never looks like a
+    // gear. Sampled once, used for every stroke below.
+    let rim: Vec<(f64, f64)> = (0..ORB_POINTS)
+        .map(|i| {
+            let a = i as f64 / ORB_POINTS as f64 * TAU;
+            let wander = 0.65 * (3.0 * a - t * 1.15).sin() + 0.35 * (5.0 * a + t * 0.8).sin();
+            let radius = ORB_RADIUS * (1.0 + ORB_WAVE * wander) * (0.92 + 0.08 * here);
+            (cx + radius * a.cos(), cy + radius * a.sin())
+        })
+        .collect();
+    let trace = |cr: &gtk::cairo::Context| {
+        cr.new_path();
+        for (i, (x, y)) in rim.iter().enumerate() {
+            if i == 0 { cr.move_to(*x, *y) } else { cr.line_to(*x, *y) }
+        }
+        cr.close_path();
+    };
+
+    // The halo, past the rim: light falling off into the dark. A gradient
+    // rather than strokes because this is the part that has to be soft.
+    let reach = ORB_RADIUS + ORB_REACH;
+    let halo = gtk::cairo::RadialGradient::new(cx, cy, ORB_RADIUS * 0.85, cx, cy, reach);
+    halo.add_color_stop_rgba(0.0, r, g, b, 0.0);
+    halo.add_color_stop_rgba(0.18, r, g, b, 0.20 * lit);
+    halo.add_color_stop_rgba(0.55, r, g, b, 0.05 * lit);
+    halo.add_color_stop_rgba(1.0, r, g, b, 0.0);
+    cr.set_source(&halo).ok();
+    cr.arc(cx, cy, reach, 0.0, TAU);
+    let _ = cr.fill();
+
+    // The inside: darker than the page in the middle, lifting to the accent
+    // at the rim, so the word sits in a pool rather than on a disc.
+    let pool = gtk::cairo::RadialGradient::new(cx, cy, 0.0, cx, cy, ORB_RADIUS);
+    pool.add_color_stop_rgba(0.0, r, g, b, 0.03 * here);
+    pool.add_color_stop_rgba(0.72, r, g, b, 0.06 * here);
+    pool.add_color_stop_rgba(1.0, r, g, b, 0.26 * lit);
+    trace(cr);
+    cr.set_source(&pool).ok();
+    let _ = cr.fill();
+
+    // The rim, lit: stacked strokes, widest and faintest first -- the ring in
+    // the middle of the page is drawn the same way, and this is its echo.
+    cr.set_line_join(gtk::cairo::LineJoin::Round);
+    for (thickness, alpha) in [(22.0, 0.05), (11.0, 0.11), (5.0, 0.28), (1.8, 0.95)] {
+        trace(cr);
+        cr.set_line_width(thickness);
+        cr.set_source_rgba(r, g, b, alpha * lit);
+        let _ = cr.stroke();
     }
 }
 
@@ -2570,6 +2958,272 @@ enum Entrance {
     None,
 }
 
+/// How long H has to be held down before it counts.
+///
+/// A tap would be worse than nothing. The page takes the keyboard the instant
+/// it arrives, so whatever you were typing lands here -- and one of those
+/// keystrokes being the only emergency cancel you get today is not a hatch,
+/// it is a trapdoor. Held, it cannot happen by accident, and two seconds is
+/// the same two seconds in a real emergency as it is in a weak moment: the
+/// difference is that in the weak moment you have time to notice what you are
+/// doing, which is the entire point.
+const HELD_FOR: Duration = Duration::from_secs(2);
+
+/// A released key is not believed for this long.
+///
+/// Auto-repeat is reported differently depending on what is underneath -- some
+/// stacks send a release before every repeated press -- and a hold that broke
+/// itself every 30ms would never finish. Anything shorter than this is treated
+/// as the key never having come up.
+const KEY_GRACE: Duration = Duration::from_millis(90);
+
+/// How long the page keeps saying it has nothing left to give.
+const SAID_FOR: Duration = Duration::from_secs(3);
+
+/// The amber this is drawn in -- the unseen badge's colour, and the one thing
+/// on the page that is not about the break.
+const HELP_COLOUR: (f64, f64, f64) = (0.847, 0.690, 0.416);
+
+/// The hatch, on screen.
+///
+/// Hidden until H is pressed, and that is deliberate: a page that advertises
+/// the way out on every break is a page suggesting it, and this is meant to be
+/// remembered in an emergency rather than offered at four o'clock on a
+/// Wednesday. Pressing it is what makes it appear, which is enough -- a hand
+/// that has found the key does not need a sign saying where the key is.
+struct Help {
+    root: gtk::Box,
+    word: gtk::Label,
+    bar: gtk::DrawingArea,
+    /// How far the hold has got, 0 to 1. Read by the drawing below.
+    at: Rc<Cell<f64>>,
+}
+
+impl Help {
+    fn new() -> Self {
+        let at: Rc<Cell<f64>> = Rc::new(Cell::new(0.0));
+
+        let word = gtk::Label::new(None);
+        word.add_css_class("tea-help-word");
+
+        // The fill, under the word: a line that grows rather than a number
+        // that counts down. Two seconds is too short to read a number in.
+        let bar = gtk::DrawingArea::new();
+        bar.set_content_width(HELP_BAR_W);
+        bar.set_content_height(3);
+        bar.set_halign(gtk::Align::Center);
+        let progress = Rc::clone(&at);
+        bar.set_draw_func(move |_, cr, w, h| {
+            let (r, g, b) = HELP_COLOUR;
+            let (w, h) = (w as f64, h as f64);
+            cr.set_source_rgba(r, g, b, 0.18);
+            rounded(cr, 0.0, 0.0, w, h, h / 2.0);
+            let _ = cr.fill();
+            let done = progress.get().clamp(0.0, 1.0) * w;
+            if done > 0.5 {
+                cr.set_source_rgba(r, g, b, 0.95);
+                rounded(cr, 0.0, 0.0, done, h, h / 2.0);
+                let _ = cr.fill();
+            }
+        });
+
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 7);
+        column.set_halign(gtk::Align::Center);
+        column.append(&word);
+        column.append(&bar);
+
+        let root = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        root.add_css_class("tea-help");
+        root.set_halign(gtk::Align::Center);
+        root.set_valign(gtk::Align::End);
+        root.set_margin_bottom(HELP_MARGIN);
+        root.append(&column);
+        root.set_visible(false);
+
+        Self { root, word, bar, at }
+    }
+
+    /// Being held, `at` of the way there.
+    fn holding(&self, at: f64) {
+        self.at.set(at);
+        self.bar.set_visible(true);
+        self.word.remove_css_class("tea-help-spent");
+        self.word.add_css_class("tea-help-word");
+        self.word.set_text("KEEP HOLDING FOR HELP");
+        if !self.root.is_visible() {
+            self.root.set_visible(true);
+            animate_in(&self.root, 0.2, 0, 0.0);
+        }
+        self.bar.queue_draw();
+    }
+
+    /// Held long enough. The engine takes the page down on its next tick, and
+    /// this is what the second in between says.
+    fn taken(&self) {
+        self.at.set(1.0);
+        self.word.set_text("HELP — GO");
+        self.bar.queue_draw();
+    }
+
+    /// Pressed on a day whose one cancel has already gone.
+    ///
+    /// It says so rather than doing nothing, because a key that has no effect
+    /// is indistinguishable from a key that is broken, and an emergency is the
+    /// worst possible moment to find out which.
+    fn spent(&self) {
+        self.at.set(0.0);
+        self.bar.set_visible(false);
+        self.word.remove_css_class("tea-help-word");
+        self.word.add_css_class("tea-help-spent");
+        self.word.set_text("NO HELP LEFT TODAY — ONE A DAY");
+        if !self.root.is_visible() {
+            self.root.set_visible(true);
+            animate_in(&self.root, 0.2, 0, 0.0);
+        }
+    }
+
+    fn hide(&self) {
+        self.at.set(0.0);
+        self.root.set_visible(false);
+    }
+}
+
+/// How wide the fill under the word is drawn.
+const HELP_BAR_W: i32 = 150;
+/// And how far off the bottom of the screen the whole thing sits.
+const HELP_MARGIN: i32 = 54;
+
+/// Wire H up on one window: hold it, and the break is cancelled.
+///
+/// Per window rather than per break, and that is the right shape: keys go to
+/// the window that has the focus, so the only page that can see the press is
+/// the one you are looking at, and it is the only one that should be lighting
+/// up. A page replaced mid-hold -- `insist` does that -- takes its own timer
+/// with it and the hold starts again, which is the honest outcome: you were
+/// interrupted, and two seconds of holding should not survive the page it was
+/// being held against.
+fn hold_to_help(win: &gtk::ApplicationWindow, help: Help, rescue: &Rescue) {
+    let keys = gtk::EventControllerKey::new();
+
+    // Nothing is remembered across a press but the two times -- when the hold
+    // began, and when the key was last let go of -- and whether this page has
+    // already spent one.
+    let from: Rc<Cell<Option<Instant>>> = Rc::new(Cell::new(None));
+    let up: Rc<Cell<Option<Instant>>> = Rc::new(Cell::new(None));
+    let ticking = Rc::new(Cell::new(false));
+    // Held down means a stream of presses, not one: the keyboard repeats, and
+    // every repeat arrives here as another press. This page is finished after
+    // the first hold that lands, so the repeats that follow it -- and the ones
+    // still arriving while the page bows out -- do not start a second.
+    let done = Rc::new(Cell::new(false));
+    // The same problem for the refusal: without this, every repeat would put
+    // the message up again and arm another timer to take it down.
+    let saying = Rc::new(Cell::new(false));
+
+    let help = Rc::new(help);
+    let asked = Rc::clone(&rescue.asked);
+    let left = Rc::clone(&rescue.left);
+
+    let watched = win.downgrade();
+    let (started, lifted, running, spent, said, lamp) = (
+        Rc::clone(&from),
+        Rc::clone(&up),
+        Rc::clone(&ticking),
+        Rc::clone(&done),
+        Rc::clone(&saying),
+        Rc::clone(&help),
+    );
+    keys.connect_key_pressed(move |_, key, _, _| {
+        if key.to_lower() != gdk::Key::h || spent.get() {
+            // Escape, Alt-F4 and the rest go nowhere. The break ends when the
+            // break ends.
+            return glib::Propagation::Stop;
+        }
+        if !left.get() {
+            if !said.replace(true) {
+                lamp.spent();
+                let (fading, again) = (Rc::clone(&lamp), Rc::clone(&said));
+                glib::timeout_add_local_once(SAID_FOR, move || {
+                    fading.hide();
+                    again.set(false);
+                });
+            }
+            return glib::Propagation::Stop;
+        }
+
+        lifted.set(None);
+        // Only a hold that is starting touches what is on screen. A repeat
+        // that reset the fill to nothing would be a bar that never moved.
+        if started.get().is_none() {
+            started.set(Some(Instant::now()));
+            lamp.holding(0.0);
+        }
+
+        if running.replace(true) {
+            return glib::Propagation::Stop;
+        }
+        let (from, up, ticking, spent, help, asked, watched) = (
+            Rc::clone(&started),
+            Rc::clone(&lifted),
+            Rc::clone(&running),
+            Rc::clone(&spent),
+            Rc::clone(&lamp),
+            Rc::clone(&asked),
+            watched.clone(),
+        );
+        glib::timeout_add_local(HELP_TICK, move || {
+            // The window went while a hold was in progress: nothing to fill,
+            // and a timer outliving its page is how a break page ends up being
+            // cancelled by a keystroke aimed at whatever came after it.
+            if watched.upgrade().is_none() {
+                ticking.set(false);
+                return glib::ControlFlow::Break;
+            }
+            let Some(began) = from.get() else {
+                ticking.set(false);
+                help.hide();
+                return glib::ControlFlow::Break;
+            };
+            // Let go of, and long enough ago to believe it.
+            if up.get().is_some_and(|t| t.elapsed() >= KEY_GRACE) {
+                from.set(None);
+                up.set(None);
+                ticking.set(false);
+                help.hide();
+                return glib::ControlFlow::Break;
+            }
+            let at = began.elapsed().as_secs_f64() / HELD_FOR.as_secs_f64();
+            if at < 1.0 {
+                help.holding(at);
+                return glib::ControlFlow::Continue;
+            }
+            // Held. The engine reads this on its next tick and takes it from
+            // there; the page says what has happened and stops counting.
+            asked.set(true);
+            spent.set(true);
+            from.set(None);
+            up.set(None);
+            ticking.set(false);
+            help.taken();
+            glib::ControlFlow::Break
+        });
+        glib::Propagation::Stop
+    });
+
+    let lifted = Rc::clone(&up);
+    keys.connect_key_released(move |_, key, _, _| {
+        if key.to_lower() == gdk::Key::h {
+            lifted.set(Some(Instant::now()));
+        }
+    });
+
+    win.add_controller(keys);
+}
+
+/// How often a hold in progress repaints. Smooth enough for a two-second fill
+/// without asking the compositor for sixty frames a second to draw a line.
+const HELP_TICK: Duration = Duration::from_millis(33);
+
 /// Build one page and put it on screen.
 ///
 /// `remaining` is separate from `total` because a page is not always born at
@@ -2588,6 +3242,7 @@ fn build_page(
     palette: &Palette,
     entrance: Entrance,
     face: &Face,
+    rescue: &Rescue,
 ) -> Page {
     let arrival = match entrance {
         Entrance::Full => anim.seconds(),
@@ -2743,6 +3398,15 @@ fn build_page(
     layers.add_overlay(&stage.burst);
     layers.add_overlay(&column);
     layers.add_overlay(&todo.root);
+    // And the orb in the opposite corner, when this break is for something.
+    if let Some(name) = &face.exercise {
+        layers.add_overlay(&orb(name, arrival));
+    }
+    // The hatch, over everything and invisible until it is asked for. Added
+    // last so a hold being counted out is never underneath the list or the orb.
+    let help = Help::new();
+    let help_layer: gtk::Widget = help.root.clone().upcast();
+    layers.add_overlay(&help.root);
     win.set_child(Some(&layers));
 
     // The words arrive after the blast has passed over them. Every
@@ -2779,11 +3443,10 @@ fn build_page(
         redraw.queue_draw();
     });
 
-    // Escape, Alt-F4 and the rest go nowhere. The break ends when the
-    // break ends.
-    let keys = gtk::EventControllerKey::new();
-    keys.connect_key_pressed(|_, _, _, _| glib::Propagation::Stop);
-    win.add_controller(keys);
+    // Escape, Alt-F4 and the rest go nowhere. The break ends when the break
+    // ends -- with the one exception that has to be held down to mean
+    // anything, which is why it is a hold and not a key. See `hold_to_help`.
+    hold_to_help(&win, help, rescue);
     win.connect_close_request(|_| glib::Propagation::Stop);
 
     // Fullscreen before the window is ever shown. Asking afterwards costs a
@@ -2806,6 +3469,10 @@ fn build_page(
         stage.backdrop.clone().upcast(),
         column.clone().upcast(),
         todo.root.clone().upcast(),
+        // Whether or not it is showing: fading a hidden widget costs nothing,
+        // and a pill left at full brightness over a page that has faded out
+        // from under it is the last thing anybody sees of a break.
+        help_layer,
     ];
 
     let page = Page {
@@ -2898,6 +3565,7 @@ fn insist(
     live: Rc<Cell<bool>>,
     session: Rc<RefCell<Session>>,
     facing: impl Fn() -> Face + 'static,
+    rescue: Rescue,
 ) {
     /// Polite requests ignored before the pages are built again.
     const PATIENCE: u32 = 3;
@@ -2955,7 +3623,17 @@ fn insist(
             .iter()
             .map(|page| {
                 let left = Duration::from_secs_f64(page.dial.borrow().remaining.max(0.0));
-                build_page(&app, &page.monitor, total, left, &anim, &palette, Entrance::None, &face)
+                build_page(
+                    &app,
+                    &page.monitor,
+                    total,
+                    left,
+                    &anim,
+                    &palette,
+                    Entrance::None,
+                    &face,
+                    &rescue,
+                )
             })
             .collect();
 
@@ -3964,6 +4642,20 @@ mod corner_tests {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_hold_is_named_the_way_the_file_names_it() {
+        assert_eq!(Grip::named("soft"), Some(Grip::Soft));
+        assert_eq!(Grip::named(" Insist "), Some(Grip::Insist));
+        assert_eq!(Grip::named("STRICT"), Some(Grip::Strict));
+        // A typo is an error at the prompt, not the default and a surprise
+        // when the break comes.
+        assert_eq!(Grip::named("hard"), None);
+        assert_eq!(Grip::named(""), None);
+        for grip in [Grip::Soft, Grip::Insist, Grip::Strict] {
+            assert_eq!(Grip::named(grip.name()), Some(grip));
+        }
+    }
+
     /// The recheck interval drives a timer on the main loop. Zero would be a
     /// busy loop that fights the compositor at frame rate, and a value in hours
     /// would mean the page never actually insists.
@@ -4270,6 +4962,57 @@ mod tests {
         assert_eq!(look("prompts = []").prompts, Prompts::Off);
         assert!(toml::from_str::<Look>(r#"prompts = "sometimes""#).is_err());
         assert_eq!(Prompts::On.lines().len(), PROMPTS.len());
+    }
+
+    #[test]
+    fn the_orb_reads_as_a_switch_or_a_list() {
+        assert_eq!(look(r#"orb = "off""#).orb, Exercises::Off);
+        assert_eq!(look(r#"orb = "on""#).orb, Exercises::On);
+        assert_eq!(
+            look(r#"orb = ["Back", " ", "Eyes"]"#).orb,
+            Exercises::Custom(vec!["Back".into(), "Eyes".into()])
+        );
+        assert_eq!(look("orb = []").orb, Exercises::Off);
+        let err = toml::from_str::<Look>(r#"orb = "sometimes""#).unwrap_err().to_string();
+        assert!(err.contains("page.orb"), "{err}");
+        // The name it had for an afternoon still reads, so a file written
+        // then is not a file that stops the service.
+        assert_eq!(look(r#"exercises = "on""#).orb, Exercises::On);
+        assert_eq!(Exercises::On.names().len(), EXERCISES.len());
+        assert!(!Look::default().orb.on());
+    }
+
+    #[test]
+    fn every_exercise_is_dealt_before_any_comes_round_again() {
+        let mut mover = Mover::new(&look(r#"orb = ["Back", "Neck", "Eyes", "Legs"]"#));
+        assert_eq!(mover.current(), None, "nothing until a break starts");
+        // Dice that always say "the last one", which leaves the deck in
+        // order -- the case where a fresh deck would repeat the last deal.
+        let mut dice = |n: i32| (n - 1) as usize;
+        let mut dealt = Vec::new();
+        for _ in 0..12 {
+            mover.deal(&mut dice);
+            dealt.push(mover.current().unwrap());
+        }
+        for round in dealt.chunks(4) {
+            let mut seen: Vec<&String> = round.iter().collect();
+            seen.sort();
+            seen.dedup();
+            assert_eq!(seen.len(), 4, "a round deals every name once: {round:?}");
+        }
+        for pair in dealt.windows(2) {
+            assert_ne!(pair[0], pair[1], "never the same twice running: {dealt:?}");
+        }
+        // Off is off: no deck, nothing dealt.
+        let mut off = Mover::new(&Look::default());
+        off.deal(&mut dice);
+        assert_eq!(off.current(), None);
+        // One name is dealt every time; there is nothing else to deal.
+        let mut one = Mover::new(&look(r#"orb = ["Back"]"#));
+        for _ in 0..3 {
+            one.deal(&mut dice);
+            assert_eq!(one.current().as_deref(), Some("Back"));
+        }
     }
 
     #[test]

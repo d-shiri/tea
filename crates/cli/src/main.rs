@@ -40,6 +40,15 @@ const CHEAT_STEPS: u32 = 20;
 /// before the sensor does is the page calling a walker a liar.
 const CHEAT_AFTER: Duration = Duration::from_secs(30);
 
+/// Emergency cancels a day.
+///
+/// One, and a hard one: spend it and the page will not offer another until
+/// tomorrow. A number rather than a config key on purpose -- the whole value
+/// of this is that it is not negotiable at the moment you want to negotiate
+/// with it, and a setting for it would be one `tea settings` away from being
+/// the thing it exists to prevent.
+const RESCUES_A_DAY: u32 = 1;
+
 #[derive(Default)]
 struct Overrides {
     work: Option<Duration>,
@@ -82,6 +91,10 @@ fn main() {
     let mut set_sound: Option<String> = None;
     let mut set_nfc: Option<String> = None;
     let mut unlock = false;
+    // For trying things: a strict hold on a ten-second `tea run` is a
+    // keyboard without its Super key and no way to say you have seen enough.
+    let mut hold_over: Option<overlay::Grip> = None;
+    let mut no_gate = false;
 
     // Indexed rather than an iterator so a command can look at the argument
     // after it without swallowing it: `tea run` and `tea run 5s` are both
@@ -121,6 +134,14 @@ fn main() {
                 i += 1;
             }
             "--headless" => headless = true,
+            "--hold" => {
+                let raw = value_at(&argv, i, "--hold");
+                hold_over = Some(overlay::Grip::named(&raw).unwrap_or_else(|| {
+                    fail(&format!("--hold: {raw:?} is not one of soft, insist, strict"))
+                }));
+                i += 1;
+            }
+            "--no-gate" => no_gate = true,
             "--probe" => probe = true,
             "reload" => reload = true,
             "off" => {
@@ -356,7 +377,7 @@ fn main() {
 
     let sound_cfg = file.sound.clone();
     let anim_cfg = file.animation.clone();
-    let hold_cfg = file.hold;
+    let mut hold_cfg = file.hold;
     let look_cfg = file.page.clone();
     let mut nfc_cfg = file.nfc.clone();
     let hours_cfg = file.hours.clone();
@@ -419,6 +440,18 @@ fn main() {
     if let Some(why) = nfc_cfg.home_assistant.publish_misconfigured() {
         eprintln!("tea: note: {why}");
     }
+    // The command line's word over the file's, for this run only, and after
+    // the file has been checked as written: the file is what every other run
+    // keeps doing, and a note about it belongs to it rather than to a flag.
+    if let Some(grip) = hold_over {
+        hold_cfg.mode = grip;
+    }
+    if no_gate {
+        // Off is the whole gate: no tag, and with it no steps and no walking,
+        // which all hang off the tag being waited for. The port stays up if
+        // the settings page wants it, and the hub is still reported to.
+        nfc_cfg.mode = nfc::Mode::Off;
+    }
     if let Some(why) = look_cfg.accent_misconfigured() {
         eprintln!("tea: note: {why}");
     }
@@ -441,6 +474,12 @@ fn main() {
         // Default to a real break, so what you see is what you will get.
         let total = run_for.unwrap_or(cfg.brk);
         println!("tea: showing the break page for {}", human(total));
+        if hold_over.is_some() {
+            println!("tea: holding {} for this run, whatever the file says", hold_cfg.mode.name());
+        }
+        if no_gate {
+            println!("tea: the gate is off for this run — the page lifts when the countdown does");
+        }
         if nfc_cfg.on() {
             println!(
                 "tea: the tag is on — after the countdown the page waits for a real scan,\n\
@@ -497,6 +536,12 @@ fn main() {
         );
     }
 
+    if hold_over.is_some() {
+        println!("hold: {} from the command line, whatever the file says", hold_cfg.mode.name());
+    }
+    if no_gate {
+        println!("nfc: off from the command line — breaks end when the countdown does");
+    }
     if nfc_cfg.on() {
         println!(
             "nfc: on — the page waits for {}, {}",
@@ -666,6 +711,7 @@ fn run_gtk(
         let ui = RefCell::new(GtkBlocker::new(
             app,
             engine.borrow().postpone_flag(),
+            engine.borrow().rescue_flags(),
             anim.clone(),
             hold,
             &look,
@@ -768,9 +814,14 @@ fn preview(
         }
         let wired = ear.is_some() || watch.is_some();
 
+        // The hatch works in a preview too, and has to: it is the one part of
+        // the page that cannot be checked by waiting for a real break, because
+        // checking it on a real break spends the day's only one.
+        let helped = Rc::new(Cell::new(false));
         let ui = Rc::new(RefCell::new(GtkBlocker::new(
             app,
             Rc::new(Cell::new(false)),
+            overlay::Rescue::new(Rc::clone(&helped), Rc::new(Cell::new(true))),
             anim.clone(),
             hold,
             &look,
@@ -919,6 +970,17 @@ fn preview(
                 }
             };
 
+            // Held down: the page goes, the same way it would on a real break
+            // -- without a tally to spend, because a preview is not a day.
+            if helped.replace(false) {
+                println!("[help]  (preview) emergency cancel — the page comes down");
+                let bow = ui.borrow().leaving_for();
+                ui.borrow_mut().release();
+                let going = app.clone();
+                glib::timeout_add_local_once(bow, move || going.quit());
+                return glib::ControlFlow::Break;
+            }
+
             if done {
                 // A scan that ended the wait already had its chime; the
                 // end-of-break sound on top would be a clatter.
@@ -969,6 +1031,9 @@ fn preview_warning(total: Duration, postpone: Duration, anim: overlay::Anim, loo
         let ui = Rc::new(RefCell::new(GtkBlocker::new(
             app,
             Rc::new(Cell::new(false)),
+            // No page, so nothing to cancel: the toast is the one thing here
+            // that never holds the screen.
+            overlay::Rescue::new(Rc::new(Cell::new(false)), Rc::new(Cell::new(false))),
             anim.clone(),
             overlay::Hold::default(),
             &look,
@@ -1003,6 +1068,16 @@ struct Engine {
     /// Downtime to account for on the first step after a restart.
     catchup: Option<(Duration, Duration)>,
     postpone: Rc<Cell<bool>>,
+    /// Raised by the break page once H has been held down long enough, and
+    /// consumed on the next tick. The page cannot reach the scheduler itself:
+    /// it fires from inside the main loop that is mid-tick.
+    rescue: Rc<Cell<bool>>,
+    /// And the answer back: whether today's one is still there to spend. Kept
+    /// up to date every tick, because the page has to know before the hold
+    /// finishes rather than after -- holding a key for two seconds and being
+    /// told afterwards that it was never going to work is the worst version
+    /// of this.
+    rescue_left: Rc<Cell<bool>>,
     sound: sound::Player,
     /// Where the tag's scans land, and where the tick leaves the answer the
     /// server gives out. Held even when nfc is off, so the tick has one shape.
@@ -1160,6 +1235,8 @@ impl Engine {
             last: now,
             catchup,
             postpone: Rc::new(Cell::new(false)),
+            rescue: Rc::new(Cell::new(false)),
+            rescue_left: Rc::new(Cell::new(true)),
             sound: sound::Player::new(sound),
             link,
             _ear: ear,
@@ -1259,8 +1336,55 @@ impl Engine {
         )
     }
 
+    /// The day's one emergency cancel, spent.
+    ///
+    /// The break is not postponed and not owed back: `skip_break` puts the work
+    /// timer to zero, so the next one falls due a full work interval from now,
+    /// exactly as though this one had been taken. That is the right shape for
+    /// an emergency -- you were not dodging a break, something happened -- and
+    /// the thing that keeps it honest is not making you pay it back, it is that
+    /// there is one of them and the log has it forever.
+    ///
+    /// Nothing here can fail in a way that leaves the page up. The tally, the
+    /// log line and the hub are all after the release for that reason: a
+    /// history file that cannot be written must never be the reason somebody
+    /// is still staring at a break page during an emergency.
+    fn pull_the_cord(&mut self, ui: &mut dyn Blocker) {
+        if !self.sched.snapshot().breaking {
+            // The page came down between the hold finishing and this tick --
+            // the countdown ran out, or a scan landed. Nothing to cancel, and
+            // the day's one is still there.
+            return;
+        }
+        // The page checks this before it offers the hold, so the only way here
+        // is a day that rolled over mid-hold. Refuse rather than overspend.
+        if self.tally.rescues >= RESCUES_A_DAY {
+            println!("[help]  no emergency cancel left today");
+            return;
+        }
+
+        self.sched.skip_break();
+        ui.release();
+
+        self.tally.rescues += 1;
+        self.rescue_left.set(false);
+        println!("[help]  emergency cancel — the break is off, and that is today's one");
+        history::append(&history::Event::Rescue { t: clock::unix_now() });
+        self.tell("rescue", json!({ "left": RESCUES_A_DAY - self.tally.rescues }));
+        // Forced, unlike most ticks: the one thing that must survive a crash
+        // in the next five seconds is the fact that today's cancel has gone.
+        if let Some(store) = &mut self.store {
+            store.save(self.sched.snapshot(), &self.tally, boottime(), true);
+        }
+    }
+
     fn postpone_flag(&self) -> Rc<Cell<bool>> {
         Rc::clone(&self.postpone)
+    }
+
+    /// The two cells the break page needs to offer the hatch at all.
+    fn rescue_flags(&self) -> overlay::Rescue {
+        overlay::Rescue::new(Rc::clone(&self.rescue), Rc::clone(&self.rescue_left))
     }
 
     /// Something happened, said to the hub -- if there is a hub to say it to.
@@ -1392,8 +1516,11 @@ impl Engine {
             }
         }
 
-        // Yesterday's four breaks are not today's.
+        // Yesterday's four breaks are not today's -- and yesterday's spent
+        // rescue is not today's either, which is the whole of how the daily
+        // one comes back.
         self.tally.roll(&clock::today());
+        self.rescue_left.set(self.tally.rescues < RESCUES_A_DAY);
 
         // The server never touches the scheduler; this is where a scan that
         // arrived between ticks actually lands.
@@ -1553,6 +1680,13 @@ impl Engine {
                 }
                 other => println!("[snooze] refused: {other:?}"),
             }
+        }
+
+        // The hatch. Read the same way the postpone flag is, and acted on in
+        // the same place: by the time this runs the page has already had the
+        // key held down against it for two seconds.
+        if self.rescue.replace(false) {
+            self.pull_the_cord(ui);
         }
 
         let now = boottime();
@@ -1840,6 +1974,8 @@ fn usage() {
         ("    --postpone <dur>", "time one postpone buys"),
         ("    --postpone-budget <n>", "postpones allowed per window"),
         ("    --headless", "terminal only, no GTK window"),
+        ("    --hold <mode>", "soft, insist or strict, instead of the file's"),
+        ("    --no-gate", "no tag, no walk: breaks end on the countdown"),
         ("    --probe", "print idle/inhibitor readings and exit"),
         ("    --write-config", "create the starter config and exit"),
         ("    --no-open", "with `dash`: write the page, don't open it"),
@@ -1865,6 +2001,9 @@ fn usage() {
     for (flag, what) in OPTIONS {
         println!("  {flag:<width$}{what}");
     }
+
+    println!("\nOn the break page, holding H for two seconds cancels the break.");
+    println!("One a day, counted in `tea status` and `tea dash`.");
 
     println!("\nSettings live in ~/.config/tea/config.toml, or $XDG_CONFIG_HOME/tea/.");
     println!("Durations: 90s, 25m, 1h. A bare number means minutes.");

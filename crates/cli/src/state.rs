@@ -65,6 +65,8 @@ struct Saved {
     #[serde(default)]
     cheats_today: u32,
     #[serde(default)]
+    rescues_today: u32,
+    #[serde(default)]
     chores_today: u32,
     #[serde(default)]
     worked_today_ms: u64,
@@ -94,6 +96,11 @@ pub struct Tally {
     /// time: the count came from a hand, not a walk. Kept because shame is a
     /// feature.
     pub cheats: u32,
+    /// Emergency cancels spent today. There is one a day, so this is nought or
+    /// one -- kept as a number anyway, because a count is what the dashboard
+    /// adds up over three weeks and "how often did I actually need it" is the
+    /// only question worth asking of a hatch.
+    pub rescues: u32,
     /// Jobs ticked off the list while a break was on screen. The number that
     /// says what the breaks were actually *for*: everything else here counts
     /// what the timer did, and this counts what came of it.
@@ -112,7 +119,7 @@ impl Tally {
 
     /// Whether anything happened at all today.
     pub fn quiet(&self) -> bool {
-        self.breaks == 0 && self.postponed == 0 && self.credited == 0
+        self.breaks == 0 && self.postponed == 0 && self.credited == 0 && self.rescues == 0
     }
 }
 
@@ -267,6 +274,7 @@ impl Store {
                 credited: saved.credited_today,
                 steps: saved.steps_today,
                 cheats: saved.cheats_today,
+                rescues: saved.rescues_today,
                 chores: saved.chores_today,
                 worked_ms: saved.worked_today_ms,
             },
@@ -303,6 +311,7 @@ impl Store {
             credited_today: tally.credited,
             steps_today: tally.steps,
             cheats_today: tally.cheats,
+            rescues_today: tally.rescues,
             chores_today: tally.chores,
             worked_today_ms: tally.worked_ms,
         };
@@ -365,7 +374,17 @@ mod tests {
 
     #[test]
     fn the_tally_starts_again_at_midnight() {
-        let mut day = Tally { day: "2026-08-31".into(), breaks: 4, postponed: 2, steps: 300, ..Tally::default() };
+        // The day's spent cancel is in here on purpose: rolling over is the
+        // whole of how the next day gets one, so it is the thing this test is
+        // really about.
+        let mut day = Tally {
+            day: "2026-08-31".into(),
+            breaks: 4,
+            postponed: 2,
+            steps: 300,
+            rescues: 1,
+            ..Tally::default()
+        };
         day.roll("2026-08-31");
         assert_eq!(day.breaks, 4, "the same day keeps its numbers");
 

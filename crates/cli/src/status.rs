@@ -167,6 +167,12 @@ pub fn show(
             if today.worked_ms >= 60_000 {
                 parts.push(format!("{} worked", human(Duration::from_millis(today.worked_ms))));
             }
+            if today.rescues > 0 {
+                // Said plainly rather than counted: there is one of these a
+                // day, so "1 cancelled" would be arithmetic about a number
+                // that can only ever be one.
+                parts.push("the day's cancel spent".to_string());
+            }
             if today.cheats > 0 {
                 parts.push(format!("{} nice tries", today.cheats));
             }

@@ -40,15 +40,20 @@ const JOBS_TIMEOUT: u32 = 2;
 /// Household jobs do not change between one second and the next, and this is a
 /// service call rather than a state lookup.
 const JOBS_EVERY: Duration = Duration::from_secs(10);
-/// How often the phone is asked for a fresh reading, and how long a break waits
-/// before the first one.
+/// How long a break waits before the first poke, and how often they come after
+/// that.
 ///
-/// Ten seconds either way. Sooner than that is asking a phone about a walk that
-/// has not started -- the first ten seconds of a break are spent standing up --
-/// and the poll interval is far too often: this is a push notification to a
-/// phone, not a state lookup, and one every couple of seconds is a phone that
-/// spends the break talking instead of counting.
-const NUDGE_EVERY: Duration = Duration::from_secs(10);
+/// Ten seconds before the first: sooner is asking a phone about a walk that
+/// has not started, because the first ten seconds of a break are spent
+/// standing up. Thirty between the rest. A phone in a pocket with the screen
+/// off holds most pokes back anyway, and the step count it reports comes from
+/// Health Connect, which is written in batches a minute or two apart -- so a
+/// poke every ten seconds was a phone spending the break being notified about
+/// a number that had not changed since the last one. Thirty is often enough
+/// that a batch is picked up within half a minute of landing, and seldom
+/// enough that nobody's pocket buzzes for nothing.
+const NUDGE_FIRST: Duration = Duration::from_secs(10);
+const NUDGE_EVERY: Duration = Duration::from_secs(30);
 /// What the phone gets, and the only message tea ever sends one. The Android
 /// companion app reads it as an order to report every sensor it has, now.
 const NUDGE_BODY: &str = "{\"message\":\"command_update_sensors\"}";
@@ -738,9 +743,10 @@ pub struct HomeAssistant {
     /// minute, at best -- so a break can spend its first minute waiting to hear
     /// about a walk that is already over. The way out is to ask: the Android
     /// companion app answers a notification of `command_update_sensors` by
-    /// reporting everything it has, at once. Set this and tea sends one every
-    /// ten seconds while a break is on screen, so the steps turn up on the next
-    /// poll rather than on the phone's next minute.
+    /// reporting everything it has, at once. Set this and tea sends one ten
+    /// seconds into a break and every thirty seconds after that while the page
+    /// is up, so the steps turn up on the next poll rather than on the phone's
+    /// next minute.
     ///
     /// The phone's notify service -- `notify.mobile_app_<phone>`, or just
     /// `mobile_app_<phone>`. Empty pokes nobody, which is the default.
@@ -869,11 +875,21 @@ impl HomeAssistant {
     }
 
     /// How many polls apart the pokes are. The poll is the only beat there is,
-    /// so ten seconds is however many of them land nearest to ten seconds --
-    /// five at the default two, and every single one of a poll slower than the
-    /// nudge itself.
+    /// so thirty seconds is however many of them land nearest to thirty --
+    /// fifteen at the default two, and every single one of a poll slower than
+    /// the nudge itself.
     fn nudge_beats(&self) -> u32 {
-        ((NUDGE_EVERY.as_secs_f64() / self.every().as_secs_f64()).round() as u32).max(1)
+        Self::beats(NUDGE_EVERY, self.every())
+    }
+
+    /// And how many polls a break waits before the first one: the ten seconds
+    /// spent standing up, in the same units.
+    fn nudge_first_beats(&self) -> u32 {
+        Self::beats(NUDGE_FIRST, self.every())
+    }
+
+    fn beats(span: Duration, poll: Duration) -> u32 {
+        ((span.as_secs_f64() / poll.as_secs_f64()).round() as u32).max(1)
     }
 
     /// And how long that comes to, for saying so out loud.
@@ -1088,6 +1104,15 @@ fn greet(conn: gio::SocketConnection, token: Rc<String>, link: Rc<Link>, site: R
         Vec::new(),
         cancel,
         Box::new(move |raw| {
+            // A connection that opened and never spoke gets no reply, only
+            // the door closed. Chrome opens a socket the moment you start
+            // typing the address and sends the request on it seconds later;
+            // an answer written into that silence is what it reads back as
+            // the page, and "GET or POST" is not the settings page.
+            if unspoken(&raw) {
+                let _ = conn.close(gio::Cancellable::NONE);
+                return;
+            }
             let reply = answer(&raw, &token, &link, &who, site.as_ref().as_ref());
             // Best effort: a phone that has already walked out of range is not
             // an error worth reporting, and the scan itself is already counted.
@@ -1126,6 +1151,13 @@ fn read_request(
             _ => done(acc),
         }
     });
+}
+
+/// Whether the client never said anything at all: nothing arrived before the
+/// timeout or the hang-up. Distinct from a request that arrived broken, which
+/// deserves an answer saying so.
+fn unspoken(raw: &[u8]) -> bool {
+    raw.iter().all(u8::is_ascii_whitespace)
 }
 
 /// Where the headers stop, if they have: the index just past the blank line.
@@ -1609,10 +1641,11 @@ struct Nudge {
     /// What the hub calls it, for saying which service went wrong.
     service: String,
     path: String,
-    /// Beats between pokes, and how many are left before the next one. Set one
-    /// short of a full round, so the first poke of a break lands on the tenth
-    /// second rather than the twelfth.
+    /// Beats between pokes, beats before the first of a break, and how many are
+    /// left before the next one. Each starts one short of its round, so a poke
+    /// lands on the tenth second rather than the twelfth.
     every: u32,
+    first: u32,
     due: Cell<u32>,
     /// One poke in flight at a time: a hub that has gone slow must not end up
     /// with a queue of orders for the phone.
@@ -1640,7 +1673,7 @@ impl Nudge {
 
     /// Back to how a break starts: the next one waits its ten seconds too.
     fn forget(&self) {
-        self.due.set(self.every.saturating_sub(1));
+        self.due.set(self.first.saturating_sub(1));
         self.said.set(false);
         self.complained.set(false);
     }
@@ -1925,17 +1958,18 @@ pub fn watch(cfg: &Config, link: Rc<Link>) -> Result<Watch, String> {
     });
 
     // Only when something is actually waiting on the phone. Poking one whose
-    // sensors nobody reads is a notification every ten seconds for nothing.
+    // sensors nobody reads is a notification every half minute for nothing.
     let nudge = (ha.nudges() && (cfg.counts_steps() || cfg.counts_moving()))
         .then(|| ha.nudge_call())
         .flatten()
         .map(|(domain, service)| {
-            let every = ha.nudge_beats();
+            let first = ha.nudge_first_beats();
             Nudge {
                 path: format!("{base}/api/services/{domain}/{service}"),
                 service: format!("{domain}.{service}"),
-                every,
-                due: Cell::new(every.saturating_sub(1)),
+                every: ha.nudge_beats(),
+                first,
+                due: Cell::new(first.saturating_sub(1)),
                 busy: Cell::new(false),
                 said: Cell::new(false),
                 complained: Cell::new(false),
@@ -2098,7 +2132,9 @@ fn poke(ask: Rc<Ask>) {
     match &ask.nudge {
         // Still telling it about the last beat: let this one go by rather than
         // stack up a second order behind the first.
-        Some(nudge) if !nudge.busy.get() && nudge.pokes_now() => nudge.busy.set(true),
+        Some(nudge) if wanted(&ask) && !nudge.busy.get() && nudge.pokes_now() => {
+            nudge.busy.set(true)
+        }
         _ => return,
     }
     glib::MainContext::default().spawn_local(async move {
@@ -2212,13 +2248,26 @@ fn read_state(raw: &[u8], entity: &str) -> Result<String, String> {
         .map_err(|e| format!("cannot read the answer about {entity}: {e}"))
 }
 
+/// Whether the phone is still worth waking: some half of the gate is waiting on
+/// a sensor of its.
+///
+/// The walk usually comes in with minutes of the break still to run, and every
+/// poke after that is a notification asking about a number nothing reads any
+/// more. A count that goes *down* -- midnight, a re-paired phone -- moves the
+/// mark and starts the walk over, and the poking starts again with it.
+fn wanted(ask: &Ask) -> bool {
+    let walking = ask.legs.is_some() && !ask.link.walk().is_some_and(|walk| walk.done());
+    let moving = ask.gait.is_some() && !ask.link.motion().is_some_and(|motion| motion.done());
+    walking || moving
+}
+
 /// Whether the hub took the order to poke the phone.
 ///
 /// There is nothing to read in the reply: a notify service answers with an
 /// empty list whatever the phone does about it, and what it does about it turns
 /// up as a step count or does not turn up at all. Only the status line matters,
 /// and only so that a name nobody can call is said out loud once rather than
-/// failing quietly every ten seconds for the rest of the day.
+/// failing quietly every half minute for the rest of the day.
 fn read_poke(raw: &[u8], service: &str) -> Result<(), String> {
     let text = String::from_utf8_lossy(raw);
     let (head, _) = text
@@ -2757,6 +2806,19 @@ mod tests {
     }
 
     #[test]
+    fn a_connection_that_never_spoke_is_closed_without_a_word() {
+        // The browser's speculative socket: opened early, silent until the
+        // real request, which must not find a 405 already waiting for it.
+        assert!(unspoken(b""));
+        assert!(unspoken(b"\r\n"));
+        // Anything actually said is answered, however badly it went.
+        assert!(!unspoken(b"G"));
+        assert!(!unspoken(b"GET /settings HTTP/1.1\r\n"));
+        assert!(answer(b"BREW /settings HTTP/1.1\r\n\r\n", "s3cret", &Link::new(), "test", None)
+            .starts_with("HTTP/1.1 405"));
+    }
+
+    #[test]
     fn the_right_token_on_a_waiting_break_unlocks_it() {
         let link = link_with(Desk { breaking: true, waiting: true, ..Desk::default() });
         assert!(get(&link, "/unlock?token=s3cret").starts_with("HTTP/1.1 200"));
@@ -3073,12 +3135,13 @@ mod tests {
 
     /// A phone with nothing else in it, set up the way `watch` sets one up.
     fn poking(ha: &HomeAssistant) -> Nudge {
-        let every = ha.nudge_beats();
+        let first = ha.nudge_first_beats();
         Nudge {
             service: "notify.mobile_app_pixel".into(),
             path: "/api/services/notify/mobile_app_pixel".into(),
-            every,
-            due: Cell::new(every.saturating_sub(1)),
+            every: ha.nudge_beats(),
+            first,
+            due: Cell::new(first.saturating_sub(1)),
             busy: Cell::new(false),
             said: Cell::new(false),
             complained: Cell::new(false),
@@ -3086,26 +3149,30 @@ mod tests {
     }
 
     #[test]
-    fn the_phone_is_poked_ten_seconds_into_a_break_and_every_ten_after_that() {
+    fn the_phone_is_poked_ten_seconds_into_a_break_and_every_thirty_after_that() {
         let ha = HomeAssistant {
             url: "http://h:8123".into(),
             nudge: "notify.mobile_app_pixel".into(),
             ..Default::default()
         };
-        // Five of the default two-second beats to the round, and the poke on
-        // the fifth of them rather than the first: the first ten seconds of a
-        // break are spent standing up, and a phone asked about a walk that has
-        // not started yet has nothing to say.
-        assert_eq!(ha.nudge_every(), Duration::from_secs(10));
+        // Five of the default two-second beats to the first poke, on the fifth
+        // of them rather than the first: the first ten seconds of a break are
+        // spent standing up, and a phone asked about a walk that has not
+        // started yet has nothing to say. Fifteen to every round after that:
+        // the count it reports is written a minute or two apart, and a pocket
+        // buzzed every ten seconds about the same number is a pocket that
+        // switches the whole thing off.
+        assert_eq!(ha.nudge_every(), Duration::from_secs(30));
         let nudge = poking(&ha);
         let beats = |n: u32| (0..n).map(|_| nudge.pokes_now()).collect::<Vec<_>>();
-        let round = vec![false, false, false, false, true];
-        assert_eq!(beats(10), [round.clone(), round.clone()].concat());
+        let opening = vec![false, false, false, false, true];
+        let round = [vec![false; 14], vec![true]].concat();
+        assert_eq!(beats(20), [opening.clone(), round.clone()].concat());
         // A break that ends mid-round lends none of its beats to the next one:
-        // that break waits its own ten seconds.
+        // that break waits its own ten seconds, not the rest of a half minute.
         nudge.pokes_now();
         nudge.forget();
-        assert_eq!(beats(5), round);
+        assert_eq!(beats(5), opening);
         // And a beat that arrives while the last poke is still in flight is
         // skipped rather than queued -- which is the poll's own bargain, and
         // the reason `busy` is looked at before the beat is spent.
@@ -3114,8 +3181,28 @@ mod tests {
     }
 
     #[test]
+    fn the_phone_is_left_alone_once_the_gate_has_what_it_wants() {
+        let link = link_with(Desk { breaking: true, ..Default::default() });
+        let ask = asking_with_legs(&link, 20);
+        // Nothing walked yet, and the phone is the only thing that can say
+        // otherwise.
+        link.post_walk(Walk { walked: 0, needed: 20, marked: true });
+        assert!(wanted(&ask));
+        // The walk is in with minutes of the break still to run: a fresh
+        // reading now would change nothing, so the phone is left in peace.
+        link.post_walk(Walk { walked: 20, needed: 20, marked: true });
+        assert!(!wanted(&ask));
+        // Until a count that goes down moves the mark and starts the walk
+        // over, which starts the poking over with it.
+        link.post_walk(Walk { walked: 3, needed: 20, marked: true });
+        assert!(wanted(&ask));
+        // And a gate with neither half in it never wanted the phone at all.
+        assert!(!wanted(&asking(&link)));
+    }
+
+    #[test]
     fn a_poll_slower_than_the_nudge_pokes_on_every_beat_of_it() {
-        // The poll is the only beat there is, so the ten seconds is however
+        // The poll is the only beat there is, so the half minute is however
         // many polls land nearest to it -- and never fewer than one.
         let polling = |secs| HomeAssistant {
             poll: crate::config::Dur(Duration::from_secs(secs)),
@@ -3123,8 +3210,11 @@ mod tests {
         };
         assert_eq!(polling(30).nudge_beats(), 1);
         assert_eq!(polling(30).nudge_every(), Duration::from_secs(30));
-        assert_eq!(polling(3).nudge_beats(), 3);
-        assert_eq!(polling(3).nudge_every(), Duration::from_secs(9));
+        assert_eq!(polling(30).nudge_first_beats(), 1);
+        assert_eq!(polling(7).nudge_beats(), 4);
+        assert_eq!(polling(7).nudge_every(), Duration::from_secs(28));
+        assert_eq!(polling(7).nudge_first_beats(), 1);
+        assert_eq!(polling(3).nudge_first_beats(), 3);
     }
 
     #[test]
@@ -3140,7 +3230,7 @@ mod tests {
         assert!(cfg.home_assistant.nudges());
         assert_eq!(cfg.home_assistant.nudge_call(), Some(("notify", "mobile_app_pixel")));
         // On, with no sensor of the phone's being read: a notification every
-        // ten seconds for nobody.
+        // half minute for nobody.
         assert!(cfg.nudge_misconfigured().unwrap().contains("both off"));
         cfg.steps.mode = Mode::On;
         cfg.steps.entity = "sensor.steps".into();

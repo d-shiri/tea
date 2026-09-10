@@ -85,13 +85,25 @@ pub enum Event {
         /// How long you were away, in seconds.
         idle: u64,
     },
+    /// The day's one emergency cancel, spent: the page came down because it
+    /// was held down, not because the break was taken.
+    ///
+    /// A line of its own for the same reason a postpone gets one -- it is the
+    /// interesting failure, and the only reason to have a hatch you can count
+    /// is to be able to count it. Nothing else about the break is recorded,
+    /// because there was no break: `skip_break` puts the work timer back to
+    /// zero and this is what it looked like from outside.
+    Rescue { t: u64 },
 }
 
 impl Event {
     /// When it happened, whatever it was.
     pub fn at(&self) -> u64 {
         match *self {
-            Event::Break { t, .. } | Event::Postpone { t } | Event::Credited { t, .. } => t,
+            Event::Break { t, .. }
+            | Event::Postpone { t }
+            | Event::Credited { t, .. }
+            | Event::Rescue { t } => t,
         }
     }
 }

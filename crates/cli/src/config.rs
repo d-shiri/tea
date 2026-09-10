@@ -138,12 +138,19 @@ shards = 26
 #               shoulders, drink some water -- and a list of your own does the
 #               same with your words: prompts = ["Water.", "Look out of the window."]
 #   prompt_every  how long each one stays up.
+#   orb         a lit circle in the bottom-right corner naming what this
+#               break is for -- Back, Neck, Eyes -- a different one each
+#               break, every one before any comes round again. "off" and
+#               there is no orb. "on" deals from a built-in list of the parts
+#               of you that sit at a desk; names of your own do the same:
+#               orb = ["Back", "Eyes", "Squats"]
 [page]
 accent = "#7aa2ff"
 background = "dark"
 font = ""
 prompts = "off"
 prompt_every = "20s"
+orb = "off"
 
 # The one port tea answers on. The tag's URL points here when tea does its own
 # listening (see [nfc]), and the settings page is served here (see [settings]).
@@ -194,16 +201,17 @@ prompt = "Scan the tag to get your desk back"
 # to hear about a walk that is already over. `nudge` is the way out of that: the
 # Android companion app answers a notification of `command_update_sensors` by
 # reporting everything it has, at once. Tea sends one ten seconds into a break
-# and every ten seconds after that, and the steps turn up on the next poll
+# and every thirty seconds after that, and the steps turn up on the next poll
 # rather than on the phone's next minute. Nothing waits on it -- a poke the hub
 # will not take is one line on stderr and a break that ends exactly as it would
 # have without any of this.
 #
 #   nudge   the phone's notify service: "notify.mobile_app_<phone>", or the
-#           bare "mobile_app_<phone>". Only sent while a break is on screen and
-#           only when the steps or the moving are being read -- a phone nobody
-#           is listening to is a phone with no reason to be woken. Empty pokes
-#           nobody, which is the default.
+#           bare "mobile_app_<phone>". Only sent while a break is on screen,
+#           only when the steps or the moving are being read, and only until
+#           the gate has what it wants -- a walk that is already in is a phone
+#           with no reason to be woken. Empty pokes nobody, which is the
+#           default.
 #
 # And the other way round. With `publish` on, tea keeps a sensor on the hub
 # saying what it is doing -- "working", "warning", "break", "waiting", "held",

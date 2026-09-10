@@ -9,6 +9,7 @@
 #   break_end    the page came down  (len, steps, gate: none|scanned|walked|grace, long)
 #   postpone     a postpone was granted  (left)
 #   credited     time away counted as the break  (idle: seconds)
+#   rescue       the day's one emergency cancel was spent  (left: 0)
 #   held         a break is owed and something is holding it  (waiting: seconds)
 #   off / on     tea went to sleep (why) / woke up
 #

@@ -163,6 +163,7 @@ fn gather(
             "steps": t.steps,
             "chores": t.chores,
             "cheats": t.cheats,
+            "rescues": t.rescues,
             "worked_min": t.worked_ms / 60_000,
         })),
         "settings": {

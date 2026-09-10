@@ -352,6 +352,11 @@ pub fn show(cfg: &Config, file: &FileConfig, path: &Path) {
     } else {
         field(&s, "prompts", "off", "the page says its one line and no more");
     }
+    if look.orb.on() {
+        field(&s, "orb", "", &look.orb.describe());
+    } else {
+        field(&s, "orb", "off", "nothing in the corner");
+    }
 
     section(&s, "the tag");
     let nfc = &file.nfc;

@@ -329,6 +329,8 @@ const ICONS = {
   check:    '<path d="M3.5 6.6 5.2 8.3 8.4 5M3.5 13.1 5.2 14.8 8.4 11.5M3.5 19.6 5.2 21.3 8.4 18"/><path d="M11.8 6.7h8.7M11.8 13.2h8.7M11.8 19.7h8.7"/>',
   flame:    '<path d="M12 21.5c3.6 0 6.5-2.7 6.5-6.2 0-4.3-4.1-5.6-4.1-9 0-.9-.3-1.9-.9-3-2.3 2.4-3 4.1-3 5.6 0 1.5.7 2.2.7 3.2 0 .9-.7 1.6-1.6 1.6-1.1 0-1.9-.9-1.9-2.3-1.5 1.5-2.2 3.2-2.2 4.9 0 3.5 2.9 6.2 6.5 6.2Z"/>',
   target:   '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="3.4"/>',
+  /* A lifebuoy, for the one thing on this page that is not about the habit. */
+  buoy:     '<circle cx="12" cy="12" r="8.6"/><circle cx="12" cy="12" r="3.6"/><path d="M5.9 5.9 9.5 9.5M18.1 5.9 14.5 9.5M18.1 18.1 14.5 14.5M5.9 18.1 9.5 14.5"/>',
   trend:    '<path d="M3 16.8 9.2 10.2l3.9 3.6L20.8 5.4"/><path d="M15.3 5.4h5.5v5.5"/>',
   clock:    '<circle cx="12" cy="12" r="8.6"/><path d="M12 6.9V12l3.5 2.1"/>',
   bars:     '<path d="M3.5 20.6h17"/><path d="M6.8 17.2V10.6M12 17.2V4.9M17.2 17.2v-3.9"/>',
@@ -372,7 +374,7 @@ const firstEvent = EVENTS.length ? Math.min(...EVENTS.map(e => e.t)) : DATA.gene
  *  skip a day or count one twice. */
 function byDay(events, since) {
   const rows = new Map();
-  const blank = k => ({ key: k, taken: 0, credited: 0, postponed: 0, steps: 0, walked: 0, chores: 0 });
+  const blank = k => ({ key: k, taken: 0, credited: 0, postponed: 0, steps: 0, walked: 0, chores: 0, rescued: 0 });
   for (let t = noon(Math.max(since, firstEvent)); t <= DATA.generated + DAY / 2; t += DAY) {
     rows.set(dayKey(t), blank(dayKey(t)));
   }
@@ -386,6 +388,7 @@ function byDay(events, since) {
     }
     else if (e.kind === "credited") r.credited++;
     else if (e.kind === "postpone") r.postponed++;
+    else if (e.kind === "rescue") r.rescued++;
   }
   return [...rows.values()].sort((a, b) => a.key < b.key ? -1 : 1);
 }
@@ -1068,6 +1071,7 @@ function counted(ev) {
     breaks: brk.length + ev.filter(e => e.kind === "credited").length,
     perBreak: walked.length ? Math.round(walked.reduce((a, e) => a + e.steps, 0) / walked.length) : null,
     chores: brk.reduce((a, e) => a + (e.chores || 0), 0),
+    rescues: ev.filter(e => e.kind === "rescue").length,
   };
 }
 
@@ -1112,7 +1116,9 @@ function renderTiles() {
   const was = back ? counted(back) : { breaks: null, perBreak: null, chores: null };
 
   box.appendChild(tile("sun", "Today", t ? num(t.breaks) : "—", t ? (t.breaks === 1 ? " break" : " breaks") : "",
-    t ? num(t.steps) + " steps · " + t.credited + " away from the desk" : "the service has not saved anything yet",
+    t ? num(t.steps) + " steps · " + t.credited + " away from the desk"
+        + (t.rescues ? " · the day's cancel is gone" : "")
+      : "the service has not saved anything yet",
     null, 0));
   box.appendChild(tile("cup", "Breaks", num(now.breaks), now.breaks === 1 ? " break" : " breaks",
     num(brk.length) + " on the page · " + num(credited) + " credited",
@@ -1132,6 +1138,15 @@ function renderTiles() {
       "ticked off on breaks in " + window_ + (t ? " · " + num(t.chores) + " today" : ""),
       sparkline(tail.map(r => r.chores), S.s2, SW, SH), 180,
       delta(now.chores, was.chores)));
+  }
+  // Only once it has ever been reached for. There is one of these a day and
+  // the ordinary number is nought, so a tile permanently reading "0 cancelled"
+  // would be a scold on every good day -- and the whole point of counting them
+  // is the shape over weeks, which does not exist until there is a first one.
+  if (now.rescues > 0 || (t && t.rescues > 0)) {
+    box.appendChild(tile("buoy", "Cancelled", num(now.rescues), now.rescues === 1 ? " break" : " breaks",
+      "held down to end a break in " + window_ + " · one a day is all there is",
+      sparkline(tail.map(r => r.rescued), S.s4, SW, SH), 200));
   }
   const run = streak(ever), most = best(ever);
   box.appendChild(tile("flame", "Streak", num(run), " days",
@@ -1162,9 +1177,9 @@ function renderTables() {
   box.replaceChildren();
   const rows = byDay(slice(), from()).slice().reverse();
   box.appendChild(table("Every day in this window",
-    ["Day", "Taken", "Credited", "Postponed", "Steps", "Tasks"],
+    ["Day", "Taken", "Credited", "Postponed", "Steps", "Tasks", "Cancelled"],
     rows.map(r => [short(r.key), num(r.taken), num(r.credited), num(r.postponed), num(r.steps),
-      num(r.chores)])));
+      num(r.chores), r.rescued ? num(r.rescued) : "—"])));
 
   const gateName = k => (GATES.find(g => g.key === k) || GATES[3]).label;
   box.appendChild(table("Every break in this window",

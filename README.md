@@ -220,6 +220,41 @@ right the moment it is next run. `tea off` mid-break puts it back too, since
 it takes the page down.
 `insist` makes leaving a thing you have to keep choosing.
 
+### The one way out
+
+Everything above is about making a break hard to walk away from. This is the
+one thing on the page that ends it on purpose: **hold H** — for help — for two
+seconds, and the break is cancelled.
+
+One a day. Spend it and the page says so the next time you press, and there is
+no second one until tomorrow; the count rolls over at midnight with the rest of
+the day's numbers. There is no setting for it, deliberately — the whole value
+of a hatch like this is that it cannot be argued with at the moment you want to
+argue with it, and a config key would put it one `tea settings` away from being
+the thing it exists to prevent.
+
+It is held rather than tapped because the page takes the keyboard the instant
+it arrives, so whatever you were mid-sentence on lands here. A single keystroke
+being the only cancel you get today is not a hatch, it is a trapdoor. Two
+seconds is the same two seconds in a real emergency as it is in a weak moment;
+the difference is that in the weak moment you have time to notice what you are
+doing.
+
+Nothing about it is hidden and nothing about it is advertised. The page shows
+no sign of it until the key goes down — a break page that offers the way out on
+every break is a break page suggesting it — and from then on it fills a line
+under the word while you hold, so you can see what you are spending.
+
+The break is cancelled, not postponed and not owed back: the work timer goes to
+zero and the next break falls due a full interval from now, exactly as though
+this one had been taken. That is the right shape for an emergency. What keeps
+it honest is not making you pay it back, it is that there is one of them and
+the log has it forever — `tea status` says the day's cancel is spent, `tea dash`
+grows a **Cancelled** tile the first time you ever use one and a column in the
+daily table, and Home Assistant gets a `rescue` event like any other. The
+question worth answering is not whether you used it today, it is how the last
+three weeks look.
+
 ## The page
 
 The page as it ships is the default, pixel for pixel. `[page]` is for
@@ -231,6 +266,7 @@ departing from it on purpose:
     font = ""               # a family name; empty takes the first monospaced face you have
     prompts = "off"         # "on", or a list of your own lines
     prompt_every = "20s"
+    orb = "off"             # "on", or a list of your own: a lit circle naming what this break is for
 
 `accent` recolours everything on the page that is not text — the text stays
 white on dark, because it is meant to be read from the doorway. A colour that
@@ -253,10 +289,27 @@ own does the same with your words:
 Only while the countdown runs. Once the page is waiting on the tag it has one
 thing to say and says that.
 
+`orb` puts an orb in the bottom-right corner — a lit circle in a warm
+orange of its own, breathing slowly, its rim wandering — with one word in it:
+what this break is for. Orange whatever the accent is, so it reads as a
+different thing from the ring: one is the time, the other is what to do with it.
+`"on"` deals from a built-in list of the parts of you that sit at a desk:
+back, neck, shoulders, arms, wrists, eyes, hips, legs, and one break in nine
+just to breathe. A different one each break, and every one of them before any
+comes round again, so nine breaks are nine different stretches rather than
+"Eyes" three times before lunch. A list of your own does the same with your
+words:
+
+    orb = ["Back", "Eyes", "Squats", "Stairs"]
+
+The orb does not say what to do for your back. You know; it is there so the
+break is a break for something in particular.
+
 ### What moves on it
 
 Four things, and each of them is the page saying something it cannot say in
-words to somebody who has stopped reading it.
+words to somebody who has stopped reading it. Five with the orb, which is the
+one exception: it moves the whole time, slowly, in a box of its own.
 
 - The **arrival**: the dark washes in, a blast goes out past the corners and
   the dial lands in the middle of it. `[animation] entrance` is how long that
@@ -273,6 +326,11 @@ words to somebody who has stopped reading it.
 - The **exit**: the ring draws itself back in and the page fades out from
   under it, over a share of whatever the entrance was set to. Switching the
   entrance off takes the exit with it.
+
+And the **orb**, where there is one: its light swells and falls over four
+seconds and its rim wanders a few pixels, two slow waves running round it in
+opposite directions so it never quite repeats. Fifteen frames a second over a
+box the size of a coaster, on its own clock rather than the page's.
 
 And on a break that is being walked off, each square of the step meter lands
 rather than appears — a little too big, with a glow, settling into the grid.
@@ -537,13 +595,21 @@ at once. Name the phone and tea sends one:
     entity = "tag.living_room"
     nudge = "notify.mobile_app_pixel"
 
-Ten seconds into the break, and every ten seconds after that for as long as the
-page is up. The first ten are yours — a phone asked about a walk that has not
-started has nothing to say — and after them the count arrives on the next poll,
-a second or two, rather than on the phone's next minute. The page lifts when you
-get back instead of a minute after. `mobile_app_pixel` without the `notify.` in
+Ten seconds into the break, and every thirty seconds after that for as long as
+the page is up. The first ten are yours — a phone asked about a walk that has
+not started has nothing to say — and after them the count arrives within half a
+minute of the phone having it, rather than on the phone's next minute. Not more
+often than that: a phone in a pocket with the screen off holds most pokes back
+anyway, and the count it reports is written a minute or two apart, so a poke
+every ten seconds was a pocket buzzed about a number that had not changed. `mobile_app_pixel` without the `notify.` in
 front does the same thing: the service is the name your phone registered with,
 and `notify.` is the only domain it could be in.
+
+It stops the moment the gate has what it wants. The walk usually comes in with
+minutes of the break still to run, and a fresh reading after that is a
+notification about a number nothing is reading any more — so the poking ends
+with the walk and starts again only if the count goes backwards and the walk
+with it.
 
 Nothing waits on it. The poke goes out on its own errand rather than joining the
 poll's queue of questions, so a hub that has gone slow costs the gate nothing,
@@ -552,7 +618,7 @@ line on stderr and a break that ends exactly as it would have without any of
 this. It is sent only while a break is on screen, and only when something is
 actually reading that phone: with `[nfc.steps]` and `[nfc.moving]` both off
 there is nothing to wake it for, and tea says so at startup rather than
-notifying your pocket every ten seconds for nobody.
+notifying your pocket every half minute for nobody.
 
 ### And something to do with it
 
@@ -651,7 +717,8 @@ attributes: `next_break_at` and `break_ends_at` as timestamps, `steps_walked`
 and `steps_needed`, `tag_scanned`, `postpones_left`, today's `breaks_today` and
 `steps_today`, and `why_off` when it is asleep. And at each turn it fires a
 `tea` event with `what` set to the turn: `warning`, `break_start`, `waiting`,
-`scan`, `released`, `break_end`, `postpone`, `credited`, `held`, `off`, `on`.
+`scan`, `released`, `break_end`, `postpone`, `credited`, `rescue`, `held`,
+`off`, `on`.
 The hall light is an automation on `event_type: tea` with `event_data:
 {what: break_start}`; the speaker is the same with `released`.
 
@@ -997,6 +1064,8 @@ wrong manager and reports the unit as missing:
 
     tea run                    # show the break page, for as long as a real break
     tea run 5s                 # ...or for however long you say
+    tea run 5s --hold soft     # ...without the file's strict hold, for the length of the try
+    tea run 5s --no-gate       # ...and without waiting for the tag and the walk afterwards
     tea run-warning            # show the warning toast
     tea reload                 # pick up edited settings
     tea status                 # what the running service is doing
